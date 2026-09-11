@@ -1,0 +1,68 @@
+# CI config check for esphome/store_page.yaml and the papp_loader schema.
+# Not a real device: any board with a display, touchscreen and network will do,
+# because `esphome config` only validates. Run: esphome config esphome/tests/store_page_config.yaml
+substitutions:
+  papp_font_small: montserrat_12
+
+esphome:
+  name: papp-store-config-check
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework: {type: esp-idf}
+
+psram:
+  mode: octal
+
+wifi:
+  ssid: config-check
+  password: config-check
+
+logger:
+
+spi:
+  clk_pin: 12
+  mosi_pin: 11
+  miso_pin: 13
+
+display:
+  - platform: ili9xxx
+    id: main_display
+    model: ILI9341
+    cs_pin: 10
+    dc_pin: 9
+    invert_colors: false
+    auto_clear_enabled: false
+    update_interval: never
+
+touchscreen:
+  - platform: xpt2046
+    id: touch_panel
+    cs_pin: 14
+    calibration: {x_min: 280, x_max: 3860, y_min: 340, y_max: 3860}
+
+external_components:
+  - source: {type: local, path: ../components}
+    components: [papp_loader]
+
+papp_loader:
+  id: papp_runtime
+  path: /sd/roms/papp/app.papp
+  display_id: main_display
+  touchscreen_id: touch_panel
+  lvgl_id: lvgl_component
+  catalog_url: https://nonasuomy.github.io/papp-conversions/
+
+lvgl:
+  id: lvgl_component
+  pages:
+    - id: main_page
+      widgets:
+        - button:
+            widgets:
+              - label: {text: "STORE"}
+            on_click:
+              - lvgl.page.show: papp_store_page
+
+packages:
+  papp_store: !include ../store_page.yaml

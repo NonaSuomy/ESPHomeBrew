@@ -1,0 +1,133 @@
+# PAPP Store page for the ESPHome papp_loader.
+#
+# Drop-in package: adds an LVGL page that lists the apps in the store and
+# launches the one you tap. Include it from your device YAML:
+#
+#   packages:
+#     papp_store: github://NonaSuomy/papp-conversions/esphome/store_page.yaml@main
+#
+# and set the catalog on your papp_loader:
+#
+#   papp_loader:
+#     id: papp_runtime
+#     catalog_url: https://nonasuomy.github.io/papp-conversions/
+#     lvgl_id: lvgl_component
+#     ...
+#
+# Expects these ids from the device YAML (override with substitutions):
+#   papp_loader  -> ${papp_loader_id}   (default papp_runtime)
+#   lvgl         -> ${papp_lvgl_id}     (default lvgl_component)
+#   fonts        -> ${papp_font_small}  (default roboto10)
+#
+# How it works: papp_loader fetches catalog_url, turns every link ending in
+# .papp into a button in the list container, and streams the app into PSRAM
+# when tapped. The file name (e.g. psram_lvgl-0.1.0.papp) is the label, so a
+# new version shows up after a refresh. The catalog reloads when the page opens,
+# on REFRESH, and every ${papp_store_refresh} while the page is on screen and no
+# app is running.
+
+substitutions:
+  papp_loader_id: papp_runtime
+  papp_lvgl_id: lvgl_component
+  papp_font_small: roboto10
+  papp_store_refresh: 10min
+  papp_store_bottom_clearance: "56"   # keeps the list above a bottom nav bar
+
+script:
+  - id: papp_store_refresh
+    mode: restart
+    then:
+      - lvgl.label.update:
+          id: papp_store_status
+          text: "Refreshing..."
+      - lambda: id(${papp_loader_id})->refresh_catalog();
+      # The loader has no "catalog loaded" callback; its HTTP timeout is 15 s.
+      # Report what the list shows once the request has had time to finish.
+      - delay: 4s
+      - lvgl.label.update:
+          id: papp_store_status
+          text: !lambda |-
+            // App entries are buttons; the loader's "No .papp files found" note is plain text.
+            unsigned n = 0;
+            const uint32_t children = lv_obj_get_child_count(id(papp_store_list));
+            for (uint32_t i = 0; i < children; i++) {
+              if (lv_obj_has_flag(lv_obj_get_child(id(papp_store_list), i), LV_OBJ_FLAG_CLICKABLE))
+                n++;
+            }
+            return n == 0 ? std::string("No apps found") : str_sprintf("%u app%s - tap to launch", n, n == 1 ? "" : "s");
+
+interval:
+  - interval: ${papp_store_refresh}
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return !id(${papp_lvgl_id})->is_paused() && lv_scr_act() == id(papp_store_page)->obj;
+          then:
+            - script.execute: papp_store_refresh
+
+lvgl:
+  pages:
+    - id: papp_store_page
+      bg_color: 0x101820
+      pad_all: 0
+      layout:
+        type: FLEX
+        flex_flow: COLUMN
+      on_load:
+        - lambda: id(${papp_loader_id})->set_catalog_container(id(papp_store_list));
+        - script.execute: papp_store_refresh
+      widgets:
+        - obj:
+            id: papp_store_header
+            width: 100%
+            height: 48
+            radius: 0
+            border_width: 0
+            bg_color: 0x1B2836
+            bg_opa: COVER
+            scrollbar_mode: "OFF"
+            pad_left: 12
+            pad_right: 12
+            layout:
+              type: FLEX
+              flex_flow: ROW
+              flex_align_main: SPACE_BETWEEN
+              flex_align_cross: CENTER
+            widgets:
+              - label:
+                  text: "PAPP STORE"
+                  text_color: 0x38BDF8
+              - label:
+                  id: papp_store_status
+                  text: ""
+                  text_color: 0x7D8FA1
+                  text_font: ${papp_font_small}
+              - button:
+                  id: papp_store_refresh_button
+                  height: 34
+                  widgets:
+                    - label:
+                        text: "REFRESH"
+                        align: CENTER
+                        text_font: ${papp_font_small}
+                  on_click:
+                    - script.execute: papp_store_refresh
+        - obj:
+            id: papp_store_list
+            width: 100%
+            flex_grow: 1
+            radius: 0
+            border_width: 0
+            bg_opa: TRANSP
+            pad_all: 10
+            pad_bottom: ${papp_store_bottom_clearance}
+            layout:
+              type: FLEX
+              flex_flow: COLUMN
+              pad_row: 8
+            widgets:
+              # Replaced by the app buttons when the catalog arrives (the loader cleans this list).
+              - label:
+                  text: "Loading catalog..."
+                  text_color: 0x7D8FA1

@@ -1,0 +1,41 @@
+# ESP bridge configuration. Copy to bridge.toml (keep it out of git) and edit.
+# The bridge refuses anything not listed here.
+
+[hub]
+url = "https://ehgi.ai/api/mcp"
+project_id = "3IDv1Ayo2F2gAuIzMSGL"          # PAPP Conversions
+token_env = "EHGI_BRIDGE_TOKEN"              # env var holding the bridge agent's token
+handle = "esp-bridge"                        # the bridge agent's handle in the project
+allowed_requesters = ["claude", "nona", "franklin"]   # who may send jobs
+
+[repo]
+# Builds from a clean checkout of this repository at the requested ref.
+url = "https://github.com/NonaSuomy/papp-conversions.git"
+path = "~/code/papp-bridge/papp-conversions"
+allowed_yaml = ["esphome/*.yaml"]
+# Building a config runs code on this machine (external components and
+# PlatformIO scripts from that ref), so allow only refs pushed by people with
+# write access. Do NOT add "pull/*": anyone on GitHub can open a PR.
+allowed_refs = ["main", "claude/*", "nona/*"]
+# Private files copied into the checkout before every build (never committed).
+[repo.extra_files]
+"esphome/secrets.yaml" = "~/code/esphome006/config/secrets.yaml"
+
+[local]
+# Optional: build your existing config directory as-is with `source=local`.
+# The team can request builds here but cannot change these files.
+dir = "~/code/esphome006/config"
+allowed_yaml = ["*.yaml"]
+
+[esphome]
+bin = "~/code/esphome006/venv/bin/esphome"
+devices = ["/dev/ttyUSB0"]                   # add the device IP for OTA, e.g. "10.13.37.60"
+timeout_config = 300
+timeout_compile = 2400
+timeout_upload = 900
+max_log_seconds = 300
+max_log_bytes = 1000000
+
+[actions]
+# Start read-only; add "upload", "run", "logs" when you're happy with it.
+enabled = ["status", "config", "compile", "upload", "logs", "run"]

@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     # The ESP-IDF image ships the riscv32-esp-elf toolchain the ESP32-P4 needs.
-    container: espressif/idf:v5.5
+    container: espressif/idf:v6.1
     steps:
       - uses: actions/checkout@v4
 

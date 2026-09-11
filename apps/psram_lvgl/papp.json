@@ -1,7 +1,7 @@
 {
   "name": "psram_lvgl",
   "title": "LVGL touch demo",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "LVGL v9 running as a PSRAM app: 400x240 canvas scaled 2x, GT911 touch, exit with the physical X button.",
   "build": "lvgl",
   "source": {

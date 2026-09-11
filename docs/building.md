@@ -46,5 +46,5 @@ python3 tools/build_papp.py psram_lvgl   # one app
 Or use the same container CI uses:
 
 ```sh
-docker run --rm -v "$PWD:/work" -w /work espressif/idf:v5.5 python3 tools/build_papp.py
+docker run --rm -v "$PWD:/work" -w /work espressif/idf:v6.1 python3 tools/build_papp.py
 ```

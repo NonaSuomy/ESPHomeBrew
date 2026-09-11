@@ -24,3 +24,10 @@ jobs:
       # generates C++ so lambdas are checked against the real widget types.
       - run: esphome config esphome/tests/store_page_config.yaml
       - run: esphome compile --only-generate esphome/tests/store_page_config.yaml
+      # define_fixup must leave exactly one ESPHOME_ENTITY_BUTTON_COUNT (the real 10).
+      - name: define_fixup removes the stray zero count
+        run: |
+          esphome compile --only-generate esphome/tests/define_fixup_check.yaml
+          lines=$(grep -h "define ESPHOME_ENTITY_BUTTON_COUNT" esphome/tests/.esphome/build/define-fixup-check/src/esphome/core/defines.h)
+          echo "$lines"
+          test "$lines" = "#define ESPHOME_ENTITY_BUTTON_COUNT 10"

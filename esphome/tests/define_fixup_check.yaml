@@ -1,0 +1,42 @@
+# CI check for esphome/components/define_fixup: a stub emits the stray
+# "#define ESPHOME_ENTITY_BUTTON_COUNT 0" next to the real count of 10, and the
+# generated defines.h must contain only the real one.
+esphome:
+  name: define-fixup-check
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework: {type: esp-idf}
+
+logger:
+
+external_components:
+  - source: {type: local, path: components}
+    components: [stray_define]
+  - source: {type: local, path: ../components}
+    components: [define_fixup]
+
+stray_define:
+define_fixup:
+
+button:
+  - platform: template
+    name: "Button 1"
+  - platform: template
+    name: "Button 2"
+  - platform: template
+    name: "Button 3"
+  - platform: template
+    name: "Button 4"
+  - platform: template
+    name: "Button 5"
+  - platform: template
+    name: "Button 6"
+  - platform: template
+    name: "Button 7"
+  - platform: template
+    name: "Button 8"
+  - platform: template
+    name: "Button 9"
+  - platform: template
+    name: "Button 10"

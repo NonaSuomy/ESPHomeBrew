@@ -1,4 +1,5 @@
-# CI config check for esphome/store_page.yaml and the papp_loader schema.
+# CI config check for esphome/store_page.yaml, esphome/device_control.yaml
+# and the papp_loader schema.
 # Not a real device: any board with a display, touchscreen and network will do,
 # because `esphome config` only validates. Run: esphome config esphome/tests/store_page_config.yaml
 substitutions:
@@ -19,6 +20,10 @@ wifi:
   password: config-check
 
 logger:
+
+api:
+  encryption:
+    key: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 
 spi:
   clk_pin: 12
@@ -66,3 +71,4 @@ lvgl:
 
 packages:
   papp_store: !include ../store_page.yaml
+  papp_control: !include ../device_control.yaml

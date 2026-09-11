@@ -1,0 +1,32 @@
+# Remote control for the PAPP loader over the ESPHome native API.
+#
+# Adds three API actions that the ESP bridge (tools/esp_bridge) or Home
+# Assistant can call:
+#   papp_launch(url)       stream and start a .papp from a URL
+#   papp_close()           close the running PAPP
+#   papp_refresh_catalog() reload the store catalog
+#
+# Include it from the device YAML (the device must already have `api:` with an
+# encryption key; this package only adds actions to it):
+#
+#   packages:
+#     papp_control: github://NonaSuomy/papp-conversions/esphome/device_control.yaml@main
+
+substitutions:
+  papp_loader_id: papp_runtime
+
+api:
+  actions:
+    - action: papp_launch
+      variables:
+        url: string
+      then:
+        - papp_loader.launch_url:
+            id: ${papp_loader_id}
+            url: !lambda return url;
+    - action: papp_close
+      then:
+        - lambda: id(${papp_loader_id})->request_close();
+    - action: papp_refresh_catalog
+      then:
+        - lambda: id(${papp_loader_id})->refresh_catalog();

@@ -158,5 +158,84 @@ class CommandTests(unittest.TestCase):
         self.assertEqual((code, len(out), truncated), (0, 100, True))
 
 
+STORE = "https://github.com/NonaSuomy/papp-conversions/releases/download/psram_lvgl-v0.1.1/psram_lvgl-0.1.1.papp"
+
+
+def make_api_config(tmp: Path) -> eb.Config:
+    cfg = make_config(tmp)
+    (tmp / "local" / "secrets.yaml").write_text("api_key_016: 'c2VjcmV0LWtleS1ieXRlcy0xMjM0NTY3ODkwMTI='\n")
+    cfg.secrets_files = [tmp / "local" / "secrets.yaml"]
+    cfg.api_host, cfg.api_key = "10.0.0.5", eb.load_secret_map(cfg.secrets_files)["api_key_016"]
+    cfg.allowed_url_prefixes = ["https://github.com/NonaSuomy/papp-conversions/releases/download/"]
+    cfg.enabled = [*cfg.enabled, "launch", "close", "catalog"]
+    return cfg
+
+
+class DeviceApiTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = make_api_config(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        sys.modules.pop("aioesphomeapi", None)
+
+    def req(self, text):
+        return eb.parse_request("@esp-bridge " + text, None, "esp-bridge")
+
+    def test_launch_urls_must_be_store_papps(self):
+        eb.validate(self.req(f"launch url={STORE}"), self.cfg)
+        for url in ["http://github.com/NonaSuomy/papp-conversions/releases/download/a/b.papp",
+                    "https://evil.example/x.papp",
+                    "https://github.com/NonaSuomy/papp-conversions/releases/download/a/readme.txt",
+                    "https://github.com/NonaSuomy/papp-conversions/releases/download/../../other/x.papp",
+                    ""]:
+            with self.subTest(url=url), self.assertRaises(eb.BridgeError):
+                eb.validate(self.req(f"launch url={url}"), self.cfg)
+        eb.validate(self.req("close"), self.cfg)
+
+    def test_device_actions_need_a_configured_host(self):
+        self.cfg.api_host = None
+        with self.assertRaises(eb.BridgeError):
+            eb.validate(self.req("close"), self.cfg)
+
+    def test_encryption_key_comes_from_secrets_by_name(self):
+        self.assertEqual(self.cfg.api_key, "c2VjcmV0LWtleS1ieXRlcy0xMjM0NTY3ODkwMTI=")
+
+    def test_launch_calls_the_papp_launch_api_action(self):
+        calls = []
+
+        class FakeService:
+            def __init__(self, name):
+                self.name = name
+
+        class FakeClient:
+            def __init__(self, host, port, password, *, noise_psk=None, client_info=None):
+                calls.append(("init", host, port, noise_psk))
+
+            async def connect(self, login=False):
+                calls.append(("connect", login))
+
+            async def list_entities_services(self):
+                return [], [FakeService("papp_launch"), FakeService("papp_close")]
+
+            async def execute_service(self, service, data):
+                calls.append(("execute", service.name, data))
+
+            async def disconnect(self):
+                calls.append(("disconnect",))
+
+        fake = type(sys)("aioesphomeapi")
+        fake.APIClient = FakeClient
+        sys.modules["aioesphomeapi"] = fake
+        result = eb.Runner(self.cfg).execute(self.req(f"launch url={STORE}"))
+        self.assertTrue(result.ok, result.summary)
+        self.assertIn(("init", "10.0.0.5", 6053, self.cfg.api_key), calls)
+        self.assertIn(("execute", "papp_launch", {"url": STORE}), calls)
+        self.assertEqual(calls[-1], ("disconnect",))
+        with self.assertRaises(eb.BridgeError):  # device without the package's actions
+            eb.call_device_action(self.cfg, "papp_refresh_catalog", {})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -36,6 +36,19 @@ timeout_upload = 900
 max_log_seconds = 300
 max_log_bytes = 1000000
 
+[device_api]
+# Launch/close PAPPs and refresh the store over the ESPHome native API. Needs
+# esphome/device_control.yaml on the device and the bridge running with the
+# ESPHome venv's python (it provides aioesphomeapi).
+host = "10.13.37.60"                         # the P4's IP or hostname
+port = 6053
+encryption_key_secret = "encryption_key016"  # name of the api key in secrets.yaml
+# encryption_key_env = "ESP_API_KEY"         # or read it from an env var
+allowed_url_prefixes = [
+  "https://github.com/NonaSuomy/papp-conversions/releases/download/",
+  "https://nonasuomy.github.io/papp-conversions/",
+]
+
 [actions]
 # Start read-only; add "upload", "run", "logs" when you're happy with it.
-enabled = ["status", "config", "compile", "upload", "logs", "run"]
+enabled = ["status", "config", "compile", "upload", "logs", "run", "launch", "close", "catalog"]

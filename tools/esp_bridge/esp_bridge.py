@@ -22,7 +22,12 @@ Request format (reply in any channel, mention the bridge):
     @esp-bridge upload esphome/device.yaml ref=claude/fix device=/dev/ttyUSB0
     @esp-bridge run device.yaml source=local device=10.13.37.60 seconds=90
     @esp-bridge logs device.yaml source=local device=/dev/ttyUSB0 seconds=60
+    @esp-bridge launch url=https://github.com/NonaSuomy/papp-conversions/releases/download/…/app.papp
+    @esp-bridge close
+    @esp-bridge catalog
     @esp-bridge status
+launch/close/catalog call the papp_loader API actions from esphome/device_control.yaml
+over the ESPHome native API (needs aioesphomeapi, which the ESPHome venv already has).
 Agents may instead send the same fields as message data: {"esp_bridge": {...}}.
 
 Usage:
@@ -52,7 +57,9 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ACTIONS = ("status", "config", "compile", "upload", "logs", "run")
+ACTIONS = ("status", "config", "compile", "upload", "logs", "run", "launch", "close", "catalog")
+# Bridge action -> ESPHome API action (esphome/device_control.yaml).
+DEVICE_API_ACTIONS = {"launch": "papp_launch", "close": "papp_close", "catalog": "papp_refresh_catalog"}
 NEEDS_YAML = {"config", "compile", "upload", "logs", "run"}
 NEEDS_DEVICE = {"upload", "logs", "run"}
 REF_RE = re.compile(r"^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,120}$")
@@ -87,6 +94,10 @@ class Config:
     max_log_seconds: int
     max_log_bytes: int
     secrets_files: list[Path] = field(default_factory=list)
+    api_host: str | None = None
+    api_port: int = 6053
+    api_key: str | None = None
+    allowed_url_prefixes: list[str] = field(default_factory=list)
 
     @staticmethod
     def load(path: Path, *, need_token: bool = True) -> "Config":
@@ -123,6 +134,15 @@ class Config:
         cfg.secrets_files = [p for p in [*cfg.extra_files.values(), exp(esp.get("secrets"))] if p and p.name.startswith("secrets")]
         if cfg.local_dir and (cfg.local_dir / "secrets.yaml").exists():
             cfg.secrets_files.append(cfg.local_dir / "secrets.yaml")
+        api = raw.get("device_api", {})
+        cfg.api_host = api.get("host")
+        cfg.api_port = int(api.get("port", 6053))
+        env_key = os.environ.get(api["encryption_key_env"], "") if api.get("encryption_key_env") else ""
+        cfg.api_key = env_key or load_secret_map(cfg.secrets_files).get(api.get("encryption_key_secret", "")) or None
+        cfg.allowed_url_prefixes = list(api.get("allowed_url_prefixes", [
+            "https://github.com/NonaSuomy/papp-conversions/releases/download/",
+            "https://nonasuomy.github.io/papp-conversions/",
+        ]))
         return cfg
 
 
@@ -137,6 +157,7 @@ class Request:
     source: str = "repo"
     device: str | None = None
     seconds: int = 60
+    url: str | None = None
 
 
 def parse_request(text: str, data: dict | None, handle: str) -> Request | None:
@@ -171,7 +192,8 @@ def parse_request(text: str, data: dict | None, handle: str) -> Request | None:
     except ValueError:
         raise BridgeError("`seconds` must be a whole number.")
     return Request(action=action, yaml=fields.get("yaml"), ref=fields.get("ref", "main"),
-                   source=fields.get("source", "repo").lower(), device=fields.get("device"), seconds=seconds)
+                   source=fields.get("source", "repo").lower(), device=fields.get("device"), seconds=seconds,
+                   url=fields.get("url"))
 
 
 def _inside(base: Path, rel: str) -> Path:
@@ -192,6 +214,17 @@ def validate(req: Request, cfg: Config) -> Path | None:
             raise BridgeError(f"`{req.action}` needs `device=` (allowed: {', '.join(cfg.devices) or 'none'}).")
         if req.device not in cfg.devices:
             raise BridgeError(f"Device `{req.device}` is not in this bridge's allowlist.")
+    if req.action in DEVICE_API_ACTIONS:
+        if not cfg.api_host:
+            raise BridgeError("This bridge has no [device_api] host configured.")
+        if req.action == "launch":
+            if not req.url or not req.url.startswith("https://"):
+                raise BridgeError("`launch` needs `url=https://…/app.papp`.")
+            if not any(req.url.startswith(p) for p in cfg.allowed_url_prefixes):
+                raise BridgeError(f"That URL is not in the allowed prefixes ({', '.join(cfg.allowed_url_prefixes)}).")
+            if not req.url.lower().endswith(".papp") or ".." in req.url or any(c.isspace() for c in req.url):
+                raise BridgeError("`url` must point at a .papp file.")
+        return None
     if req.action in {"logs", "run"} and not 5 <= req.seconds <= cfg.max_log_seconds:
         raise BridgeError(f"`seconds` must be between 5 and {cfg.max_log_seconds}.")
     if req.action not in NEEDS_YAML:
@@ -253,10 +286,60 @@ def load_secret_values(files: list[Path]) -> list[str]:
     return sorted(set(values), key=len, reverse=True)
 
 
+def load_secret_map(files: list[Path]) -> dict[str, str]:
+    found: dict[str, str] = {}
+    for path in files:
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                m = re.match(r"^\s*([A-Za-z0-9_.-]+)\s*:\s*(.+?)\s*$", line)
+                if m and not m.group(2).startswith("#"):
+                    found.setdefault(m.group(1), m.group(2).strip().strip("'\""))
+        except OSError:
+            continue
+    return found
+
+
 def mask(text: str, secrets: list[str]) -> str:
     for value in secrets:
         text = text.replace(value, "***")
     return text
+
+
+# ── device API (papp_loader actions over the ESPHome native API) ────────────
+
+
+def call_device_action(cfg: Config, action: str, data: dict[str, str], timeout: float = 20.0) -> None:
+    """Execute an ESPHome API action on the configured device."""
+    import asyncio
+    import inspect
+
+    try:
+        from aioesphomeapi import APIClient
+    except ImportError as error:
+        raise BridgeError("aioesphomeapi is missing; run the bridge with the ESPHome venv's python.") from error
+
+    async def go() -> None:
+        client = APIClient(cfg.api_host, cfg.api_port, None, noise_psk=cfg.api_key, client_info="esp-bridge")
+        await client.connect(login=True)
+        try:
+            _, services = await client.list_entities_services()
+            service = next((s for s in services if s.name == action), None)
+            if service is None:
+                raise BridgeError(f"The device has no `{action}` API action. Include esphome/device_control.yaml.")
+            result = client.execute_service(service, data)
+            if inspect.isawaitable(result):
+                await result
+        finally:
+            await client.disconnect()
+
+    try:
+        asyncio.run(asyncio.wait_for(go(), timeout))
+    except BridgeError:
+        raise
+    except asyncio.TimeoutError as error:
+        raise BridgeError(f"The device at {cfg.api_host} did not answer within {timeout:.0f}s.") from error
+    except Exception as error:  # noqa: BLE001 - connection/auth problems are reported, not fatal
+        raise BridgeError(f"Device API call failed: {type(error).__name__}: {error}") from error
 
 
 # ── running jobs ────────────────────────────────────────────────────────────
@@ -344,6 +427,12 @@ class Runner:
             devices = ", ".join(self.cfg.devices) or "none"
             return JobResult(True, f"Bridge `@{self.cfg.handle}` is up. Actions: {enabled}. Devices: {devices}.", "", 0.0)
         base = validate(req, self.cfg)
+        if req.action in DEVICE_API_ACTIONS:
+            data = {"url": req.url or ""} if req.action == "launch" else {}
+            if not self.dry_run:
+                call_device_action(self.cfg, DEVICE_API_ACTIONS[req.action], data)
+            what = f"`{req.action}`" + (f" `{req.url.rsplit('/', 1)[-1]}`" if req.url else "")
+            return JobResult(True, f"✅ {what} sent to {self.cfg.api_host}{' (dry run)' if self.dry_run else ''}.", "", time.monotonic() - start)
         assert base is not None and req.yaml is not None
         where = "local config"
         if req.source == "repo":

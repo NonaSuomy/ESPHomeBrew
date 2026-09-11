@@ -1,0 +1,26 @@
+name: ESPHome config
+
+on:
+  push:
+    branches: [main]
+    paths: ["esphome/**", ".github/workflows/esphome-config.yml"]
+  pull_request:
+    paths: ["esphome/**", ".github/workflows/esphome-config.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install esphome==2026.8.2
+      # Validates the store page package and the papp_loader schema, then
+      # generates C++ so lambdas are checked against the real widget types.
+      - run: esphome config esphome/tests/store_page_config.yaml
+      - run: esphome compile --only-generate esphome/tests/store_page_config.yaml

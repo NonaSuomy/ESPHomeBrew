@@ -83,9 +83,14 @@ jobs:
       - name: Write catalog
         run: python3 tools/make_catalog.py --repo "$REPO" --dist dist --out site
 
+      # One artifact name per attempt: a re-run keeps the earlier attempt's
+      # artifact, and deploy-pages refuses when two share a name.
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
+          name: github-pages-${{ github.run_attempt }}
 
       - id: deploy
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}

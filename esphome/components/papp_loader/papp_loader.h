@@ -1,0 +1,315 @@
+#pragma once
+
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
+#include "esphome/core/automation.h"
+#include "esphome/core/component.h"
+#include "esphome/core/log.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/display/display.h"
+#include "esphome/components/sensor/sensor.h"
+#include "esphome/components/speaker/speaker.h"
+#include "esphome/components/touchscreen/touchscreen.h"
+#ifdef PAPP_LOADER_USE_LVGL
+#include "esphome/components/lvgl/lvgl_esphome.h"
+#endif
+#ifdef PAPP_LOADER_USE_USB_HIDX
+#include "esphome/components/usb_hidx/usb_hidx.h"
+#endif
+
+#include "psram_app.h"
+
+namespace esphome {
+namespace papp_loader {
+
+class PappLoader : public Component {
+ public:
+  static constexpr uint8_t BUTTON_COUNT = PAPP_INPUT_MAX;
+
+  void set_path(const std::string &path) { this->path_ = path; }
+  void set_catalog_url(const std::string &url) { this->catalog_url_ = url; }
+  void refresh_catalog();
+  void request_launch(const std::string &path) {
+    if (path.empty()) {
+      ESP_LOGW("papp_loader", "Ignoring empty PAPP launch request");
+      return;
+    }
+    if (this->launched_) {
+      ESP_LOGW("papp_loader", "Ignoring PAPP launch while another app is running: %s", path.c_str());
+      return;
+    }
+    if (this->launch_pending_) {
+      ESP_LOGW("papp_loader", "Ignoring duplicate PAPP launch request: %s", path.c_str());
+      return;
+    }
+    this->path_ = path;
+    this->launch_pending_ = true;
+    ESP_LOGI("papp_loader", "Launch requested from menu: %s", path.c_str());
+  }
+  void request_launch_url(const std::string &url) { this->request_launch(url); }
+  void request_close() {
+    if (!this->launched_) {
+      ESP_LOGW("papp_loader", "Ignoring PAPP close request because no app is running");
+      return;
+    }
+    this->global_close_requested_ = true;
+    ESP_LOGI("papp_loader", "Close requested remotely");
+  }
+  void request_screen_stream() {
+    this->stream_enabled_ = true;
+    ESP_LOGI("papp_loader", "Screen stream enabled remotely");
+  }
+  void set_autostart(bool autostart) { this->autostart_ = autostart; }
+  void set_display(display::Display *display) { this->display_ = display; }
+  void set_touchscreen(touchscreen::Touchscreen *touchscreen) { this->touchscreen_ = touchscreen; }
+  void set_speaker(speaker::Speaker *speaker) { this->speaker_ = speaker; }
+#ifdef PAPP_LOADER_USE_LVGL
+  void set_lvgl(lvgl::LvglComponent *lvgl) { this->lvgl_ = lvgl; }
+  void set_catalog_container(lv_obj_t *container) {
+    this->catalog_container_ = container;
+    this->catalog_ui_pending_ = true;
+  }
+  void handle_launcher_controls_();
+  void set_catalog_selection_(uint16_t index);
+#endif
+  void set_toggle_button(binary_sensor::BinarySensor *sensor) { this->toggle_button_ = sensor; }
+  void set_launch_button(binary_sensor::BinarySensor *sensor) { this->launch_button_ = sensor; }
+  void set_fire_button(binary_sensor::BinarySensor *sensor) { this->fire_button_ = sensor; }
+  void set_touch_button(binary_sensor::BinarySensor *sensor) { this->touch_button_ = sensor; }
+  void set_adc_button_sensor(sensor::Sensor *sensor) { this->adc_button_sensor_ = sensor; }
+  void set_left_stick_x_sensor(sensor::Sensor *sensor) { this->left_stick_x_sensor_ = sensor; }
+  void set_left_stick_y_sensor(sensor::Sensor *sensor) { this->left_stick_y_sensor_ = sensor; }
+  void set_right_stick_x_sensor(sensor::Sensor *sensor) { this->right_stick_x_sensor_ = sensor; }
+  void set_right_stick_y_sensor(sensor::Sensor *sensor) { this->right_stick_y_sensor_ = sensor; }
+  // Called by the USB HID text sensor. Events are queued only while a PAPP is
+  // running, so launcher/menu keyboard input cannot leak into an app.
+  void enqueue_keyboard_text(const std::string &text);
+  // Called by USB HIDX sensor callbacks. Mouse reports are accumulated here
+  // because the PAPP worker and USB host run concurrently.
+  void enqueue_mouse_delta(float dx, float dy);
+#ifdef PAPP_LOADER_USE_USB_HIDX
+  void set_usb_hidx(usb_hidx::USBHIDXComponent *usb_hidx) { this->usb_hidx_ = usb_hidx; }
+#endif
+  void set_button(uint8_t index, binary_sensor::BinarySensor *sensor) {
+    if (index < BUTTON_COUNT)
+      this->buttons_[index] = sensor;
+  }
+
+  float get_setup_priority() const override { return setup_priority::LATE; }
+  void setup() override;
+  void loop() override;
+  void dump_config() override;
+
+  static PappLoader *active() { return active_; }
+
+  // Static callbacks installed in the C ABI table used by the PAPP.
+  static uint16_t *svc_display_get_framebuffer();
+  static uint16_t *svc_display_get_emu_buffer();
+  static void svc_display_flush();
+  static void svc_display_emu_flush();
+  static void svc_display_clear(uint16_t color);
+  static void svc_display_set_scale(float sx, float sy);
+  static void svc_display_write_frame_rgb565(const uint16_t *buffer);
+  static void svc_display_write_frame_custom(const uint16_t *buffer, uint16_t in_w, uint16_t in_h,
+                                             float scale, bool byte_swap);
+  static void svc_display_write_rect(int x, int y, int w, int h, const uint16_t *data);
+  static int svc_sprite_blit(uint16_t *framebuf, uint32_t fb_w, uint32_t fb_h,
+                             uint32_t x, uint32_t y, const uint16_t *sprite,
+                             uint32_t sp_w, uint32_t sp_h, uint16_t colorkey);
+  static int svc_fb_copy(const uint16_t *src, uint16_t *dst, uint32_t w, uint32_t h);
+  static uint16_t *svc_png_load_rgb565(const char *path,
+                                       uint16_t *out_w, uint16_t *out_h);
+  static void svc_display_lock();
+  static void svc_display_unlock();
+  static void svc_audio_init(int sample_rate);
+  static void svc_audio_submit(short *stereo_buf, int frame_count);
+  static void svc_input_gamepad_read(papp_gamepad_state_t *state);
+  static int svc_input_l3_read();
+  static int svc_input_mouse_read(int *dx, int *dy, int *buttons);
+  static int svc_input_keyboard_read(papp_keyboard_event_t *event);
+  static int svc_touch_read(int *x, int *y);
+  static void *svc_file_open(const char *path, const char *mode);
+  static int svc_file_close(void *stream);
+  static size_t svc_file_read(void *ptr, size_t size, size_t nmemb, void *stream);
+  static size_t svc_file_write(const void *ptr, size_t size, size_t nmemb, void *stream);
+  static int svc_file_seek(void *stream, long offset, int whence);
+  static long svc_file_tell(void *stream);
+  static void *svc_mem_caps_alloc(size_t size, uint32_t caps);
+  static void *svc_mem_alloc(size_t size);
+  static void *svc_mem_calloc(size_t n, size_t size);
+  static void *svc_mem_realloc(void *ptr, size_t size);
+  static void svc_mem_free(void *ptr);
+  static int svc_log_printf(const char *fmt, ...);
+  static int svc_log_vprintf(const char *fmt, va_list args);
+  static void svc_delay_ms(int ms);
+  static int64_t svc_get_time_us();
+  static char *svc_settings_rom_path_get();
+  static void svc_settings_rom_path_set(const char *path);
+  static int32_t svc_settings_volume_get();
+  static void svc_settings_volume_set(int32_t level);
+  static int32_t svc_settings_brightness_get();
+  static void svc_settings_brightness_set(int32_t level);
+  static int svc_task_create(void (*fn)(void *), const char *name, uint32_t stack_depth, void *arg,
+                             int priority, void *out_handle, int core);
+  static void svc_task_delete(void *handle);
+  static void populate_services(app_services_t *services);
+
+ protected:
+  bool launch_();
+  bool start_loaded_app_(psram_app_handle_t app, const std::string &source);
+  static void papp_task_entry_(void *arg);
+  static void papp_load_task_entry_(void *arg);
+  static void papp_catalog_task_entry_(void *arg);
+  void finish_app_();
+  void update_catalog_ui_();
+  void flush_framebuffer_();
+  void render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t in_h, float scale, bool byte_swap);
+  void render_emu_();
+  void clear_(uint16_t color);
+  void draw_close_overlay_();
+  void clear_close_overlay_();
+  void restore_lvgl_();
+  void read_input_(papp_gamepad_state_t *state);
+  int read_mouse_(int *dx, int *dy, int *buttons);
+  int read_keyboard_(papp_keyboard_event_t *event);
+  void clear_keyboard_queue_();
+  void clear_mouse_delta_();
+  void enqueue_keyboard_event_(int key, bool down);
+  void enqueue_keyboard_tap_(int key);
+  void poll_close_button_();
+  int read_touch_(int *x, int *y);
+  void audio_init_(int sample_rate);
+  void audio_submit_(short *stereo_buf, int frame_count);
+  static void screen_stream_task_entry_(void *arg);
+  void screen_stream_task_();
+
+  static PappLoader *active_;
+
+  std::string path_;
+  display::Display *display_{nullptr};
+  touchscreen::Touchscreen *touchscreen_{nullptr};
+  speaker::Speaker *speaker_{nullptr};
+#ifdef PAPP_LOADER_USE_LVGL
+  lvgl::LvglComponent *lvgl_{nullptr};
+#endif
+#ifdef PAPP_LOADER_USE_USB_HIDX
+  usb_hidx::USBHIDXComponent *usb_hidx_{nullptr};
+#endif
+  binary_sensor::BinarySensor *buttons_[BUTTON_COUNT]{};
+  binary_sensor::BinarySensor *toggle_button_{nullptr};
+  binary_sensor::BinarySensor *launch_button_{nullptr};
+  binary_sensor::BinarySensor *fire_button_{nullptr};
+  binary_sensor::BinarySensor *touch_button_{nullptr};
+  sensor::Sensor *adc_button_sensor_{nullptr};
+  sensor::Sensor *left_stick_x_sensor_{nullptr};
+  sensor::Sensor *left_stick_y_sensor_{nullptr};
+  sensor::Sensor *right_stick_x_sensor_{nullptr};
+  sensor::Sensor *right_stick_y_sensor_{nullptr};
+
+  uint16_t *framebuffer_{nullptr};
+  // PAPP renders in its logical landscape orientation.  The Elecrow panel is
+  // mounted 180 degrees around, so direct PAPP flushes use this second PSRAM
+  // buffer to avoid mutating the app-owned framebuffer in place.
+  uint16_t *rotated_framebuffer_{nullptr};
+  // Hardware SRM output used to rotate the PAPP canvas without a CPU pixel
+  // copy.  The software buffer remains as a fallback if PPA is unavailable.
+  void *ppa_srm_client_{nullptr};
+  uint16_t *ppa_framebuffer_{nullptr};
+  uint16_t *emu_buffer_{nullptr};
+  // Optional diagnostic framebuffer published to the host over TCP. The
+  // stream is inactive unless a recorder connects to port 3232.
+  uint16_t *stream_framebuffer_{nullptr};
+  // Network writes can block. These snapshots keep stream_mutex_ confined to
+  // the short producer/consumer copy instead of the TCP transfer.
+  uint16_t *stream_frame_packet_{nullptr};
+  uint8_t *stream_audio_buffer_{nullptr};
+  uint8_t *stream_audio_packet_{nullptr};
+  size_t stream_audio_read_{0};
+  size_t stream_audio_write_{0};
+  size_t stream_audio_available_{0};
+  SemaphoreHandle_t stream_mutex_{nullptr};
+  volatile bool stream_frame_ready_{false};
+  volatile bool stream_client_connected_{false};
+  volatile bool stream_enabled_{false};
+  uint32_t stream_frame_sequence_{0};
+  TaskHandle_t stream_task_handle_{nullptr};
+  float scale_x_{1.0f};
+  float scale_y_{1.0f};
+  bool autostart_{false};
+  bool launch_pending_{false};
+  bool launched_{false};
+  bool toggle_button_state_{false};
+  bool toggle_wait_release_{false};
+  bool toggle_close_requested_{false};
+  bool launch_button_state_{false};
+  bool launch_wait_release_{false};
+  bool touch_active_{false};
+  // Set by the on-screen close control.  It is deliberately independent of
+  // the normal PAPP X/action input so every loader-backed app gets the same
+  // exit request, including apps that do not draw their own controls.
+  volatile bool global_close_requested_{false};
+  int audio_sample_rate_{0};
+  SemaphoreHandle_t display_mutex_{nullptr};
+  SemaphoreHandle_t keyboard_mutex_{nullptr};
+  portMUX_TYPE mouse_input_lock_ = portMUX_INITIALIZER_UNLOCKED;
+  int32_t mouse_dx_accum_{0};
+  int32_t mouse_dy_accum_{0};
+  // Text reports are converted to press/release pairs. Keep enough room for
+  // a short console command while Quake drains the queue on its worker task.
+  static constexpr size_t KEYBOARD_QUEUE_SIZE = 128;
+  papp_keyboard_event_t keyboard_queue_[KEYBOARD_QUEUE_SIZE]{};
+  size_t keyboard_head_{0};
+  size_t keyboard_tail_{0};
+  TaskHandle_t papp_task_handle_{nullptr};
+  TaskHandle_t papp_load_task_handle_{nullptr};
+  psram_app_handle_t app_handle_{nullptr};
+  psram_app_handle_t papp_load_handle_{nullptr};
+  std::string papp_load_source_;
+  volatile bool papp_loading_{false};
+  volatile bool papp_load_done_{false};
+  volatile int papp_load_result_{-1};
+  volatile bool papp_task_done_{false};
+  volatile int papp_task_result_{-1};
+  std::string catalog_url_;
+  std::string catalog_html_;
+  std::vector<std::pair<std::string, std::string>> catalog_entries_;
+  TaskHandle_t papp_catalog_task_handle_{nullptr};
+  volatile bool catalog_loading_{false};
+  volatile bool catalog_done_{false};
+  volatile int catalog_result_{-1};
+#ifdef PAPP_LOADER_USE_LVGL
+  lv_obj_t *catalog_container_{nullptr};
+  // Transparent LVGL hit-test shield. Direct-rendered PAPPs do not create a
+  // LVGL root object, so this prevents launcher widgets underneath them from
+  // seeing a touch release while the PAPP is active.
+  lv_obj_t *touch_modal_shield_{nullptr};
+  bool catalog_ui_pending_{false};
+  uint16_t catalog_selection_{0};
+  uint8_t launcher_direction_state_{0};
+  bool launcher_a_state_{false};
+  bool launcher_touch_state_{false};
+  bool launcher_input_armed_{false};
+#endif
+};
+
+template<typename... Ts> class LaunchUrlAction : public Action<Ts...> {
+ public:
+  explicit LaunchUrlAction(PappLoader *parent) : parent_(parent) {}
+
+  TEMPLATABLE_VALUE(std::string, url)
+
+  // ESPHome's Action::play signature changed from by-value to const-reference
+  // arguments between supported releases.  Keep this action compatible with
+  // both forms; Action::play_complex still dispatches it normally.
+  void play(const Ts &...x) { this->parent_->request_launch_url(this->url_.value(x...)); }
+
+ protected:
+  PappLoader *parent_;
+};
+
+}  // namespace papp_loader
+}  // namespace esphome

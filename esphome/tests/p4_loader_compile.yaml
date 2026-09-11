@@ -1,0 +1,92 @@
+# CI compile check: builds papp_loader for the real ESP32-P4 target with stock
+# ESPHome. Hardware blocks mirror the Elecrow ESP32-P4 AIO (MIPI-DSI 1024x600,
+# GT911, IP101 ethernet). lvgl_id is left out on purpose: the loader's LVGL path
+# calls LvglComponent::is_loop_started(), which only exists in the locally
+# modified lvgl component, not in upstream ESPHome.
+esphome:
+  name: papp-loader-p4-compile
+
+esp32:
+  variant: esp32p4
+  flash_size: 16MB
+  engineering_sample: true
+  framework:
+    type: esp-idf
+
+psram:
+  mode: hex
+  speed: 200MHz
+
+esp_ldo:
+  - channel: 3
+    voltage: 2.5V
+
+logger:
+
+ethernet:
+  type: IP101
+  mdc_pin: GPIO31
+  mdio_pin: GPIO52
+  power_pin: GPIO51
+  clk:
+    mode: CLK_EXT_IN
+    pin: GPIO50
+  phy_addr: 1
+
+i2c:
+  - id: bsp2_bus
+    sda: GPIO18
+    scl: GPIO19
+    frequency: 400kHz
+
+touchscreen:
+  - platform: gt911
+    id: touch_panel
+    i2c_id: bsp2_bus
+    address: 0x5D
+    reset_pin: GPIO40
+    interrupt_pin: GPIO41
+
+display:
+  - platform: mipi_dsi
+    id: main_display
+    model: CUSTOM
+    reset_pin: GPIO05
+    auto_clear_enabled: false
+    update_interval: never
+    lanes: 2
+    lane_bit_rate: 1000Mbps
+    color_order: rgb
+    pclk_frequency: 51MHz
+    dimensions:
+      width: 1024
+      height: 600
+    hsync_back_porch: 160
+    hsync_pulse_width: 70
+    hsync_front_porch: 160
+    vsync_back_porch: 23
+    vsync_pulse_width: 10
+    vsync_front_porch: 12
+    init_sequence:
+      - [0xB2, 0x10]
+      - [0x80, 0x8B]
+      - [0x81, 0x78]
+      - [0x82, 0x84]
+      - [0x83, 0x88]
+      - [0x84, 0xA8]
+      - [0x85, 0xE3]
+      - [0x86, 0x88]
+      - [0x11]
+
+external_components:
+  - source: {type: local, path: ../components}
+    components: [papp_loader]
+
+papp_loader:
+  id: papp_runtime
+  path: /sd/roms/papp/app.papp
+  display_id: main_display
+  touchscreen_id: touch_panel
+  catalog_url: https://nonasuomy.github.io/papp-conversions/
+  report_url: https://example.invalid/papp-report
+  report_log_bytes: 4096

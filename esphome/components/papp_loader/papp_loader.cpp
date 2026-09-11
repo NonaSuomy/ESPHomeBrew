@@ -264,6 +264,7 @@ void PappLoader::setup() {
   this->stream_mutex_ = xSemaphoreCreateMutex();
   this->display_mutex_ = xSemaphoreCreateRecursiveMutex();
   this->keyboard_mutex_ = xSemaphoreCreateMutex();
+  this->report_mutex_ = xSemaphoreCreateMutex();
   this->clear_mouse_delta_();
 
   if (this->framebuffer_ == nullptr || this->rotated_framebuffer_ == nullptr || this->ppa_framebuffer_ == nullptr || this->emu_buffer_ == nullptr ||
@@ -449,6 +450,8 @@ void PappLoader::loop() {
                  esp_err_to_name(static_cast<esp_err_t>(this->papp_load_result_)), this->papp_load_result_);
         this->papp_load_handle_ = nullptr;
         this->launched_ = false;
+        this->begin_report_(this->papp_load_source_);
+        this->send_report_("load_failed", this->papp_load_result_, this->papp_load_source_);
         return;
       }
 
@@ -569,6 +572,7 @@ bool PappLoader::start_loaded_app_(psram_app_handle_t app, const std::string &so
     return false;
 
   ESP_LOGI(TAG, "Starting PAPP in worker task: %s", source.c_str());
+  this->begin_report_(source);
 
 #ifdef PAPP_LOADER_USE_LVGL
   // LVGL must not draw over the PAPP framebuffer. Pause it from the ESPHome
@@ -617,6 +621,7 @@ bool PappLoader::start_loaded_app_(psram_app_handle_t app, const std::string &so
     this->app_handle_ = nullptr;
     this->papp_task_handle_ = nullptr;
     this->launched_ = false;
+    this->send_report_("start_failed", -1, source);
 #ifdef PAPP_LOADER_USE_LVGL
     if (this->lvgl_ != nullptr && this->lvgl_->is_loop_started())
       this->lvgl_->set_paused(false, false);
@@ -1004,6 +1009,9 @@ void PappLoader::update_catalog_ui_() {
 void PappLoader::finish_app_() {
   const int result = this->papp_task_result_;
   ESP_LOGI(TAG, "PAPP worker returned %d", result);
+  // Read before the close flags are reset below: was the app closed from the
+  // loader, or did it return on its own?
+  const bool closed_by_user = this->global_close_requested_ || this->toggle_close_requested_;
   // Stop the speaker before deleting the worker or unloading the PAPP. The
   // speaker owns asynchronous mixer/resampler tasks and must be quiescent
   // before any app-side teardown can release memory associated with a frame.
@@ -1041,6 +1049,7 @@ void PappLoader::finish_app_() {
   // full 800x480 PAPP flush here; that transfer can leave the last game frame
   // visible while the close path waits for a second display transaction.
   this->restore_lvgl_();
+  this->send_report_(closed_by_user ? "closed" : "exited", result, this->report_source_);
 }
 
 void PappLoader::clear_(uint16_t color) {
@@ -1901,6 +1910,8 @@ int PappLoader::svc_log_vprintf(const char *fmt, va_list args) {
     // monitor until a later flush. Route app logs through ESPHome's logger so
     // every PAPP gets timestamped, immediately visible serial output.
     ESP_LOGI(TAG, "PAPP: %s", buffer);
+    if (PappLoader::active_ != nullptr)
+      PappLoader::active_->append_report_log_(buffer);
   }
   return result;
 }
@@ -2142,6 +2153,152 @@ static esp_err_t http_read_exact(esp_http_client_handle_t client, uint8_t *buffe
     return ESP_FAIL;
   }
   return ESP_OK;
+}
+
+// ── Test reports (report_url) ──────────────────────────────────────────────
+// One JSON POST per app run, so a store test can be judged without someone
+// copying the serial log by hand.
+
+static void json_append_escaped(std::string *out, const std::string &value) {
+  out->push_back('"');
+  for (const char ch : value) {
+    const auto c = static_cast<unsigned char>(ch);
+    switch (c) {
+      case '"': out->append("\\\""); break;
+      case '\\': out->append("\\\\"); break;
+      case '\n': out->append("\\n"); break;
+      case '\r': out->append("\\r"); break;
+      case '\t': out->append("\\t"); break;
+      default:
+        if (c < 0x20 || c >= 0x80) {
+          // Logs are expected to be ASCII; escape anything else so the body is
+          // always valid JSON even if an app prints raw bytes.
+          char escaped[7];
+          std::snprintf(escaped, sizeof(escaped), "\\u%04x", c);
+          out->append(escaped);
+        } else {
+          out->push_back(ch);
+        }
+    }
+  }
+  out->push_back('"');
+}
+
+struct PappReport {
+  std::string url;
+  std::string body;
+};
+
+void PappLoader::begin_report_(const std::string &source) {
+  if (this->report_url_.empty() || this->report_mutex_ == nullptr)
+    return;
+  if (xSemaphoreTake(this->report_mutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
+    this->report_log_.clear();
+    this->report_source_ = source;
+    this->report_started_us_ = esp_timer_get_time();
+    xSemaphoreGive(this->report_mutex_);
+  }
+}
+
+void PappLoader::append_report_log_(const char *line) {
+  if (this->report_url_.empty() || this->report_mutex_ == nullptr || line == nullptr)
+    return;
+  // Called from the PAPP worker; never block it for long.
+  if (xSemaphoreTake(this->report_mutex_, pdMS_TO_TICKS(5)) != pdTRUE)
+    return;
+  this->report_log_.append(line);
+  if (this->report_log_.empty() || this->report_log_.back() != '\n')
+    this->report_log_.push_back('\n');
+  if (this->report_log_.size() > this->report_log_bytes_)
+    this->report_log_.erase(0, this->report_log_.size() - this->report_log_bytes_);
+  xSemaphoreGive(this->report_mutex_);
+}
+
+void PappLoader::send_report_(const char *outcome, int result, const std::string &source) {
+  if (this->report_url_.empty() || this->report_mutex_ == nullptr)
+    return;
+  if (!network::is_connected()) {
+    ESP_LOGW(TAG, "Test report not sent: network is down");
+    return;
+  }
+
+  std::string log;
+  int64_t started_us = 0;
+  if (xSemaphoreTake(this->report_mutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
+    log.swap(this->report_log_);
+    started_us = this->report_started_us_;
+    xSemaphoreGive(this->report_mutex_);
+  }
+  const int64_t runtime_ms = started_us > 0 ? (esp_timer_get_time() - started_us) / 1000 : 0;
+  const size_t slash = source.find_last_of('/');
+  const std::string file = slash == std::string::npos ? source : source.substr(slash + 1);
+  const bool is_load_error = std::strcmp(outcome, "load_failed") == 0;
+
+  auto *report = new PappReport{this->report_url_, {}};  // NOLINT(cppcoreguidelines-owning-memory)
+  std::string &body = report->body;
+  body.reserve(log.size() + 512);
+  body.append("{\"device\":");
+  json_append_escaped(&body, App.get_name());
+  body.append(",\"app\":");
+  json_append_escaped(&body, file);
+  body.append(",\"source\":");
+  json_append_escaped(&body, source);
+  body.append(",\"outcome\":");
+  json_append_escaped(&body, outcome);
+  body.append(",\"result\":");
+  body.append(std::to_string(result));
+  if (is_load_error) {
+    body.append(",\"error\":");
+    json_append_escaped(&body, esp_err_to_name(static_cast<esp_err_t>(result)));
+  }
+  body.append(",\"runtime_ms\":");
+  body.append(std::to_string(runtime_ms));
+  body.append(",\"abi\":");
+  body.append(std::to_string(PAPP_ABI_VERSION));
+  body.append(",\"log\":");
+  json_append_escaped(&body, log);
+  body.push_back('}');
+
+  // The HTTP(S) request can take seconds; keep it off the ESPHome loop.
+  if (xTaskCreatePinnedToCore(&PappLoader::report_task_entry_, "papp_report", 8192, report, 3, nullptr, 0) !=
+      pdPASS) {
+    ESP_LOGW(TAG, "Test report not sent: could not create task");
+    delete report;  // NOLINT(cppcoreguidelines-owning-memory)
+    return;
+  }
+  ESP_LOGI(TAG, "Sending test report: %s %s (result %d, %lld ms, %u log bytes)", file.c_str(), outcome, result,
+           static_cast<long long>(runtime_ms), static_cast<unsigned>(log.size()));
+}
+
+void PappLoader::report_task_entry_(void *arg) {
+  auto *report = static_cast<PappReport *>(arg);
+  esp_http_client_config_t config{};
+  config.url = report->url.c_str();
+  config.method = HTTP_METHOD_POST;
+  config.timeout_ms = HTTP_TIMEOUT_MS;
+  config.disable_auto_redirect = false;
+  config.max_redirection_count = HTTP_MAX_REDIRECTIONS;
+  config.keep_alive_enable = false;
+#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+  if (std::strncmp(report->url.c_str(), "https://", 8) == 0)
+    config.crt_bundle_attach = esp_crt_bundle_attach;
+#endif
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+  if (client == nullptr) {
+    ESP_LOGW(TAG, "Test report not sent: out of memory");
+  } else {
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, report->body.data(), static_cast<int>(report->body.size()));
+    const esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+      ESP_LOGI(TAG, "Test report sent (HTTP %d)", esp_http_client_get_status_code(client));
+    } else {
+      ESP_LOGW(TAG, "Test report failed: %s", esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
+  }
+  delete report;  // NOLINT(cppcoreguidelines-owning-memory)
+  vTaskDelete(nullptr);
 }
 
 static esp_err_t fetch_http_text(const char *url, std::string *out) {

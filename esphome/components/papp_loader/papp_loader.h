@@ -33,6 +33,10 @@ class PappLoader : public Component {
   void set_path(const std::string &path) { this->path_ = path; }
   void set_catalog_url(const std::string &url) { this->catalog_url_ = url; }
   void refresh_catalog();
+  // When set, every app run ends with a JSON test report POSTed here: the app,
+  // how it ended, its return code or load error, runtime and the tail of its log.
+  void set_report_url(const std::string &url) { this->report_url_ = url; }
+  void set_report_log_bytes(size_t bytes) { this->report_log_bytes_ = bytes; }
   void request_launch(const std::string &path) {
     if (path.empty()) {
       ESP_LOGW("papp_loader", "Ignoring empty PAPP launch request");
@@ -173,6 +177,10 @@ class PappLoader : public Component {
   void draw_close_overlay_();
   void clear_close_overlay_();
   void restore_lvgl_();
+  void begin_report_(const std::string &source);
+  void append_report_log_(const char *line);
+  void send_report_(const char *outcome, int result, const std::string &source);
+  static void report_task_entry_(void *arg);
   void read_input_(papp_gamepad_state_t *state);
   int read_mouse_(int *dx, int *dy, int *buttons);
   int read_keyboard_(papp_keyboard_event_t *event);
@@ -274,6 +282,15 @@ class PappLoader : public Component {
   volatile int papp_load_result_{-1};
   volatile bool papp_task_done_{false};
   volatile int papp_task_result_{-1};
+  // Test reports (report_url). report_log_ holds the newest app log lines, up to
+  // report_log_bytes_; the PAPP worker appends and the loop task sends, so both
+  // go through report_mutex_.
+  std::string report_url_;
+  size_t report_log_bytes_{4096};
+  std::string report_log_;
+  std::string report_source_;
+  int64_t report_started_us_{0};
+  SemaphoreHandle_t report_mutex_{nullptr};
   std::string catalog_url_;
   std::string catalog_html_;
   std::vector<std::pair<std::string, std::string>> catalog_entries_;

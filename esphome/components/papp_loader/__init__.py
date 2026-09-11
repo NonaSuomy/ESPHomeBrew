@@ -11,6 +11,8 @@ AUTO_LOAD = ["binary_sensor", "sensor", "speaker", "touchscreen"]
 
 CONF_AUTOSTART = "autostart"
 CONF_CATALOG_URL = "catalog_url"
+CONF_REPORT_URL = "report_url"
+CONF_REPORT_LOG_BYTES = "report_log_bytes"
 CONF_DISPLAY_ID = "display_id"
 CONF_TOUCHSCREEN_ID = "touchscreen_id"
 CONF_SPEAKER_ID = "speaker_id"
@@ -60,6 +62,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Required(CONF_PATH): cv.string,
         cv.Optional(CONF_AUTOSTART, default=False): cv.boolean,
         cv.Optional(CONF_CATALOG_URL): cv.string,
+        # POST a JSON test report here after every app run (see docs/feedback.md).
+        cv.Optional(CONF_REPORT_URL): cv.url,
+        cv.Optional(CONF_REPORT_LOG_BYTES, default=4096): cv.int_range(min=256, max=32768),
         cv.Required(CONF_DISPLAY_ID): cv.use_id(display.Display),
         cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
         cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
@@ -100,6 +105,9 @@ async def to_code(config):
     cg.add(var.set_autostart(config[CONF_AUTOSTART]))
     if catalog_url := config.get(CONF_CATALOG_URL):
         cg.add(var.set_catalog_url(catalog_url))
+    if report_url := config.get(CONF_REPORT_URL):
+        cg.add(var.set_report_url(report_url))
+        cg.add(var.set_report_log_bytes(config[CONF_REPORT_LOG_BYTES]))
 
     display_var = await cg.get_variable(config[CONF_DISPLAY_ID])
     cg.add(var.set_display(display_var))

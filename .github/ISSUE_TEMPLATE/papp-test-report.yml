@@ -1,0 +1,41 @@
+name: PAPP test report
+description: Report how an app from the store ran on a device.
+title: "[test] <app>-<version>: <worked / failed>"
+labels: ["test-report"]
+body:
+  - type: input
+    id: app
+    attributes:
+      label: App file
+      description: The name shown on the store button.
+      placeholder: psram_lvgl-0.1.0.papp
+    validations:
+      required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Result
+      options:
+        - Worked
+        - Partly worked
+        - Failed to load
+        - Crashed or froze
+        - Launched but wrong behaviour
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: Elecrow ESP32-P4 AIO (800x480 LCD)
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you saw, and what you expected.
+  - type: textarea
+    id: log
+    attributes:
+      label: Device log
+      description: The serial or ESPHome log from launching the app until it closed. Lines starting `[papp_loader]` matter most.
+      render: text

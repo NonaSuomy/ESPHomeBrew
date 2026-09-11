@@ -1,0 +1,91 @@
+name: Publish store
+
+# After "Build PAPPs" succeeds on main: one GitHub Release per app version
+# (tag <name>-v<version>, asset <name>-<version>.papp), then the Pages catalog
+# the device's papp_loader catalog_url points at.
+on:
+  workflow_run:
+    workflows: [Build PAPPs]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Build PAPPs run to publish (default: latest successful on main)"
+        required: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+  actions: read
+
+concurrency:
+  group: publish-store
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick the build run
+        id: run
+        shell: bash
+        run: |
+          id="${{ github.event.workflow_run.id || inputs.run_id }}"
+          if [ -z "$id" ]; then
+            id=$(gh run list -R "$REPO" --workflow build-papps.yml --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "sha=$(gh run view "$id" -R "$REPO" --json headSha --jq .headSha)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: papps
+          path: dist
+          run-id: ${{ steps.run.outputs.id }}
+          github-token: ${{ github.token }}
+
+      - name: Release each app version
+        shell: bash
+        run: |
+          python3 - <<'EOF' > releases.tsv
+          import json
+          for a in json.load(open("dist/build.json"))["apps"]:
+              print(f"{a['name']}\t{a['version']}\t{a['sha256']}\t{a['title']}")
+          EOF
+          while IFS=$'\t' read -r name version sha title; do
+            tag="$name-v$version"; asset="$name-$version.papp"
+            cp "dist/$name.papp" "$asset"
+            if gh release view "$tag" -R "$REPO" > /dev/null 2>&1; then
+              published=$(gh release view "$tag" -R "$REPO" --json body --jq .body | sed -n 's/^sha256: //p' | head -1)
+              if [ "$published" = "$sha" ]; then
+                echo "$tag already published with the same binary"
+                continue
+              fi
+              echo "::error::$tag is already published with a different binary ($published). Bump \"version\" in apps/$name/papp.json."
+              exit 1
+            fi
+            gh release create "$tag" "$asset" -R "$REPO" --target "${{ steps.run.outputs.sha }}" \
+              --title "$title $version" \
+              --notes "$(printf 'PAPP `%s` %s, built by CI from %s.\n\nsha256: %s\n' "$name" "$version" "${{ steps.run.outputs.sha }}" "$sha")"
+          done < releases.tsv
+
+      - name: Write catalog
+        run: python3 tools/make_catalog.py --repo "$REPO" --dist dist --out site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

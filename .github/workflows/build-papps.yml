@@ -1,0 +1,51 @@
+name: Build PAPPs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # The ESP-IDF image ships the riscv32-esp-elf toolchain the ESP32-P4 needs.
+    container: espressif/idf:v5.5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache upstream sources
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: papp-sources-${{ hashFiles('apps/*/papp.json', 'tools/build_papp.py') }}
+          restore-keys: papp-sources-
+
+      - name: Build every app
+        shell: bash
+        run: |
+          git config --global --add safe.directory '*'
+          . "$IDF_PATH/export.sh" > /dev/null
+          riscv32-esp-elf-gcc --version | head -1
+          python3 tools/build_papp.py --out dist
+
+      - name: Summary
+        shell: bash
+        run: |
+          python3 - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          apps = json.load(open("dist/build.json"))["apps"]
+          print("| App | Version | Size | text | bss | sha256 |")
+          print("|---|---|---:|---:|---:|---|")
+          for a in apps:
+              print(f"| {a['file']} | {a['version']} | {a['size']:,} | {a['text_size']:,} | {a['bss_size']:,} | `{a['sha256'][:16]}` |")
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: papps
+          path: dist/
+          if-no-files-found: error

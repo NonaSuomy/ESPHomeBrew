@@ -37,6 +37,9 @@ void papp_close_all_files(void);
 // Stop the sound mixer task (papp_sound.cpp); safe when it never started.
 void papp_sound_shutdown(void);
 
+// Stop the presenter task (papp_video.cpp); safe when it never started.
+void papp_video_shutdown(void);
+
 // Microseconds since boot.
 long long papp_time_us(void);
 

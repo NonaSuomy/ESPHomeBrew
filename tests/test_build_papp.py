@@ -119,6 +119,67 @@ class CustomRecipeTests(unittest.TestCase):
             bp.custom_units(self.manifest(groups=[{"dir": "app/inc", "files": ["x.h"]}]), self.root, self.build)
 
 
+class PortRecipeTests(unittest.TestCase):
+    """Globs, local: paths, patches and packing, used by ports such as Red Alert."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "src"
+        for rel in ["common/a.cpp", "common/b.cpp", "common/win.cpp", "common/x.h"]:
+            (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / rel).write_text("int x;\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_globs_expand_and_exclude(self):
+        group = {"dir": "common", "files": ["*.cpp", "a.cpp"], "exclude": ["win.cpp"]}
+        self.assertEqual(bp.group_files(self.root, group), ["a.cpp", "b.cpp"])
+        with self.assertRaises(ValueError):
+            bp.group_files(self.root, {"dir": "common", "files": ["*.cpp"], "exclude": ["missing.cpp"]})
+
+    def test_local_paths_resolve_inside_this_repository(self):
+        self.assertEqual(bp.source_file(self.root, "local:tools/build_papp.py"), (bp.ROOT / "tools/build_papp.py").resolve())
+        with self.assertRaises(ValueError):
+            bp.source_file(self.root, "local:../outside")
+        with self.assertRaises(ValueError):
+            bp.source_file(self.root, "../outside")
+
+    def test_pack_matches_the_upstream_format(self):
+        packed = bp.pack_papp(b"\x01\x02\x03\x04", 64)
+        self.assertEqual(bp.parse_header(packed)["bss_size"], 64)
+        self.assertEqual(bp.parse_header(packed)["text_size"], 4)
+        self.assertEqual(packed[:8], struct.pack("<II", bp.PAPP_MAGIC, 1))
+        self.assertEqual(len(packed), 36)
+
+    def test_patches_apply_to_a_clean_checkout_every_time(self):
+        import subprocess
+        repo = Path(self.tmp.name) / "up"
+        repo.mkdir()
+        run = lambda *a: subprocess.run(["git", *a], cwd=repo, check=True, capture_output=True)  # noqa: E731
+        run("init", "-q")
+        run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base")
+        (repo / "f.txt").write_text("one\n")
+        run("add", "f.txt")
+        run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "f")
+        local = Path(self.tmp.name) / "repo"
+        (local / "ports/demo/patches").mkdir(parents=True)
+        (local / "ports/demo/patches/0001-two.patch").write_text(
+            "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-one\n+two\n")
+        pattern = "local:ports/demo/patches/*.patch"
+        saved, bp.ROOT = bp.ROOT, local
+        try:
+            self.assertEqual(bp.apply_patches(repo, [pattern]), ["0001-two.patch"])
+            self.assertEqual((repo / "f.txt").read_text(), "two\n")
+            # A second build starts from the pinned files again instead of failing.
+            self.assertEqual(bp.apply_patches(repo, [pattern]), ["0001-two.patch"])
+            self.assertEqual((repo / "f.txt").read_text(), "two\n")
+            with self.assertRaises(ValueError):
+                bp.apply_patches(repo, ["local:ports/demo/patches/none-*.patch"])
+        finally:
+            bp.ROOT = saved
+
+
 class HeaderTests(unittest.TestCase):
     def test_parse_header(self):
         body = b"\x00" * 24

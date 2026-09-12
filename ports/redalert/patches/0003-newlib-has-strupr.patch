@@ -1,0 +1,20 @@
+diff --git a/common/wwstd.h b/common/wwstd.h
+--- a/common/wwstd.h
++++ b/common/wwstd.h
+@@ -260,6 +260,8 @@ inline static void _splitpath(const char* path, char* drive, char* dir, char* fn
+     }
+ }
+
++// newlib's <string.h> already declares strupr() (same behaviour).
++#ifndef __NEWLIB__
+ inline static char* strupr(char* str)
+ {
+     char* ret = str;
+@@ -269,6 +271,7 @@ inline static char* strupr(char* str)
+     }
+     return ret;
+ }
++#endif
+
+ inline static void strrev(char* str)
+ {

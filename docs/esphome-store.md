@@ -91,6 +91,37 @@ on_load:
 
 From lambdas you can also read `id(papp_runtime)->is_loading()`, `get_load_progress()` (0..1, or -1) and `get_load_status()`.
 
+## USB keyboard and mouse in apps
+
+With `usb_hidx_id` set, the loader passes USB keys and mouse/touchpad motion to the running app itself. It only needs usb_hidx's sensors to exist, with no lambdas:
+
+```yaml
+text_sensor:
+  - platform: usb_hidx
+    type: keyboard          # key presses -> the app's keyboard
+    internal: true
+sensor:
+  - platform: usb_hidx
+    type: mouse
+    x_delta: true           # mouse/touchpad motion -> the app's mouse
+    internal: true
+  - platform: usb_hidx
+    type: mouse
+    y_delta: true
+    internal: true
+binary_sensor:
+  - platform: usb_hidx
+    type: mouse
+    left_button: true       # clicks (also the K400 touchpad's)
+    internal: true
+  - platform: usb_hidx
+    type: mouse
+    right_button: true
+    internal: true
+```
+
+If your YAML already calls `enqueue_keyboard_text()` or `enqueue_mouse_delta()` from these sensors, remove those lambdas, or every key and movement arrives twice.
+
 ## Not yet verified on hardware
 
 The package has not been compiled or run on a device yet. Things to watch on the first build:

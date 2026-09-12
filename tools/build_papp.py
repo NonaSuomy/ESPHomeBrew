@@ -360,8 +360,7 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
         # Report every failing file at once (a port fixes them in batches), with
         # just the error lines so the log stays readable.
         for failure in sorted(failures)[:40]:
-            head, _, rest = failure.partition("
-")
+            head, _, rest = failure.partition("\n")
             errors = [line for line in rest.splitlines() if " error:" in line or "fatal error" in line]
             print(f"  {head}", flush=True)
             for line in errors[:8]:

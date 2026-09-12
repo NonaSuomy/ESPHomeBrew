@@ -78,6 +78,7 @@ static void* s_presenter = nullptr;
 static volatile int s_offered = 0;
 static volatile int s_dropped = 0;
 static volatile long long s_copy_us = 0;
+static long long s_wait_us = 0; // presenter: time asleep waiting for a frame
 
 static void render(const Snapshot& f, uint16_t* fb)
 {
@@ -142,10 +143,11 @@ static void log_rate(long long convert_us, long long flush_us)
         const int offered = s_offered - offered_at_start;
         const long long copy = s_copy_us - copy_at_start;
         papp_svc->log_printf("RA: %d fps shown, %d fps from the game (%d dropped); per frame: copy %lld us, "
-                             "convert %lld us, flush %lld us\n",
+                             "convert %lld us, flush %lld us; presenter waited %lld ms\n",
                              (int)(shown * 1000000LL / elapsed), (int)(offered * 1000000LL / elapsed),
                              s_dropped - dropped_at_start, offered > 0 ? copy / offered : 0,
-                             total_convert / shown, total_flush / shown);
+                             total_convert / shown, total_flush / shown, s_wait_us / 1000);
+        s_wait_us = 0;
         window = now;
         shown = 0;
         total_convert = total_flush = 0;
@@ -173,7 +175,9 @@ static void presenter_task(void*)
     while (!s_presenter_quit) {
         if (!s_snap_ready) {
             // delay_ms() below one tick (10 ms) is only a yield: sleep a tick.
+            const long long t = papp_time_us();
             papp_svc->delay_ms(10);
+            s_wait_us += papp_time_us() - t;
             continue;
         }
         __atomic_thread_fence(__ATOMIC_ACQUIRE);

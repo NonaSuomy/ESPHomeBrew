@@ -210,9 +210,11 @@ static void papp_present(const unsigned char* pixels, int w, int h)
     if (s_presenter == nullptr && s_presenter_done) {
         s_presenter_quit = false;
         s_presenter_done = false;
-        // Priority 1 like ESPHome's loop on core 1, so the two share the core
-        // and touch/network keep running while frames are converted.
-        if (papp_svc->task_create(presenter_task, "ra_present", 8 * 1024, nullptr, 1, &s_presenter, 1) != 0) {
+        // Core 1, priority 3: above ESPHome's loop (1), which otherwise kept
+        // it waiting (the intro showed 2-7 of 15 fps while the presenter sat
+        // ready), and below the audio tasks. It sleeps between frames, so the
+        // loop still gets its turn.
+        if (papp_svc->task_create(presenter_task, "ra_present", 8 * 1024, nullptr, 3, &s_presenter, 1) != 0) {
             s_presenter = nullptr;
             papp_svc->log_printf("RA: no presenter task, presenting on the game task\n");
         }

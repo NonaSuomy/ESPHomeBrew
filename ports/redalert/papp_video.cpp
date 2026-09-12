@@ -157,10 +157,25 @@ public:
         const int oy = (CANVAS_H - h) / 2 > 0 ? (CANVAS_H - h) / 2 : 0;
         const int cw = w < CANVAS_W ? w : CANVAS_W;
         const int ch = h < CANVAS_H ? h : CANVAS_H;
+        // Both buffers are in PSRAM: move 4 pixels per 32-bit read and two
+        // 32-bit writes instead of byte/halfword accesses (the byte loop took
+        // ~16 ms per 640x400 frame).
+        const bool words = ((w | cw | ox) & 3) == 0 && (((uintptr_t)pixels | (uintptr_t)fb) & 3) == 0;
         for (int y = 0; y < ch; y++) {
             const unsigned char* src = pixels + y * w;
             uint16_t* dst = fb + (oy + y) * CANVAS_W + ox;
-            for (int x = 0; x < cw; x++) {
+            int x = 0;
+            if (words) {
+                const uint32_t* __restrict s4 = reinterpret_cast<const uint32_t*>(src);
+                uint32_t* __restrict d2 = reinterpret_cast<uint32_t*>(dst);
+                for (; x < cw; x += 4) {
+                    const uint32_t p = *s4++;
+                    d2[0] = s_palette[p & 0xFF] | (uint32_t)s_palette[(p >> 8) & 0xFF] << 16;
+                    d2[1] = s_palette[(p >> 16) & 0xFF] | (uint32_t)s_palette[p >> 24] << 16;
+                    d2 += 2;
+                }
+            }
+            for (; x < cw; x++) {
                 dst[x] = s_palette[src[x]];
             }
         }

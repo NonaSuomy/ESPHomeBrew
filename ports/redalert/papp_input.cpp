@@ -304,6 +304,11 @@ extern "C" void papp_input_poll(void)
     }
     last = now;
     papp_svc->delay_ms(1);
+    static long long last_check = 0;
+    if (now - last_check > 2000000) {
+        last_check = now;
+        papp_heap_check();
+    }
     if (s_keyboard != nullptr) {
         s_keyboard->Poll();
     }

@@ -34,6 +34,9 @@ int papp_close_requested(void);
 void papp_free_all_memory(void);
 void papp_close_all_files(void);
 
+// Check every heap block's guards and log damaged ones (game task only).
+void papp_heap_check(void);
+
 // Stop the sound mixer task (papp_sound.cpp); safe when it never started.
 void papp_sound_shutdown(void);
 

@@ -116,7 +116,7 @@ static void mixer_task(void*)
     static int16_t out[MIX_FRAMES * 2];
     long long anchor_us = 0;   // when the current run of audio started
     long long frames_out = 0;  // frames submitted since anchor_us
-    long long idle_since = 0;  // when the last run ended (0: running)
+    long long idle_since = 0;  // when the silence began (0: something is playing)
     while (!s_quit) {
         bool any = false;
         memset(acc, 0, sizeof(acc));
@@ -132,12 +132,17 @@ static void mixer_task(void*)
                 unlock(st);
             }
         }
-        if (!any) {
-            if (frames_out != 0) {
-                idle_since = papp_time_us();
-            }
+        // Nothing playing: keep sending silence. ESPHome's speaker chain
+        // stops itself soon after its input runs dry, and restarting it drops
+        // the next sound and stutters the game. Only a long silence (a menu)
+        // lets it idle.
+        if (any) {
+            idle_since = 0;
+        } else if (idle_since == 0) {
+            idle_since = papp_time_us();
+        } else if (papp_time_us() - idle_since > 10000000) {
             frames_out = 0; // the next sound starts a new run
-            papp_svc->delay_ms(10); // nothing to play: let the speaker idle
+            papp_svc->delay_ms(10);
             continue;
         }
         for (int i = 0; i < MIX_FRAMES * 2; i++) {
@@ -149,12 +154,11 @@ static void mixer_task(void*)
         const long long now = papp_time_us();
         const long long played_us = frames_out * 1000000LL / s_out_rate;
         if (frames_out == 0 || now - anchor_us > played_us + 250000) {
-            // A new run, or we fell far behind: start over from now. After a
-            // long silence the speaker chain may have stopped itself.
-            if (idle_since != 0 && now - idle_since > 1000000) {
+            // A new run (after a long silence the speaker chain has stopped
+            // itself), or we fell far behind: start over from now.
+            if (frames_out == 0) {
                 papp_svc->audio_init(s_out_rate);
             }
-            idle_since = 0;
             anchor_us = now;
             frames_out = 0;
         } else if (played_us - (now - anchor_us) > LEAD_US) {

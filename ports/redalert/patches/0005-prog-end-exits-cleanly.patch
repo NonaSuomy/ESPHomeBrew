@@ -1,0 +1,19 @@
+diff --git a/redalert/startup.cpp b/redalert/startup.cpp
+index 0c4320a..2ea1e5f 100644
+--- a/redalert/startup.cpp
++++ b/redalert/startup.cpp
+@@ -623,7 +623,14 @@ void Prog_End(const char* why, bool fatal)
+         GlyphX_Debug_Print(why);
+     }
+     if (fatal) {
++#ifdef PAPP_APP_SIDE
++        // A deliberate null write crashes the whole device here; say why and
++        // go back to the loader instead.
++        printf("Prog_End: %s\n", why ? why : "fatal error");
++        exit(EXIT_FAILURE);
++#else
+         *((int*)0) = 0;
++#endif
+     }
+
+     if (Session.Type == GAME_GLYPHX_MULTIPLAYER) {

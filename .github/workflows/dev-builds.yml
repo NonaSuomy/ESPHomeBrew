@@ -1,8 +1,9 @@
 name: Dev builds
 
 # Work-in-progress apps ("publish": false in papp.json) are not released or
-# listed in the store. For testing on a device, pushes to claude/* and nona/*
-# branches upload them to the "dev-builds" prerelease at stable URLs such as
+# listed in the store; store apps still being worked on set "dev_build": true.
+# For testing on a device, pushes to claude/* and nona/* branches upload both
+# to the "dev-builds" prerelease at stable URLs such as
 #   https://github.com/<owner>/<repo>/releases/download/dev-builds/psram_redalert.papp
 # The ESP bridge serves those to the device over the LAN (the device cannot
 # verify github.com's TLS chain): @esp-bridge launch url=<that URL>
@@ -41,7 +42,7 @@ jobs:
         run: |
           git config --global --add safe.directory '*'
           . "$IDF_PATH/export.sh" > /dev/null
-          apps=$(python3 -c 'import json, pathlib; print(" ".join(p.parent.name for p in sorted(pathlib.Path("apps").glob("*/papp.json")) if json.loads(p.read_text()).get("publish", True) is False))')
+          apps=$(python3 -c 'import json, pathlib; print(" ".join(p.parent.name for p in sorted(pathlib.Path("apps").glob("*/papp.json")) if (m := json.loads(p.read_text())).get("publish", True) is False or m.get("dev_build")))')
           echo "apps=$apps" >> "$GITHUB_OUTPUT"
           if [ -z "$apps" ]; then echo "No work-in-progress apps."; exit 0; fi
           python3 tools/build_papp.py --out dist $apps

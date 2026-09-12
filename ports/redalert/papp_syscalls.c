@@ -148,6 +148,26 @@ void *_sbrk_r(struct _reent *r, ptrdiff_t incr) { (void)r; return _sbrk(incr); }
 
 // ── Files: fds 3.. are loader file handles ─────────────────────────────────
 
+// The game builds paths like "/sd/roms/redalert/./MAIN.MIX" (its data folder
+// is the "." CD volume). FATFS does not resolve "." components, so drop them,
+// and trailing slashes, before a path reaches the loader.
+static const char *clean_path(const char *path, char *out, size_t size)
+{
+    size_t n = 0;
+    for (const char *p = path; *p != '\0' && n < size - 1; p++) {
+        if (*p == '/' && p[1] == '.' && (p[2] == '/' || p[2] == '\0')) {
+            p++;
+            continue;
+        }
+        out[n++] = *p;
+    }
+    while (n > 1 && out[n - 1] == '/') {
+        n--;
+    }
+    out[n] = '\0';
+    return out;
+}
+
 #define MAX_FDS 32
 static void *s_files[MAX_FDS];
 
@@ -192,6 +212,8 @@ int _open(const char *path, int flags, int mode)
         errno = EMFILE;
         return -1;
     }
+    char clean[256];
+    path = clean_path(path, clean, sizeof(clean));
     void *fp = papp_svc->file_open(path, open_mode(flags));
     if (fp == NULL && (flags & O_CREAT) && (flags & O_ACCMODE) == O_RDWR) {
         fp = papp_svc->file_open(path, "w+b");  // "r+b" needs the file to exist
@@ -287,11 +309,37 @@ int _fstat(int fd, struct stat *st)
     return 0;
 }
 
+// The loader has no stat() or directory listing, so a folder counts as a
+// directory when one of the game's data files opens inside it. The game only
+// asks about its data folders: the data folder itself (".") and the CD
+// folders "allied", "soviet", ... (Change_Local_Dir). Without this every
+// folder looked missing and starting a mission failed in Force_CD_Available.
+static int is_data_directory(const char *dir)
+{
+    static const char *const probes[] = {"MAIN.MIX", "REDALERT.MIX"};
+    for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+        char probe[300];
+        snprintf(probe, sizeof(probe), "%s/%s", dir, probes[i]);
+        void *fp = papp_svc->file_open(probe, "rb");
+        if (fp != NULL) {
+            papp_svc->file_close(fp);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int _stat(const char *path, struct stat *st)
 {
     memset(st, 0, sizeof(*st));
+    char clean[256];
+    path = clean_path(path, clean, sizeof(clean));
     void *fp = papp_svc->file_open(path, "rb");
     if (fp == NULL) {
+        if (is_data_directory(path)) {
+            st->st_mode = S_IFDIR | 0755;
+            return 0;
+        }
         errno = ENOENT;
         return -1;
     }

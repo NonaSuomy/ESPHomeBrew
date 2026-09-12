@@ -3,8 +3,8 @@
 // soundio_common.cpp decodes the game's samples into PCM chunks of up to 8 KiB
 // and queues them per voice through the SoundImp_* calls below, from the game
 // task. A mixer task drains the voices, resamples them to the output rate and
-// hands stereo blocks to the loader's speaker. audio_submit() blocks until the
-// speaker has room, which paces the mixer.
+// hands stereo blocks to the loader's speaker, paced to real time with a small
+// lead (see LEAD_US) and with silence between sounds so the speaker stays on.
 //
 // Each voice is a small queue with one producer (the game) and one consumer
 // (the mixer). A per-voice spinlock guards the queue indices; the mixer only
@@ -117,6 +117,8 @@ static void mixer_task(void*)
     long long anchor_us = 0;   // when the current run of audio started
     long long frames_out = 0;  // frames submitted since anchor_us
     long long idle_since = 0;  // when the silence began (0: something is playing)
+    long long last_restart = 0;
+    int stalls = 0;            // audio_submit calls in a row that waited it out
     while (!s_quit) {
         bool any = false;
         memset(acc, 0, sizeof(acc));
@@ -168,10 +170,16 @@ static void mixer_task(void*)
         const long long start = papp_time_us();
         papp_svc->audio_submit(out, MIX_FRAMES);
         // A running chain takes a block at once (we stay ahead by only
-        // LEAD_US). A stopped one makes audio_submit wait out its 100 ms and
-        // take nothing, which also starves the movie player: start it again.
-        if (papp_time_us() - start > 60000) {
+        // LEAD_US). A stopped one makes every audio_submit wait out its 100 ms
+        // and take nothing, which also starves the movie player. Restart it
+        // only after several stalls in a row: start() on a chain that is merely
+        // busy (starting up) restarts it, which stutters everything.
+        const long long end = papp_time_us();
+        stalls = end - start > 60000 ? stalls + 1 : 0;
+        if (stalls >= 3 && end - last_restart > 2000000) {
             papp_svc->audio_init(s_out_rate);
+            last_restart = end;
+            stalls = 0;
         }
     }
     s_mixer_done = true;

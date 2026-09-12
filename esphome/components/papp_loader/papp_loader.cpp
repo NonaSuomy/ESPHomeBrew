@@ -1291,6 +1291,11 @@ void PappLoader::screen_stream_task_() {
     ESP_LOGI(TAG, "Diagnostic screen recorder connected");
     bool connected = true;
     while (connected) {
+      if (this->screenshot_requested_) {
+        this->screenshot_requested_ = false;
+        if (!this->send_screenshot_(client_fd))
+          break;
+      }
       if (this->stream_mutex_ == nullptr || xSemaphoreTake(this->stream_mutex_, pdMS_TO_TICKS(250)) != pdTRUE)
         continue;
       const bool ready = this->stream_frame_ready_;
@@ -1332,6 +1337,41 @@ void PappLoader::screen_stream_task_() {
     close(client_fd);
     ESP_LOGI(TAG, "Diagnostic screen recorder disconnected");
   }
+}
+
+// Sends one PAPPSS01 packet: the app's own 800x480 canvas (logical
+// orientation, the same RGB565 layout as the PAPPFB01 thumbnails), or an empty
+// 0x0 packet when no app is running. The copy lives in PSRAM only while it is
+// sent.
+bool PappLoader::send_screenshot_(int client_fd) {
+  static uint32_t screenshot_sequence = 0;
+  constexpr size_t frame_bytes = VIRTUAL_WIDTH * VIRTUAL_HEIGHT * sizeof(uint16_t);
+  uint16_t *copy = nullptr;
+  if (this->launched_ && !this->papp_loading_ && this->framebuffer_ != nullptr)
+    copy = static_cast<uint16_t *>(heap_caps_malloc(frame_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (copy != nullptr) {
+    // The app draws without this lock; holding it only keeps a flush (and its
+    // rotation into the panel buffer) from running during the copy.
+    const bool locked = this->display_mutex_ != nullptr &&
+                        xSemaphoreTakeRecursive(this->display_mutex_, pdMS_TO_TICKS(200)) == pdTRUE;
+    std::memcpy(copy, this->framebuffer_, frame_bytes);
+    if (locked)
+      xSemaphoreGiveRecursive(this->display_mutex_);
+  }
+  const uint16_t width = copy != nullptr ? VIRTUAL_WIDTH : 0;
+  const uint16_t height = copy != nullptr ? VIRTUAL_HEIGHT : 0;
+  ScreenStreamHeader header{{'P','A','P','P','S','S','0','1'}, width, height,
+                            static_cast<uint32_t>(copy != nullptr ? frame_bytes : 0), ++screenshot_sequence};
+  bool ok = send_screen_stream_bytes(client_fd, &header, sizeof(header));
+  if (ok && copy != nullptr)
+    ok = send_screen_stream_bytes(client_fd, copy, frame_bytes);
+  if (copy != nullptr) {
+    ESP_LOGI(TAG, "Screenshot sent: %ux%u", static_cast<unsigned>(width), static_cast<unsigned>(height));
+    heap_caps_free(copy);
+  } else {
+    ESP_LOGI(TAG, "Screenshot requested, but no PAPP is running");
+  }
+  return ok;
 }
 
 void PappLoader::restore_lvgl_() {

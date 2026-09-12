@@ -1,16 +1,23 @@
 # Remote control for the PAPP loader over the ESPHome native API.
 #
-# Adds three API actions that the ESP bridge (tools/esp_bridge) or Home
+# Adds four API actions that the ESP bridge (tools/esp_bridge) or Home
 # Assistant can call:
 #   papp_launch(url)       stream and start a .papp from a URL
 #   papp_close()           close the running PAPP
 #   papp_refresh_catalog() reload the store catalog
+#   papp_screenshot()      send one 800x480 capture of the running PAPP to the
+#                          diagnostic stream on TCP port 3232 (bridge `screenshot`)
 #
-# Include it from the device YAML (the device must already have `api:` with an
-# encryption key; this package only adds actions to it):
+# Include it from the device YAML (the device must already have `api:`; this
+# package only adds actions to it). The long form with refresh: 0s picks up new
+# actions at once; the short github:// form is re-downloaded only once a day.
 #
 #   packages:
-#     papp_control: github://NonaSuomy/papp-conversions/esphome/device_control.yaml@main
+#     papp_control:
+#       url: https://github.com/NonaSuomy/papp-conversions
+#       ref: main
+#       files: [esphome/device_control.yaml]
+#       refresh: 0s
 
 substitutions:
   papp_loader_id: papp_runtime
@@ -30,3 +37,6 @@ api:
     - action: papp_refresh_catalog
       then:
         - lambda: id(${papp_loader_id})->refresh_catalog();
+    - action: papp_screenshot
+      then:
+        - lambda: id(${papp_loader_id})->request_screenshot();

@@ -47,6 +47,7 @@ import re
 import shlex
 import socket
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -55,12 +56,14 @@ import tomllib
 import urllib.error
 import urllib.request
 import uuid
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ACTIONS = ("status", "config", "compile", "upload", "logs", "run", "launch", "close", "catalog")
+ACTIONS = ("status", "config", "compile", "upload", "logs", "run", "launch", "close", "catalog", "screenshot")
 # Bridge action -> ESPHome API action (esphome/device_control.yaml).
-DEVICE_API_ACTIONS = {"launch": "papp_launch", "close": "papp_close", "catalog": "papp_refresh_catalog"}
+DEVICE_API_ACTIONS = {"launch": "papp_launch", "close": "papp_close", "catalog": "papp_refresh_catalog",
+                      "screenshot": "papp_screenshot"}
 NEEDS_YAML = {"config", "compile", "upload", "logs", "run"}
 NEEDS_DEVICE = {"upload", "logs", "run"}
 REF_RE = re.compile(r"^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,120}$")
@@ -98,6 +101,7 @@ class Config:
     api_host: str | None = None
     api_port: int = 6053
     api_key: str | None = None
+    screen_port: int = 3232
     allowed_url_prefixes: list[str] = field(default_factory=list)
     token_env: str = "EHGI_BRIDGE_TOKEN"
 
@@ -144,6 +148,7 @@ class Config:
         api = raw.get("device_api", {})
         cfg.api_host = api.get("host")
         cfg.api_port = int(api.get("port", 6053))
+        cfg.screen_port = int(api.get("screen_port", 3232))
         env_key = os.environ.get(api["encryption_key_env"], "") if api.get("encryption_key_env") else ""
         cfg.api_key = env_key or load_secret_map(cfg.secrets_files).get(api.get("encryption_key_secret", "")) or None
         cfg.allowed_url_prefixes = list(api.get("allowed_url_prefixes", [
@@ -398,6 +403,77 @@ def call_device_action(cfg: Config, action: str, data: dict[str, str], timeout: 
         raise BridgeError(f"Device API call failed while {stage[0]}: {type(error).__name__}: {error}") from error
 
 
+# ── screenshots (papp_loader diagnostic stream, TCP port 3232) ──────────────
+
+STREAM_HEADER = struct.Struct("<8sHHII")         # PAPPFB01 thumbnail / PAPPSS01 screenshot
+STREAM_AUDIO_HEADER = struct.Struct("<8sIHHII")  # PAPPAU01
+
+
+def rgb565_to_png(raw: bytes, width: int, height: int) -> bytes:
+    """PNG of a papp_loader frame: little-endian 16-bit pixels, red in the low
+    5 bits and blue in the high 5 (the panel's wiring; PIL calls it BGR;16)."""
+    if len(raw) != width * height * 2:
+        raise BridgeError(f"Screenshot is {len(raw)} bytes, expected {width * height * 2}.")
+    five = bytes((v << 3) | (v >> 2) for v in range(32))
+    six = bytes((v << 2) | (v >> 4) for v in range(64))
+    pixels = memoryview(raw).cast("H")
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)  # PNG filter type 0 (none)
+        for v in pixels[y * width:(y + 1) * width]:
+            rows += bytes((five[v & 0x1F], six[(v >> 5) & 0x3F], five[v >> 11]))
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(bytes(rows), 6))
+            + chunk(b"IEND", b""))
+
+
+def read_screenshot(sock: socket.socket) -> tuple[int, int, bytes]:
+    """Read stream packets until the PAPPSS01 screenshot; thumbnails and audio are skipped."""
+    def exact(size: int) -> bytes:
+        data = bytearray()
+        while len(data) < size:
+            part = sock.recv(min(65536, size - len(data)))
+            if not part:
+                raise BridgeError("The device closed the screen stream before the screenshot arrived.")
+            data += part
+        return bytes(data)
+
+    while True:
+        magic = exact(8)
+        if magic in (b"PAPPFB01", b"PAPPSS01"):
+            _, width, height, size, _seq = STREAM_HEADER.unpack(magic + exact(STREAM_HEADER.size - 8))
+            if size != width * height * 2 or size > 4 * 1024 * 1024:
+                raise BridgeError("The device sent a malformed screen stream header.")
+            payload = exact(size)
+            if magic == b"PAPPSS01":
+                if width == 0 or height == 0:
+                    raise BridgeError("No PAPP is running on the device, so there is nothing to capture. Launch one first.")
+                return width, height, payload
+        elif magic == b"PAPPAU01":
+            header = STREAM_AUDIO_HEADER.unpack(magic + exact(STREAM_AUDIO_HEADER.size - 8))
+            exact(header[4])
+        else:
+            raise BridgeError(f"Unexpected data on the screen stream ({magic!r}). Is the device's loader up to date?")
+
+
+def capture_screenshot(cfg: Config, timeout: float = 20.0) -> tuple[int, int, bytes]:
+    """Ask the device for a screenshot and read it from its diagnostic stream."""
+    call_device_action(cfg, DEVICE_API_ACTIONS["screenshot"], {})
+    address = resolve_host(cfg.api_host, cfg.screen_port)
+    try:
+        with socket.create_connection((address, cfg.screen_port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            return read_screenshot(sock)
+    except (socket.timeout, TimeoutError) as error:
+        raise BridgeError(f"No screenshot arrived from {cfg.api_host}:{cfg.screen_port} within {timeout:.0f}s.") from error
+    except OSError as error:
+        raise BridgeError(f"Could not open the screen stream on {cfg.api_host}:{cfg.screen_port}: {error}.") from error
+
+
 # ── running jobs ────────────────────────────────────────────────────────────
 
 
@@ -407,6 +483,7 @@ class JobResult:
     summary: str
     log: str
     seconds: float
+    files: list[tuple[str, bytes, str]] = field(default_factory=list)  # (name, content, content type)
 
 
 def run_process(argv: list[str], cwd: Path, timeout: int, max_bytes: int, stop_after: int | None = None) -> tuple[int | None, str, bool]:
@@ -483,6 +560,14 @@ class Runner:
             devices = ", ".join(self.cfg.devices) or "none"
             return JobResult(True, f"Bridge `{self.cfg.handle}` is up. Actions: {enabled}. Devices: {devices}.", "", 0.0)
         base = validate(req, self.cfg)
+        if req.action == "screenshot":
+            if self.dry_run:
+                return JobResult(True, f"📸 Screenshot would be taken on {self.cfg.api_host} (dry run).", "", 0.0)
+            width, height, raw = capture_screenshot(self.cfg)
+            png = rgb565_to_png(raw, width, height)
+            name = time.strftime("screenshot-%Y%m%d-%H%M%S.png")
+            return JobResult(True, f"📸 Screenshot of the running PAPP ({width}×{height}) from {self.cfg.api_host}.", "",
+                             time.monotonic() - start, [(name, png, "image/png")])
         if req.action in DEVICE_API_ACTIONS:
             data = {"url": req.url or ""} if req.action == "launch" else {}
             if not self.dry_run:
@@ -593,11 +678,11 @@ class Hub:
                     raise RuntimeError(f"hub call {tool} failed: {error}") from error
         raise AssertionError("unreachable")
 
-    def upload(self, name: str, content: bytes) -> str | None:
+    def upload(self, name: str, content: bytes, content_type: str = "text/plain") -> str | None:
         origin = self.cfg.hub_url.split("/api/")[0]
         boundary = uuid.uuid4().hex
         body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"{name}\"\r\n"
-                f"Content-Type: text/plain\r\n\r\n").encode() + content + f"\r\n--{boundary}--\r\n".encode()
+                f"Content-Type: {content_type}\r\n\r\n").encode() + content + f"\r\n--{boundary}--\r\n".encode()
         request = urllib.request.Request(f"{origin}/api/projects/{self.cfg.project_id}/attachments", data=body, method="POST",
                                          headers={"Authorization": f"Bearer {self.cfg.token}",
                                                   "Content-Type": f"multipart/form-data; boundary={boundary}"})
@@ -660,11 +745,16 @@ def handle_event(event: dict, cfg: Config, hub: Hub, runner: Runner) -> None:
         result = JobResult(False, f"❌ `{req.action}` crashed: {type(error).__name__}: {error}", "", 0.0)
     finally:
         hub.call("set_status", {"state": "online", "note": f"ESP bridge ready ({', '.join(cfg.enabled)})"})
-    attachment = hub.upload(f"{req.action}-{int(time.time())}.log", result.log.encode()) if result.log else None
+    attachments = [hub.upload(name, content, kind) for name, content, kind in result.files]
+    if result.log:
+        attachments.append(hub.upload(f"{req.action}-{int(time.time())}.log", result.log.encode()))
+    attachments = [a for a in attachments if a]
     text = f"@{author} {result.summary}"
+    if result.files and not attachments:
+        text += " (The file could not be attached.)"
     if result.log:
         text += f"\n```\n{tail(result.log)}\n```"
-    reply(text, mentions=[author], **({"attachment_ids": [attachment]} if attachment else {}))
+    reply(text, mentions=[author], **({"attachment_ids": attachments[:6]} if attachments else {}))
 
 
 def serve(cfg: Config, dry_run: bool) -> None:

@@ -72,6 +72,7 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 | `@esp-bridge launch url=https://github.com/NonaSuomy/papp-conversions/releases/download/psram_lvgl-v0.1.1/psram_lvgl-0.1.1.papp` | Stream and start that PAPP on the device |
 | `@esp-bridge close` | Close the running PAPP |
 | `@esp-bridge catalog` | Reload the store list on the device |
+| `@esp-bridge screenshot` | Post an 800×480 PNG of the running PAPP in the thread |
 
 - **Where the code comes from.** `source=repo` (the default) builds from a clean checkout of this repository at `ref=`. `extra_files` (e.g. your `secrets.yaml`) are copied in first and never committed. `source=local` builds a file in your `[local].dir` as it is.
 - **Agents** can send the same fields as message data: `post_message { text: "@esp-bridge compile", data: { esp_bridge: { action: "compile", yaml: "esphome/device.yaml", ref: "main" } } }`.
@@ -79,18 +80,31 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 
 ## Launching and closing PAPPs on demand
 
-`launch`, `close` and `catalog` go straight to the running device over the ESPHome native API. They don't rebuild anything. They need two things:
+`launch`, `close`, `catalog` and `screenshot` go straight to the running device over the ESPHome native API. They don't rebuild anything. They need two things:
 
-1. **The device** includes the control package, which adds the API actions `papp_launch(url)`, `papp_close` and `papp_refresh_catalog` (`esphome/device_control.yaml`):
+1. **The device** includes the control package, which adds the API actions `papp_launch(url)`, `papp_close`, `papp_refresh_catalog` and `papp_screenshot` (`esphome/device_control.yaml`). Use the long form with `refresh: 0s`: the short `github://…` form is only re-downloaded once a day, so a new action can be missing for a day.
    ```yaml
    packages:
-     papp_control: github://NonaSuomy/papp-conversions/esphome/device_control.yaml@main
+     papp_control:
+       url: https://github.com/NonaSuomy/papp-conversions
+       ref: main
+       files: [esphome/device_control.yaml]
+       refresh: 0s
    ```
-   The device must already have `api:` with an encryption key. Home Assistant can call the same actions as `esphome.<device>_papp_launch`.
+   The device must already have `api:`. Home Assistant can call the same actions as `esphome.<device>_papp_launch`.
 2. **The bridge** has a `[device_api]` section: the device's `host`, and the name of its API key in `secrets.yaml` (`encryption_key_secret`). Leave that out if the device's `api:` has no encryption key. Run the bridge with the ESPHome venv's python, which already has `aioesphomeapi`.
    - **Use the device's IP for `host`**, not `name.local`. On the first live test, `launch` worked through `esp32-p4-elecrow-papp.local`, but a later `close` timed out twice. With the IP, both worked, which points at the name lookup on the bridge machine. If an action times out, the message names the step that hung: resolving the name, connecting, listing actions or running the action.
 
 `launch` only accepts `https://` URLs to a `.papp` under `[device_api].allowed_url_prefixes` (by default this repo's release downloads and its Pages site). Combine it with `logs … seconds=60` to watch what the app does.
+
+## Screenshots
+
+`@esp-bridge screenshot` shows you what a running PAPP is drawing, which is useful while porting an app. The bridge calls `papp_screenshot`. The loader then sends one copy of the app's 800×480 canvas over its diagnostic stream on TCP port 3232 (`[device_api] screen_port`), and the bridge posts it as a PNG in the thread.
+
+- It captures the PAPP canvas, the way the app drew it and the right way up. The loader's on-screen close button is not in it.
+- With no app running, the bridge says so. The ESPHome/LVGL menu can't be captured this way.
+- It needs a loader and `device_control.yaml` from after this was added, so rebuild the device once. The port only accepts a connection after an API request, and closes again when the bridge disconnects.
+- A typical porting loop: `launch`, `screenshot`, `logs … seconds=30`, `close`, then change the app and repeat.
 
 ## What it will and won't do
 

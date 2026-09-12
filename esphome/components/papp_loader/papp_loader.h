@@ -86,6 +86,14 @@ class PappLoader : public Component {
     this->stream_enabled_ = true;
     ESP_LOGI("papp_loader", "Screen stream enabled remotely");
   }
+  // One full 800x480 capture of the running PAPP's canvas, sent to the next
+  // (or current) client of the diagnostic stream on TCP port 3232 as a
+  // PAPPSS01 packet. With no app running the packet is empty (0x0).
+  void request_screenshot() {
+    this->screenshot_requested_ = true;
+    this->stream_enabled_ = true;
+    ESP_LOGI("papp_loader", "Screenshot requested remotely");
+  }
   void set_autostart(bool autostart) { this->autostart_ = autostart; }
   void set_display(display::Display *display) { this->display_ = display; }
   void set_touchscreen(touchscreen::Touchscreen *touchscreen) { this->touchscreen_ = touchscreen; }
@@ -228,6 +236,7 @@ class PappLoader : public Component {
   void audio_submit_(short *stereo_buf, int frame_count);
   static void screen_stream_task_entry_(void *arg);
   void screen_stream_task_();
+  bool send_screenshot_(int client_fd);
 
   static PappLoader *active_;
 
@@ -277,6 +286,7 @@ class PappLoader : public Component {
   volatile bool stream_frame_ready_{false};
   volatile bool stream_client_connected_{false};
   volatile bool stream_enabled_{false};
+  volatile bool screenshot_requested_{false};
   uint32_t stream_frame_sequence_{0};
   TaskHandle_t stream_task_handle_{nullptr};
   float scale_x_{1.0f};

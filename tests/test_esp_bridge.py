@@ -268,6 +268,121 @@ class DeviceApiTests(unittest.TestCase):
             eb.call_device_action(self.cfg, "papp_refresh_catalog", {})
 
 
+def fake_stream_server(packets: bytes):
+    """A one-shot TCP server on 127.0.0.1 that sends `packets` to its first client."""
+    import socket
+    import threading
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def serve():
+        client, _ = server.accept()
+        with client:
+            client.sendall(packets)
+        server.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return server.getsockname()[1]
+
+
+def stream_packet(magic: bytes, width: int, height: int, payload: bytes) -> bytes:
+    return eb.STREAM_HEADER.pack(magic, width, height, len(payload), 1) + payload
+
+
+class ScreenshotTests(unittest.TestCase):
+    # Pixels as papp_loader sends them: red in the low 5 bits, blue in the high 5.
+    RED, GREEN, BLUE, WHITE = 0x001F, 0x07E0, 0xF800, 0xFFFF
+
+    def frame(self):
+        import array
+        return array.array("H", [self.RED, self.GREEN, self.BLUE, self.WHITE]).tobytes()
+
+    def test_png_has_the_right_size_and_colours(self):
+        import struct as st
+        import zlib as zl
+        png = eb.rgb565_to_png(self.frame(), 2, 2)
+        self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+        width, height = st.unpack(">II", png[16:24])
+        self.assertEqual((width, height), (2, 2))
+        idat = png.index(b"IDAT")
+        length = st.unpack(">I", png[idat - 4:idat])[0]
+        rows = zl.decompress(png[idat + 4:idat + 4 + length])
+        self.assertEqual(rows, bytes([0, 255, 0, 0, 0, 255, 0, 0, 0, 0, 255, 255, 255, 255]))
+        with self.assertRaises(eb.BridgeError):
+            eb.rgb565_to_png(b"\x00" * 6, 2, 2)
+
+    def test_screenshot_is_read_past_thumbnails_and_audio(self):
+        audio = eb.STREAM_AUDIO_HEADER.pack(b"PAPPAU01", 22050, 2, 16, 8, 1) + b"\x00" * 8
+        packets = stream_packet(b"PAPPFB01", 1, 1, b"\x00\x00") + audio + stream_packet(b"PAPPSS01", 2, 2, self.frame())
+        port = fake_stream_server(packets)
+        import socket
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            self.assertEqual(eb.read_screenshot(sock), (2, 2, self.frame()))
+
+    def test_no_running_app_is_reported(self):
+        port = fake_stream_server(stream_packet(b"PAPPSS01", 0, 0, b""))
+        import socket
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            with self.assertRaises(eb.BridgeError) as caught:
+                eb.read_screenshot(sock)
+        self.assertIn("No PAPP is running", str(caught.exception))
+
+    def test_screenshot_job_posts_a_png(self):
+        port = fake_stream_server(stream_packet(b"PAPPSS01", 2, 2, self.frame()))
+        calls = []
+
+        class FakeService:
+            def __init__(self, name):
+                self.name = name
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def connect(self, login=False):
+                return None
+
+            async def list_entities_services(self):
+                return [], [FakeService("papp_screenshot")]
+
+            async def execute_service(self, service, data):
+                calls.append(service.name)
+
+            async def disconnect(self):
+                return None
+
+        fake = type(sys)("aioesphomeapi")
+        fake.APIClient = FakeClient
+        sys.modules["aioesphomeapi"] = fake
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = make_api_config(Path(tmp))
+                cfg.api_host, cfg.screen_port = "127.0.0.1", port
+                cfg.enabled = [*cfg.enabled, "screenshot"]
+                posted, uploaded = [], []
+
+                class FakeHub:
+                    def call(self, tool, args, timeout=90):
+                        if tool == "post_message":
+                            posted.append(args)
+                        return {}
+
+                    def upload(self, name, content, content_type="text/plain"):
+                        uploaded.append((name, content[:8], content_type))
+                        return "att-1"
+
+                eb.handle_event({"from": "claude", "from_kind": "agent", "channel": "general", "id": "m",
+                                 "text": "@esp-bridge screenshot"}, cfg, FakeHub(), eb.Runner(cfg))
+        finally:
+            sys.modules.pop("aioesphomeapi", None)
+        self.assertEqual(calls, ["papp_screenshot"])
+        self.assertEqual(uploaded[0][1:], (b"\x89PNG\r\n\x1a\n", "image/png"))
+        self.assertEqual(posted[-1]["attachment_ids"], ["att-1"])
+        self.assertIn("2×2", posted[-1]["text"])
+
+
 class DeviceStageTests(unittest.TestCase):
     def tearDown(self):
         sys.modules.pop("aioesphomeapi", None)

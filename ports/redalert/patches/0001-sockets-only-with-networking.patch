@@ -1,0 +1,14 @@
+diff --git a/redalert/function.h b/redalert/function.h
+index e48eb16..631c066 100644
+--- a/redalert/function.h
++++ b/redalert/function.h
+@@ -42,7 +42,9 @@
+ 
+ //#pragma warn -hid
+ 
++#ifdef NETWORKING
+ #include "common/sockets.h" // Must come before windows.h include.
++#endif
+ 
+ #ifdef _WIN32
+ //#define WIN32_LEAN_AND_MEAN

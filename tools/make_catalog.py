@@ -163,7 +163,8 @@ def main() -> int:
     parser.add_argument("--data-cache", type=Path, help="keep downloaded data files here (by sha256) between runs")
     args = parser.parse_args()
 
-    apps = json.loads((args.dist / "build.json").read_text())["apps"]
+    # Apps marked "publish": false are work in progress: built, but not in the store.
+    apps = [a for a in json.loads((args.dist / "build.json").read_text())["apps"] if a.get("publish", True)]
     page = render(args.repo, apps)
     if len(page.encode()) > MAX_CATALOG_BYTES:
         print(f"catalog is {len(page.encode())} bytes; the device reads at most {MAX_CATALOG_BYTES}", file=sys.stderr)

@@ -61,6 +61,8 @@ jobs:
           python3 - <<'EOF' > releases.tsv
           import json
           for a in json.load(open("dist/build.json"))["apps"]:
+              if not a.get("publish", True):
+                  continue  # work in progress, not released
               print(f"{a['name']}\t{a['version']}\t{a['sha256']}\t{a['title']}")
           EOF
           while IFS=$'\t' read -r name version sha title; do

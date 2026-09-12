@@ -189,13 +189,63 @@ def reproducible_env(src_root: Path) -> tuple[dict, int]:
     return {**os.environ, "SOURCE_DATE_EPOCH": str(epoch)}, epoch
 
 
+LOCAL_PREFIX = "local:"
+
+
 def source_file(root: Path, rel: str) -> Path:
-    """Resolve a manifest path inside the source checkout, refusing to leave it."""
+    """Resolve a manifest path inside the source checkout, refusing to leave it.
+
+    A path starting with "local:" is inside this repository instead (port glue
+    code, patches, a linker script), so a port can keep its own files here while
+    the upstream source is fetched at a pinned commit.
+    """
+    if rel.startswith(LOCAL_PREFIX):
+        root, rel = ROOT, rel[len(LOCAL_PREFIX):]
     root = root.resolve()
     path = (root / rel).resolve()
     if path != root and root not in path.parents:
-        raise ValueError(f"path '{rel}' leaves the source checkout")
+        raise ValueError(f"path '{rel}' leaves the {'repository' if root == ROOT.resolve() else 'source checkout'}")
     return path
+
+
+def group_files(src_root: Path, group: dict) -> list[str]:
+    """A group's file names; "*.cpp"-style entries expand in its dir, minus "exclude"."""
+    names: list[str] = []
+    for entry in group["files"]:
+        if any(c in entry for c in "*?["):
+            base = source_file(src_root, group["dir"])
+            names += sorted(p.name for p in base.glob(entry) if p.is_file())
+        else:
+            names.append(entry)
+    excluded = set(group.get("exclude", []))
+    unknown = excluded - set(names)
+    if unknown:
+        raise ValueError(f"{group['dir']}: exclude lists files that are not in the group: {sorted(unknown)}")
+    return [n for n in dict.fromkeys(names) if n not in excluded]
+
+
+def apply_patches(src_root: Path, patches: list[str]) -> list[str]:
+    """Reset the cached checkout, then apply the port's patches in order."""
+    run(["git", "checkout", "-q", "--", "."], cwd=src_root)
+    run(["git", "clean", "-q", "-fd"], cwd=src_root)
+    applied: list[str] = []
+    for pattern in patches:
+        prefix = LOCAL_PREFIX if pattern.startswith(LOCAL_PREFIX) else ""
+        directory, _, name = pattern[len(prefix):].rpartition("/")
+        matches = sorted(source_file(src_root, prefix + (directory or ".")).glob(name))
+        if not matches:
+            raise ValueError(f"no patch matches '{pattern}'")
+        for patch in matches:
+            run(["git", "apply", "--whitespace=nowarn", str(patch)], cwd=src_root)
+            applied.append(patch.name)
+    return applied
+
+
+def pack_papp(binary: bytes, bss_size: int) -> bytes:
+    """[32-byte PAPP header][flat .text+.rodata+.data], as RetroESP32-P4's pack_papp.py writes it."""
+    if not binary:
+        raise RuntimeError("empty binary")
+    return PAPP_HEADER.pack(PAPP_MAGIC, PAPP_ABI_VERSION, 0, len(binary), 0, bss_size, 0, 0) + binary
 
 
 def custom_units(manifest: dict, src_root: Path, build_dir: Path) -> tuple[list[Unit], list[str]]:
@@ -212,7 +262,7 @@ def custom_units(manifest: dict, src_root: Path, build_dir: Path) -> tuple[list[
     units: list[Unit] = []
     for group in manifest["groups"]:
         extra = [f"-I{source_file(src_root, inc)}" for inc in group.get("includes", [])]
-        for name in group["files"]:
+        for name in group_files(src_root, group):
             src = source_file(src_root, f"{group['dir']}/{name}")
             obj = build_dir / (group.get("prefix", "") + Path(name).stem + ".o")
             if src.suffix in (".cpp", ".cc", ".cxx"):
@@ -243,8 +293,16 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
     sparse = [source["path"], *SDK_PATHS]
     if build == "custom":
         sparse += [g["dir"] for g in manifest["groups"]] + manifest.get("includes", [])
+        for group in manifest["groups"]:
+            sparse += group.get("includes", [])
+    # Only upstream directories are checked out; "." as an include root and
+    # this repository's own (local:) files need nothing fetched.
+    sparse = [p for p in sparse if not p.startswith(LOCAL_PREFIX) and p not in ("", ".")]
     sdk = src_root = fetch(source["repo"], source["ref"], cache / f"src-{name}-{source['ref'][:12]}", sparse)
     app_dir = src_root / source["path"]
+    patches = apply_patches(src_root, manifest["patches"]) if manifest.get("patches") else []
+    linker_script = (source_file(src_root, manifest["linker_script"]) if manifest.get("linker_script")
+                     else sdk / "tools/psram_app.ld")
 
     cflags = CFLAGS + [f"-I{sdk / SDK_INCLUDE}", f"-I{app_dir}"]
     build_dir = cache / "build" / name
@@ -292,7 +350,7 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
         list(pool.map(lambda unit: compile_one(unit, env), units))
 
     elf = build_dir / f"{name}.elf"
-    link = [linker, *ldflags, f"-T{sdk / 'tools/psram_app.ld'}", "-o", str(elf), *[str(u.obj) for u in units], *link_tail]
+    link = [linker, *ldflags, f"-T{linker_script}", "-o", str(elf), *[str(u.obj) for u in units], *link_tail]
     run(link)
     run([SIZE, str(elf)])
 
@@ -310,7 +368,7 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
 
     out.mkdir(parents=True, exist_ok=True)
     papp = out / f"{name}.papp"
-    run([sys.executable, str(sdk / "tools/pack_papp.py"), str(binary), str(papp), "--entry-offset", "0", "--bss-size", str(bss_size)])
+    papp.write_bytes(pack_papp(binary.read_bytes(), bss_size))
 
     data = papp.read_bytes()
     header = parse_header(data)
@@ -327,6 +385,14 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
         "source": {"repo": source["repo"], "ref": source["ref"], "path": source["path"]},
         "sdk": {"repo": source["repo"], "ref": source["ref"]},
     }
+    if patches:
+        info["patches"] = patches
+    if manifest.get("linker_script"):
+        info["linker_script"] = manifest["linker_script"]
+    # Work in progress: built and kept as a CI artifact, but not released or
+    # listed in the store until "publish" is dropped.
+    if manifest.get("publish", True) is False:
+        info["publish"] = False
     if data_files:
         info["data"] = data_files
     (out / f"{name}.json").write_text(json.dumps(info, indent=2) + "\n")

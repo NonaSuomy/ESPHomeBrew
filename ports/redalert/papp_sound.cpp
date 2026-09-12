@@ -125,6 +125,7 @@ static void mixer_task(void*)
     long long last_restart = 0;
     int stalls = 0;            // audio_submit calls in a row that waited it out
     bool chain_idle = false;   // we let the speaker chain stop (a long silence)
+    while (!s_quit) {
         bool any = false;
         memset(acc, 0, sizeof(acc));
         if (!s_paused) {

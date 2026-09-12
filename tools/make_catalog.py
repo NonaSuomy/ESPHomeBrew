@@ -2,10 +2,15 @@
 """Write the store catalog (index.html + store.json) from dist/build.json.
 
 The ESPHome papp_loader reads `catalog_url` as HTML: every href ending in
-.papp becomes a button labelled with the link's file name, and absolute URLs
-are used as they are. So each app gets one link straight to its versioned
-GitHub Release asset, e.g. psram_lvgl-0.1.0.papp. The loader downloads at most
-64 KB of catalog, so the page stays small and holds no other .papp links.
+.papp becomes a button labelled with the link's file name, and relative links
+resolve against the catalog URL. Each app's .papp is copied into the site
+itself (e.g. psram_lvgl-0.1.0.papp) and linked relatively, so devices download
+from GitHub Pages. Pages uses Let's Encrypt (ISRG Root X1), which the ESP-IDF
+certificate bundle verifies; github.com release downloads chain to Sectigo's
+newer ECC root and fail verification on-device (seen on ESP-IDF 6.1). The
+GitHub Release stays the versioned archive and is linked by its tag page, which
+is not a .papp link. The loader downloads at most 64 KB of catalog, so the page
+stays small and holds no other .papp links.
 
     python3 tools/make_catalog.py --repo OWNER/REPO --dist dist --out site
 """
@@ -15,6 +20,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -30,16 +36,28 @@ def asset_name(app: dict) -> str:
 
 
 def asset_url(repo: str, app: dict) -> str:
+    """Archived copy on the GitHub Release."""
     return f"https://github.com/{repo}/releases/download/{release_tag(app)}/{asset_name(app)}"
+
+
+def pages_url(repo: str, app: dict) -> str:
+    """Where devices download it: the copy on GitHub Pages next to index.html."""
+    owner, name = repo.split("/", 1)
+    return f"https://{owner.lower()}.github.io/{name}/{asset_name(app)}"
+
+
+def release_page(repo: str, app: dict) -> str:
+    return f"https://github.com/{repo}/releases/tag/{release_tag(app)}"
 
 
 def render(repo: str, apps: list[dict]) -> str:
     rows = []
     for app in sorted(apps, key=lambda a: a["name"]):
         rows.append(
-            f'<li><a href="{html.escape(asset_url(repo, app))}">{html.escape(asset_name(app))}</a>'
+            f'<li><a href="{html.escape(asset_name(app))}">{html.escape(asset_name(app))}</a>'
             f" {html.escape(app['title'])} &middot; {app['size'] // 1024} KB"
             f" &middot; <code>{app['sha256'][:12]}</code>"
+            f' &middot; <a href="{html.escape(release_page(repo, app))}">release</a>'
             + (f"<br><small>{html.escape(app['description'])}</small>" if app.get("description") else "")
             + "</li>"
         )
@@ -75,7 +93,8 @@ def main() -> int:
                 "version": a["version"],
                 "description": a.get("description", ""),
                 "file": asset_name(a),
-                "url": asset_url(args.repo, a),
+                "url": pages_url(args.repo, a),
+                "release_url": asset_url(args.repo, a),
                 "size": a["size"],
                 "sha256": a["sha256"],
                 "abi": a["abi"],
@@ -85,6 +104,8 @@ def main() -> int:
         ]
     }
     args.out.mkdir(parents=True, exist_ok=True)
+    for a in apps:
+        shutil.copyfile(args.dist / a["file"], args.out / asset_name(a))
     (args.out / "index.html").write_text(page)
     (args.out / "store.json").write_text(json.dumps(store, indent=2) + "\n")
     print(f"catalog: {len(apps)} app(s), {len(page.encode())} bytes -> {args.out}")

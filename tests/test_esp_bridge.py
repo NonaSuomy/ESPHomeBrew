@@ -87,6 +87,12 @@ class ParseTests(unittest.TestCase):
     def test_a_lone_request_line_with_a_typo_gets_help(self):
         with self.assertRaises(eb.BridgeError):
             eb.parse_request("@esp-bridge compil", None, "esp-bridge")
+        with self.assertRaises(eb.BridgeError):
+            eb.parse_request('@esp-bridge compile "x.yaml', None, "esp-bridge")
+
+    def test_a_stray_quote_in_a_longer_message_is_not_an_error(self):
+        text = 'Its reply said "Bridge is up", and\n@esp-bridge " is up, and so on\nthen more text'
+        self.assertIsNone(eb.parse_request(text, None, "esp-bridge"))
 
     def test_unknown_action_and_bad_seconds_are_refused(self):
         with self.assertRaises(eb.BridgeError):
@@ -280,6 +286,24 @@ class EventTests(unittest.TestCase):
             eb.handle_event({"from": "nona", "from_kind": "human", "channel": "general", "id": "m2",
                              "text": "@esp-bridge status"}, cfg, FakeHub(), eb.Runner(cfg, dry_run=True))
             self.assertIn("post_message", calls)
+
+    def test_replies_never_mention_the_bridge_itself(self):
+        # The hub rejects self-mentions, which silently dropped every status reply.
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            posted = []
+
+            class FakeHub:
+                def call(self, tool, args, timeout=90):
+                    if tool == "post_message":
+                        posted.append(args["text"])
+                    return {}
+
+            eb.handle_event({"from": "claude", "from_kind": "agent", "channel": "general", "id": "m3",
+                             "text": "@esp-bridge status"}, cfg, FakeHub(), eb.Runner(cfg, dry_run=True))
+            self.assertEqual(len(posted), 1)
+            self.assertIn("is up", posted[0])
+            self.assertNotIn("@esp-bridge", posted[0].lower())
 
 
 class TokenTests(unittest.TestCase):

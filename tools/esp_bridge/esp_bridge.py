@@ -188,7 +188,10 @@ def request_words(text: str, handle: str) -> list[str] | None:
         try:
             words = shlex.split(rest.strip().rstrip("`"))
         except ValueError as error:
-            raise BridgeError(f"Could not read the request: {error}.")
+            # A stray quote in chatter is not a request; a lone request line is.
+            if len([ln for ln in text.splitlines() if ln.strip()]) == 1:
+                raise BridgeError(f"Could not read the request: {error}.")
+            continue
         if words:
             words[0] = words[0].strip("`.,:;!?").lower()
             candidates.append(words)
@@ -456,7 +459,7 @@ class Runner:
         if req.action == "status":
             enabled = ", ".join(self.cfg.enabled)
             devices = ", ".join(self.cfg.devices) or "none"
-            return JobResult(True, f"Bridge `@{self.cfg.handle}` is up. Actions: {enabled}. Devices: {devices}.", "", 0.0)
+            return JobResult(True, f"Bridge `{self.cfg.handle}` is up. Actions: {enabled}. Devices: {devices}.", "", 0.0)
         base = validate(req, self.cfg)
         if req.action in DEVICE_API_ACTIONS:
             data = {"url": req.url or ""} if req.action == "launch" else {}
@@ -612,7 +615,9 @@ def handle_event(event: dict, cfg: Config, hub: Hub, runner: Runner) -> None:
         return
     if author not in cfg.allowed_requesters:
         refusal = f"@{author} is not allowed to send jobs to this bridge."
-    reply = lambda text, **extra: hub.call("post_message", {"channel": channel, "thread_id": thread, "text": text, **extra})  # noqa: E731
+    # The hub rejects a message that mentions its own author, so never write @<own handle>.
+    own = re.compile(re.escape(f"@{cfg.handle}"), re.IGNORECASE)
+    reply = lambda text, **extra: hub.call("post_message", {"channel": channel, "thread_id": thread, "text": own.sub(cfg.handle, text), **extra})  # noqa: E731
     if refusal:
         reply(f"🚫 {refusal}")
         return
@@ -645,7 +650,7 @@ def serve(cfg: Config, dry_run: bool) -> None:
     briefing = hub.call("get_briefing", {})
     since = briefing.get("envelope", {}).get("latest_seq", 0)
     hub.call("set_status", {"state": "online", "note": f"ESP bridge ready ({', '.join(cfg.enabled)})" + (" [dry run]" if dry_run else "")})
-    print(f"@{cfg.handle} listening from seq {since} (dry run: {dry_run})", flush=True)
+    print(f"Listening as @{cfg.handle} from seq {since} (dry run: {dry_run})", flush=True)
     failures = 0
     while True:
         try:

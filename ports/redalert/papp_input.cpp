@@ -216,16 +216,22 @@ private:
         }
         int x = 0, y = 0;
         const bool touching = papp_svc->touch_read(&x, &y) != 0;
+        const long long now = papp_time_us();
         if (touching) {
             int w, h;
             papp_video_mode_size(&w, &h);
             const float gx = (float)(x - (800 - w) / 2);
             const float gy = (float)(y - (480 - h) / 2);
             Move_Video_Mouse(gx - papp_mouse_x, gy - papp_mouse_y);
+            LastTouch = now;
         }
-        if (touching != Touching) {
-            Button(VK_LBUTTON, touching);
-            Touching = touching;
+        // The panel is sampled every 50 ms and a sample can come back empty
+        // mid-drag, which let go of a selection box. Only count a release
+        // after no touch for TOUCH_RELEASE_US.
+        const bool held = touching || (Touching && now - LastTouch < TOUCH_RELEASE_US);
+        if (held != Touching) {
+            Button(VK_LBUTTON, held);
+            Touching = held;
         }
     }
 
@@ -272,6 +278,8 @@ private:
     papp_gamepad_state_t Pad;
     int MouseButtons = 0;
     bool Touching = false;
+    long long LastTouch = 0;
+    static const long long TOUCH_RELEASE_US = 120000;
 };
 
 static WWKeyboardClassPAPP* s_keyboard = nullptr;

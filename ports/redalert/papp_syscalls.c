@@ -147,8 +147,12 @@ static void *block_realloc(void *ptr, size_t size, void *caller)
 
 // Walk every live block; report the first damaged ones. Game task only (the
 // list is not locked).
+volatile long long papp_heap_check_us = 0; // longest check (rate log)
+volatile int papp_heap_blocks = 0;
+
 void papp_heap_check(void)
 {
+    const long long start = papp_time_us();
     int count = 0;
     for (block_t *b = s_blocks; b != NULL; b = b->next) {
         if (b->magic != HEAD_MAGIC) {
@@ -170,6 +174,11 @@ void papp_heap_check(void)
             return;
         }
         count++;
+    }
+    papp_heap_blocks = count;
+    const long long spent = papp_time_us() - start;
+    if (spent > papp_heap_check_us) {
+        papp_heap_check_us = spent;
     }
 }
 
@@ -310,6 +319,10 @@ int _close(int fd)
     return papp_svc->file_close(fp);
 }
 
+// File read time (rate log in papp_video.cpp).
+volatile long long papp_read_us = 0;
+volatile long long papp_read_max_us = 0;
+
 ssize_t _read(int fd, void *buf, size_t count)
 {
     void *fp = fd_file(fd);
@@ -317,7 +330,14 @@ ssize_t _read(int fd, void *buf, size_t count)
         errno = EBADF;
         return -1;
     }
-    return (ssize_t)papp_svc->file_read(buf, 1, count, fp);
+    const long long t = papp_time_us();
+    const ssize_t n = (ssize_t)papp_svc->file_read(buf, 1, count, fp);
+    const long long spent = papp_time_us() - t;
+    papp_read_us += spent;
+    if (spent > papp_read_max_us) {
+        papp_read_max_us = spent;
+    }
+    return n;
 }
 
 ssize_t _write(int fd, const void *buf, size_t count)

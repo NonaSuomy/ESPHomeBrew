@@ -5,6 +5,12 @@
 #ifndef PAPP_APP_SIDE
 #define PAPP_APP_SIDE 1
 #endif
+// ESP-IDF builds get this C++ spelling from newlib's <sys/cdefs.h>; the loader
+// header uses the C11 keyword.
+#if defined(__cplusplus) && !defined(_Static_assert)
+#define _Static_assert static_assert
+#endif
+
 // The loader's own ABI header: the SDK one plus the USB mouse/keyboard services.
 #include "esphome/components/papp_loader/psram_app.h"
 

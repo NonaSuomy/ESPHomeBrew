@@ -1,0 +1,22 @@
+diff --git a/common/pk.cpp b/common/pk.cpp
+index 281d9d9..6ef6e95 100644
+--- a/common/pk.cpp
++++ b/common/pk.cpp
+@@ -286,7 +286,7 @@ int PKey::Encrypt(void const* source, int slen, void* dest) const
+         **	Perform the encryption of the block.
+         */
+         BigInt temp = 0;
+-        unsigned int* tempui = temp;
++        digit* tempui = temp; // uint32_t is unsigned long on RISC-V newlib
+         int i;
+ 
+         memmove(&temp, source, Plain_Block_Size());
+@@ -339,7 +339,7 @@ int PKey::Decrypt(void const* source, int slen, void* dest) const
+ {
+     int total = 0;
+     BigInt temp;
+-    unsigned int* tempui = temp;
++    digit* tempui = temp; // uint32_t is unsigned long on RISC-V newlib
+     int i;
+ 
+     /*

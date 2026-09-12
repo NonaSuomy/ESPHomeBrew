@@ -116,7 +116,11 @@ static void mixer_task(void*)
     static int16_t out[MIX_FRAMES * 2];
     long long anchor_us = 0;   // when the current run of audio started
     long long frames_out = 0;  // frames submitted since anchor_us
-    long long idle_since = 0;  // when the silence began (0: something is playing)
+    // When the silence began (0: something is playing). Start out idle: the
+    // chain comes up with the first real sound (the intro movie), as it did
+    // before silence was fed; bringing it up while the game loads made it
+    // stop and restart right as the intro began.
+    long long idle_since = -10000000;
     long long last_restart = 0;
     int stalls = 0;            // audio_submit calls in a row that waited it out
     bool chain_idle = false;   // we let the speaker chain stop (a long silence)

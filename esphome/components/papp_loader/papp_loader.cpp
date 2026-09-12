@@ -639,6 +639,12 @@ bool PappLoader::start_loaded_app_(psram_app_handle_t app, const std::string &so
          indev = lv_indev_get_next(indev)) {
       lv_indev_enable(indev, false);
     }
+    // The PAPP canvas does not cover the whole panel: whatever LVGL last drew
+    // around it stays visible while the app runs. Hide the finished download
+    // bar and redraw once, or it stays on screen at 100% under the app.
+    this->set_progress_(false, 0, 0, "%s", "");
+    this->update_progress_ui_();
+    lv_refr_now(nullptr);
     this->lvgl_->set_paused(true, false);
   }
 #endif

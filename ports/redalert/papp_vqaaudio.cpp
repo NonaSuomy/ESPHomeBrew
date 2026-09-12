@@ -32,6 +32,10 @@ enum
 
 // Kept for the whole game: the mixer has a fixed number of voices.
 static SampleTrackerTypeImp* s_voice = nullptr;
+// The block at PlayPosition is already queued. When the movie falls behind,
+// the next block is not loaded yet and PlayPosition stays put; queueing that
+// block again made the sound repeat, so wait (a short silence) instead.
+static bool s_current_queued = false;
 
 static SampleTrackerTypeImp* Movie_Voice(const VQAAudio* audio)
 {
@@ -51,13 +55,16 @@ static bool Queue_Audio()
         return false;
     }
 
-    SoundImp_Set_Sample_Attributes(s_voice, audio->BitsPerSample, audio->Channels > 1, audio->SampleRate);
-    SoundImp_Buffer_Sample_Data(s_voice, &audio->Buffer[audio->PlayPosition], config->HMIBufSize);
-    audio->field_B8 = audio->field_B0;
-    audio->field_B0 += config->HMIBufSize;
+    if (!s_current_queued) {
+        SoundImp_Set_Sample_Attributes(s_voice, audio->BitsPerSample, audio->Channels > 1, audio->SampleRate);
+        SoundImp_Buffer_Sample_Data(s_voice, &audio->Buffer[audio->PlayPosition], config->HMIBufSize);
+        s_current_queued = true;
+        audio->field_B8 = audio->field_B0;
+        audio->field_B0 += config->HMIBufSize;
 
-    if (audio->field_B0 >= audio->BuffBytes) {
-        audio->field_B0 = 0;
+        if (audio->field_B0 >= audio->BuffBytes) {
+            audio->field_B0 = 0;
+        }
     }
 
     audio->field_14 = audio->field_10 + 1;
@@ -79,6 +86,7 @@ static bool Queue_Audio()
 
     audio->IsLoaded[audio->field_10] = 0;
     audio->PlayPosition += config->HMIBufSize;
+    s_current_queued = false;
     ++audio->field_10;
 
     if (audio->PlayPosition >= config->AudioBufSize) {
@@ -184,6 +192,7 @@ int VQA_StartAudio(VQAHandle* handle)
         return -1; // no sound: the movie plays silently
     }
     SoundImp_Stop_Sample(voice);
+    s_current_queued = false;
 
     audio->BuffBytes = config->HMIBufSize * 4;
     audio->field_B0 = 0;

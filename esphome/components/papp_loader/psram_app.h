@@ -207,6 +207,28 @@ typedef struct {
      * keys use the Quake key constants in the app. */
     int (*input_keyboard_read)(papp_keyboard_event_t *event);
 
+    /* ── UDP networking (lwIP) ───────────────────────────────────────── */
+    /* Minimal UDP for LAN multiplayer. IPv4 addresses and ports are in HOST
+     * byte order (0xC0A80A05 is 192.168.10.5).
+     *   net_udp_open   Bind a non-blocking UDP socket to `port` on every
+     *                  interface (0: any free port); SO_BROADCAST when
+     *                  `broadcast` is non-zero. Returns a handle >= 0, or -1.
+     *   net_udp_send   Send `len` bytes to ip:port. Returns the bytes sent,
+     *                  0 when the stack would block, -1 on error.
+     *   net_udp_recv   Take one waiting datagram without blocking. Returns its
+     *                  length (at most `len`), 0 when none is waiting, -1 on
+     *                  error; `ip`/`port` (may be NULL) receive the sender.
+     *   net_udp_close  Close a handle. The loader closes any the app leaves
+     *                  open when it exits.
+     *   net_ipv4       The device's IPv4 address and netmask (either may be
+     *                  NULL). Returns 1 when the network is up, else 0.
+     * Appended after input_keyboard_read — null-check before calling. */
+    int  (*net_udp_open)(uint16_t port, int broadcast);
+    int  (*net_udp_send)(int handle, const void *buf, int len, uint32_t ip, uint16_t port);
+    int  (*net_udp_recv)(int handle, void *buf, int len, uint32_t *ip, uint16_t *port);
+    void (*net_udp_close)(int handle);
+    int  (*net_ipv4)(uint32_t *ip, uint32_t *netmask);
+
 } app_services_t;
 
 /* ── Entry Point Signature ───────────────────────────────────────────── */

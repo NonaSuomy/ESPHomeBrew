@@ -1,7 +1,7 @@
 {
   "name": "psram_redalert",
   "title": "Red Alert (work in progress)",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Command & Conquer: Red Alert (Vanilla Conquer) as a PAPP. Work in progress: reaches the menu, with music and touch; missions are being fixed. Needs your own REDALERT.MIX and MAIN.MIX (from the freeware release or your CDs) in /sd/roms/redalert/.",
   "dev_build": true,
   "build": "custom",
@@ -298,7 +298,6 @@
         "toggle.cpp",
         "unvqbuff.cpp",
         "vector.cpp",
-        "vqaaudio_null.cpp",
         "vqaconfig.cpp",
         "vqadrawer.cpp",
         "vqaloader.cpp",
@@ -328,7 +327,8 @@
         "papp_paths.cpp",
         "gitinfo.cpp",
         "papp_syscalls.c",
-        "papp_sound.cpp"
+        "papp_sound.cpp",
+        "papp_vqaaudio.cpp"
       ]
     }
   ],

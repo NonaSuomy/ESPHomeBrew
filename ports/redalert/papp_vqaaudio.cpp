@@ -24,7 +24,6 @@ int VQATickCount;
 int TickOffset;
 unsigned VQAAudioPaused;
 VQAHandle* AudioVQAHandle;
-extern "C" volatile int papp_vqa_ring_full = 0; // times the ring was full (rate log in papp_video.cpp)
 
 enum
 {
@@ -265,7 +264,6 @@ int VQA_CopyAudio(VQAHandle* handle)
         const unsigned next_block = (end / block) % audio->NumAudBlocks;
 
         if (audio->IsLoaded[next_block] == 1) {
-            papp_vqa_ring_full++;
             return -10; // the ring is full: try again next frame
         }
 

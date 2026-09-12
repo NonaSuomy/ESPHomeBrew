@@ -125,19 +125,6 @@ static void mixer_task(void*)
     long long last_restart = 0;
     int stalls = 0;            // audio_submit calls in a row that waited it out
     bool chain_idle = false;   // we let the speaker chain stop (a long silence)
-    // Every 5 s: where the mixer's time goes (diagnosing core 1 load).
-    long long stat_window = papp_time_us(), stat_mix = 0, stat_submit = 0, stat_sleep = 0;
-    int stat_loops = 0, stat_blocks = 0;
-    while (!s_quit) {
-        const long long loop_start = papp_time_us();
-        if (loop_start - stat_window >= 5000000) {
-            papp_svc->log_printf("RA: mixer %d loops, %d blocks; mix %lld us, submit %lld us, sleep %lld us\n",
-                                 stat_loops, stat_blocks, stat_mix, stat_submit, stat_sleep);
-            stat_window = loop_start;
-            stat_mix = stat_submit = stat_sleep = 0;
-            stat_loops = stat_blocks = 0;
-        }
-        stat_loops++;
         bool any = false;
         memset(acc, 0, sizeof(acc));
         if (!s_paused) {
@@ -165,12 +152,9 @@ static void mixer_task(void*)
                 chain_idle = true; // we fed it, then let it stop
             }
             frames_out = 0; // the next sound starts a new run
-            const long long t = papp_time_us();
             papp_svc->delay_ms(10);
-            stat_sleep += papp_time_us() - t;
             continue;
         }
-        stat_mix += papp_time_us() - loop_start;
         for (int i = 0; i < MIX_FRAMES * 2; i++) {
             const int32_t v = acc[i];
             out[i] = static_cast<int16_t>(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
@@ -194,7 +178,6 @@ static void mixer_task(void*)
             // starved the presenter on core 1 (the intro ran at 2-8 fps).
             const int ms = static_cast<int>((played_us - (now - anchor_us) - LEAD_US) / 1000) + 1;
             papp_svc->delay_ms(ms < TICK_MS ? TICK_MS : ms);
-            stat_sleep += papp_time_us() - now;
         }
         frames_out += MIX_FRAMES;
         const long long start = papp_time_us();
@@ -205,8 +188,6 @@ static void mixer_task(void*)
         // only after several stalls in a row: start() on a chain that is merely
         // busy (starting up) restarts it, which stutters everything.
         const long long end = papp_time_us();
-        stat_submit += end - start;
-        stat_blocks++;
         stalls = end - start > 60000 ? stalls + 1 : 0;
         if (stalls >= 10 && end - last_restart > 2000000) { // ~1 s taking nothing
             papp_svc->audio_init(s_out_rate);

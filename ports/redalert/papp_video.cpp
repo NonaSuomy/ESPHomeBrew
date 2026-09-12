@@ -79,11 +79,6 @@ static volatile int s_offered = 0;
 static volatile int s_dropped = 0;
 static volatile long long s_copy_us = 0;
 static long long s_wait_us = 0; // presenter: time asleep waiting for a frame
-static volatile long long s_max_gap_us = 0; // longest gap between two frames from the game
-static volatile int s_bunched = 0;          // frames offered < 15 ms after the previous one
-extern "C" volatile int papp_vqa_ring_full; // papp_vqaaudio.cpp: movie audio ring was full
-extern "C" volatile long long papp_read_us, papp_read_max_us, papp_heap_check_us; // papp_syscalls.c
-extern "C" volatile int papp_heap_blocks;
 
 static void render(const Snapshot& f, uint16_t* fb)
 {
@@ -152,14 +147,6 @@ static void log_rate(long long convert_us, long long flush_us)
                              (int)(shown * 1000000LL / elapsed), (int)(offered * 1000000LL / elapsed),
                              s_dropped - dropped_at_start, offered > 0 ? copy / offered : 0,
                              total_convert / shown, total_flush / shown, s_wait_us / 1000);
-        papp_svc->log_printf("RA: game frames: %d bunched (<15 ms apart), longest gap %lld ms; movie audio ring full %d times\n",
-                             s_bunched, s_max_gap_us / 1000, papp_vqa_ring_full);
-        papp_svc->log_printf("RA: game thread: file reads %lld ms (longest %lld ms), heap check longest %lld ms over %d blocks\n",
-                             papp_read_us / 1000, papp_read_max_us / 1000, papp_heap_check_us / 1000, papp_heap_blocks);
-        papp_read_us = papp_read_max_us = papp_heap_check_us = 0;
-        s_bunched = 0;
-        s_max_gap_us = 0;
-        papp_vqa_ring_full = 0;
         s_wait_us = 0;
         window = now;
         shown = 0;
@@ -233,19 +220,6 @@ static void papp_present(const unsigned char* pixels, int w, int h)
         }
     }
     s_offered++;
-    {
-        // Frame spacing from the game: how bursty the offers are.
-        static long long last_offer = 0;
-        const long long t = papp_time_us();
-        const long long gap = last_offer != 0 ? t - last_offer : 0;
-        last_offer = t;
-        if (gap > s_max_gap_us) {
-            s_max_gap_us = gap;
-        }
-        if (gap != 0 && gap < 15000) {
-            s_bunched++;
-        }
-    }
     if (s_presenter != nullptr && s_snap_ready) {
         s_dropped++; // the presenter is still showing the previous frame
         return;

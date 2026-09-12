@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -102,6 +103,7 @@ class Config:
     api_port: int = 6053
     api_key: str | None = None
     screen_port: int = 3232
+    proxy_port: int = 8765
     allowed_url_prefixes: list[str] = field(default_factory=list)
     token_env: str = "EHGI_BRIDGE_TOKEN"
     show_requests: bool = True
@@ -150,6 +152,7 @@ class Config:
         cfg.api_host = api.get("host")
         cfg.api_port = int(api.get("port", 6053))
         cfg.screen_port = int(api.get("screen_port", 3232))
+        cfg.proxy_port = int(api.get("proxy_port", 8765))
         cfg.show_requests = bool(raw.get("console", {}).get("show_requests", True))
         env_key = os.environ.get(api["encryption_key_env"], "") if api.get("encryption_key_env") else ""
         cfg.api_key = env_key or load_secret_map(cfg.secrets_files).get(api.get("encryption_key_secret", "")) or None
@@ -478,6 +481,75 @@ def capture_screenshot(cfg: Config, timeout: float = 20.0) -> tuple[int, int, by
         raise BridgeError(f"Could not open the screen stream on {cfg.api_host}:{cfg.screen_port}: {error}.") from error
 
 
+# ── serving github.com downloads to the device ─────────────────────────────
+#
+# The device cannot verify github.com's TLS certificate chain (Sectigo's newer
+# ECC root), so release downloads such as work-in-progress builds fail there.
+# The bridge downloads them on this machine and serves them to the device over
+# plain HTTP on the LAN, from a server that only knows those exact files.
+
+PROXIED_PREFIXES = ("https://github.com/",)
+
+
+class _ProxyServer:
+    def __init__(self, port: int):
+        import http.server
+
+        files: dict[str, bytes] = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - http.server API
+                body = files.get(self.path.lstrip("/"))
+                if body is None:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self.files = files
+        self.server = http.server.ThreadingHTTPServer(("0.0.0.0", port), Handler)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+
+_proxy: _ProxyServer | None = None
+
+
+def lan_address_towards(host: str, port: int) -> str:
+    """This machine's address on the route to the device (no packet is sent)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.connect((resolve_host(host, port), port))
+        return sock.getsockname()[0]
+
+
+def proxy_url(cfg: Config, url: str, opener=urllib.request.urlopen) -> str:
+    """Download `url` here and return the LAN URL the device can load it from."""
+    global _proxy
+    try:
+        with opener(url, timeout=120) as response:
+            body = response.read(64 * 1024 * 1024 + 1)
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise BridgeError(f"Could not download {url}: {error}.") from error
+    if len(body) > 64 * 1024 * 1024 or len(body) < 32 or struct.unpack_from("<I", body)[0] != 0x50415050:
+        raise BridgeError(f"{url} is not a .papp file.")
+    if _proxy is None:
+        try:
+            _proxy = _ProxyServer(cfg.proxy_port)
+        except OSError as error:
+            raise BridgeError(f"Could not serve files on port {cfg.proxy_port}: {error}.") from error
+    name = f"{hashlib.sha256(body).hexdigest()[:12]}-{url.rsplit('/', 1)[-1]}"
+    _proxy.files.clear()  # only ever the latest launch
+    _proxy.files[name] = body
+    address = lan_address_towards(cfg.api_host, cfg.api_port)
+    return f"http://{address}:{_proxy.port}/{name}"
+
+
 # ── running jobs ────────────────────────────────────────────────────────────
 
 
@@ -574,10 +646,15 @@ class Runner:
                              time.monotonic() - start, [(name, png, "image/png")])
         if req.action in DEVICE_API_ACTIONS:
             data = {"url": req.url or ""} if req.action == "launch" else {}
+            served = ""
+            if req.action == "launch" and req.url and req.url.startswith(PROXIED_PREFIXES) and not self.dry_run:
+                data["url"] = proxy_url(self.cfg, req.url)
+                served = f" (served from this machine as {data['url']})"
             if not self.dry_run:
                 call_device_action(self.cfg, DEVICE_API_ACTIONS[req.action], data)
             what = f"`{req.action}`" + (f" `{req.url.rsplit('/', 1)[-1]}`" if req.url else "")
-            return JobResult(True, f"✅ {what} sent to {self.cfg.api_host}{' (dry run)' if self.dry_run else ''}.", "", time.monotonic() - start)
+            return JobResult(True, f"✅ {what} sent to {self.cfg.api_host}{served}{' (dry run)' if self.dry_run else ''}.", "",
+                             time.monotonic() - start)
         assert base is not None and req.yaml is not None
         where = "local config"
         if req.source == "repo":

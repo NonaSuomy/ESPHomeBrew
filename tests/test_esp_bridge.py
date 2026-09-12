@@ -191,7 +191,8 @@ class CommandTests(unittest.TestCase):
         self.assertEqual((code, len(out), truncated), (0, 100, True))
 
 
-STORE = "https://github.com/NonaSuomy/papp-conversions/releases/download/psram_lvgl-v0.1.1/psram_lvgl-0.1.1.papp"
+STORE = "https://nonasuomy.github.io/papp-conversions/psram_lvgl-0.1.1.papp"
+RELEASE = "https://github.com/NonaSuomy/papp-conversions/releases/download/dev-builds/psram_redalert.papp"
 
 
 def make_api_config(tmp: Path) -> eb.Config:
@@ -199,7 +200,8 @@ def make_api_config(tmp: Path) -> eb.Config:
     (tmp / "local" / "secrets.yaml").write_text("api_key_016: 'c2VjcmV0LWtleS1ieXRlcy0xMjM0NTY3ODkwMTI='\n")
     cfg.secrets_files = [tmp / "local" / "secrets.yaml"]
     cfg.api_host, cfg.api_key = "10.0.0.5", eb.load_secret_map(cfg.secrets_files)["api_key_016"]
-    cfg.allowed_url_prefixes = ["https://github.com/NonaSuomy/papp-conversions/releases/download/"]
+    cfg.allowed_url_prefixes = ["https://github.com/NonaSuomy/papp-conversions/releases/download/",
+                                "https://nonasuomy.github.io/papp-conversions/"]
     cfg.enabled = [*cfg.enabled, "launch", "close", "catalog"]
     return cfg
 
@@ -291,6 +293,25 @@ def fake_stream_server(packets: bytes):
 
 def stream_packet(magic: bytes, width: int, height: int, payload: bytes) -> bytes:
     return eb.STREAM_HEADER.pack(magic, width, height, len(payload), 1) + payload
+
+
+class ProxyTests(unittest.TestCase):
+    def test_github_downloads_are_served_to_the_device_from_here(self):
+        import io
+        import struct as st
+        papp = st.pack("<8I", 0x50415050, 1, 0, 4, 0, 0, 0, 0) + b"\x01\x02\x03\x04"
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_api_config(Path(tmp))
+            cfg.api_host, cfg.proxy_port = "127.0.0.1", 0  # any free port
+            url = eb.proxy_url(cfg, RELEASE, opener=lambda u, timeout=None: io.BytesIO(papp))
+            self.assertTrue(url.startswith("http://127.0.0.1:"), url)
+            self.assertTrue(url.endswith("-psram_redalert.papp"), url)
+            with urllib.request.urlopen(url, timeout=5) as response:
+                self.assertEqual(response.read(), papp)
+            with self.assertRaises(urllib.error.HTTPError):  # only the exact file, no listing
+                urllib.request.urlopen(url.rsplit("/", 1)[0] + "/", timeout=5)
+            with self.assertRaises(eb.BridgeError):
+                eb.proxy_url(cfg, RELEASE, opener=lambda u, timeout=None: io.BytesIO(b"<html>not a papp</html>" * 4))
 
 
 class ScreenshotTests(unittest.TestCase):

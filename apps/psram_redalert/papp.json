@@ -1,7 +1,7 @@
 {
   "name": "psram_redalert",
   "title": "Red Alert (work in progress)",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Command & Conquer: Red Alert (Vanilla Conquer) as a PAPP. Work in progress: reaches the menu, with music and touch; missions are being fixed. Needs your own REDALERT.MIX and MAIN.MIX (from the freeware release or your CDs) in /sd/roms/redalert/.",
   "dev_build": true,
   "build": "custom",
@@ -15,6 +15,7 @@
   ],
   "linker_script": "local:ports/redalert/papp_cpp.ld",
   "includes": [
+    "local:ports/redalert/net",
     "common",
     "redalert",
     ".",
@@ -49,7 +50,9 @@
     "-Wno-register",
     "-Wno-attributes",
     "-D_DEBUG",
-    "-DLOGGING_LEVEL=4"
+    "-DLOGGING_LEVEL=4",
+    "-DNETWORKING",
+    "-DWINSOCK_IPX"
   ],
   "groups": [
     {
@@ -125,6 +128,9 @@
         "intro.cpp",
         "iomap.cpp",
         "ioobj.cpp",
+        "ipxconn.cpp",
+        "ipxgconn.cpp",
+        "ipxmgr.cpp",
         "jshell.cpp",
         "layer.cpp",
         "list.cpp",
@@ -145,6 +151,7 @@
         "mplayer.cpp",
         "msgbox.cpp",
         "msglist.cpp",
+        "netdlg.cpp",
         "nulldlg.cpp",
         "object.cpp",
         "odata.cpp",
@@ -164,6 +171,7 @@
         "scroll.cpp",
         "sdata.cpp",
         "seditdlg.cpp",
+        "sendfile.cpp",
         "session.cpp",
         "shapebtn.cpp",
         "sidebar.cpp",
@@ -226,6 +234,7 @@
         "cdfile.cpp",
         "cliprect.cpp",
         "combuf.cpp",
+        "connect.cpp",
         "control.cpp",
         "crc.cpp",
         "crew.cpp",
@@ -254,6 +263,7 @@
         "int.cpp",
         "internet.cpp",
         "interpal.cpp",
+        "ipxaddr.cpp",
         "irandom.cpp",
         "keybuff.cpp",
         "keyframe.cpp",
@@ -309,6 +319,8 @@
         "winhide.cpp",
         "winstub.cpp",
         "wsa.cpp",
+        "wsproto.cpp",
+        "wspudp.cpp",
         "wwkeyboard.cpp",
         "wwmouse.cpp",
         "xordelta.cpp",
@@ -328,7 +340,8 @@
         "gitinfo.cpp",
         "papp_syscalls.c",
         "papp_sound.cpp",
-        "papp_vqaaudio.cpp"
+        "papp_vqaaudio.cpp",
+        "papp_net.cpp"
       ]
     }
   ],

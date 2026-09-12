@@ -289,7 +289,7 @@
         "shapipe.cpp",
         "shastraw.cpp",
         "soscodec.cpp",
-        "soundio_null.cpp",
+        "soundio_common.cpp",
         "stamp.cpp",
         "straw.cpp",
         "timer.cpp",
@@ -327,7 +327,8 @@
         "papp_input.cpp",
         "papp_paths.cpp",
         "gitinfo.cpp",
-        "papp_syscalls.c"
+        "papp_syscalls.c",
+        "papp_sound.cpp"
       ]
     }
   ],

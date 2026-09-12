@@ -531,6 +531,21 @@ class CrashDecodeTests(unittest.TestCase):
         self.assertEqual(Path(seen["argv"][3]), self.elf)
         self.assertEqual(seen["argv"][4], "0x40093715")
 
+    def test_esphome_crash_report_after_reboot_is_decoded(self):
+        # What ESPHome's esp32 crash handler logs on the next boot (seen after
+        # closing Red Alert); there is no serial dump to go on.
+        report = (
+            "[E][esp32.crash:302]:   BT0: 0x4FF0A146  (backtrace)\n"
+            "[E][esp32.crash:302]:   BT1: 0x4FF0A0FC  (backtrace)\n"
+            "[E][esp32.crash:302]:   BT3: 0x4009744C  (stack scan)\n"
+            "[E][esp32.crash:358]: Use: addr2line -pfiaC -e firmware.elf 0x4FF0A146 0x4009744C\n"
+            "[I][papp_loader:532]: PAPP catalog request started: http://10.13.37.84:8000/\n"
+        )
+        firmware, app = eb.crash_addresses(report)
+        self.assertEqual(firmware[:3], [0x4FF0A146, 0x4FF0A0FC, 0x4009744C])
+        self.assertEqual(app, [])
+        self.assertEqual(eb.crash_addresses("[I][esp32.crash:100]: no crash recorded\n"), ([], []))
+
     def test_wrong_build_is_not_used(self):
         text = eb.decode_crash(self.cfg, PANIC.format(sha="0123abcde"), None)
         self.assertIn("none of the 1 firmware ELFs here has SHA256 0123abcde", text)

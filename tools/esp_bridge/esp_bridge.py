@@ -523,7 +523,9 @@ class SerialCapture:
 # right one); PAPP addresses (linked at 0x4A000000) in the app's symbol list,
 # which dev builds publish next to the .papp.
 
-CRASH = re.compile(r"abort\(\) was called|Guru Meditation|panic'ed|^MEPC\s*:|^Backtrace:", re.M)
+# A live panic dump (serial), or the report ESPHome's esp32 crash handler logs
+# after the reboot ("[E][esp32.crash:...]:   BT0: 0x4FF0A146 (backtrace)").
+CRASH = re.compile(r"abort\(\) was called|Guru Meditation|panic'ed|^MEPC\s*:|^Backtrace:|esp32\.crash\S*:\s+(?:PC|BT\d+):", re.M)
 ELF_SHA = re.compile(r"ELF file SHA256:\s*([0-9a-fA-F]{8,64})")
 HEX = re.compile(r"0x([0-9a-fA-F]{8})\b")
 PAPP_BASE, PAPP_END = 0x4A000000, 0x4C000000

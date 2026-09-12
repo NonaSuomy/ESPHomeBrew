@@ -346,8 +346,27 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
     for unit in units:
         unit.flags = unit.flags + [f"-ffile-prefix-map={cache}=/papp-src"]
     print(f"  compiling {len(units)} files (SOURCE_DATE_EPOCH={epoch})", flush=True)
+    failures: list[str] = []
+
+    def attempt(unit: Unit) -> None:
+        try:
+            compile_one(unit, env)
+        except RuntimeError as error:
+            failures.append(str(error))
+
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        list(pool.map(lambda unit: compile_one(unit, env), units))
+        list(pool.map(attempt, units))
+    if failures:
+        # Report every failing file at once (a port fixes them in batches), with
+        # just the error lines so the log stays readable.
+        for failure in sorted(failures)[:40]:
+            head, _, rest = failure.partition("
+")
+            errors = [line for line in rest.splitlines() if " error:" in line or "fatal error" in line]
+            print(f"  {head}", flush=True)
+            for line in errors[:8]:
+                print(f"    {line.replace(str(cache), '')}", flush=True)
+        raise RuntimeError(f"{name}: {len(failures)} of {len(units)} files failed to compile")
 
     elf = build_dir / f"{name}.elf"
     link = [linker, *ldflags, f"-T{linker_script}", "-o", str(elf), *[str(u.obj) for u in units], *link_tail]

@@ -46,7 +46,8 @@
     "-Wno-write-strings",
     "-Wno-narrowing",
     "-Wno-deprecated-declarations",
-    "-Wno-register"
+    "-Wno-register",
+    "-Wno-attributes"
   ],
   "groups": [
     {

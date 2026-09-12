@@ -21,7 +21,7 @@ enum
 {
     QUEUE_LEN = 3,          // chunks per voice (OpenAL used 2)
     CHUNK_MAX = 8192 + 128, // soundio_common's BUFFER_CHUNK_SIZE plus slack
-    MIX_FRAMES = 256,       // per block: ~12 ms at 22,050 Hz
+    MIX_FRAMES = 1024,      // per block: ~46 ms at 22,050 Hz (fewer, larger writes wake ESPHome's audio tasks less)
     MAX_VOICES = 8,
 };
 

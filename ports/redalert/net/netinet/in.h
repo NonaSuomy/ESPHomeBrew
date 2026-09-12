@@ -1,0 +1,42 @@
+// IPv4 addresses for the Red Alert PAPP's socket layer (see sys/socket.h).
+#pragma once
+
+#include <stdint.h>
+#include <sys/socket.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef uint32_t in_addr_t;
+typedef uint16_t in_port_t;
+
+struct in_addr
+{
+    in_addr_t s_addr; // network byte order
+};
+
+struct sockaddr_in
+{
+    sa_family_t sin_family;
+    in_port_t sin_port; // network byte order
+    struct in_addr sin_addr;
+    char sin_zero[8];
+};
+
+#define IPPROTO_IP  0
+#define IPPROTO_UDP 17
+
+#define INADDR_ANY       ((in_addr_t)0x00000000)
+#define INADDR_BROADCAST ((in_addr_t)0xffffffff)
+#define INADDR_NONE      ((in_addr_t)0xffffffff)
+
+// The P4 is little-endian.
+#define htons(x) ((uint16_t)__builtin_bswap16((uint16_t)(x)))
+#define ntohs(x) ((uint16_t)__builtin_bswap16((uint16_t)(x)))
+#define htonl(x) ((uint32_t)__builtin_bswap32((uint32_t)(x)))
+#define ntohl(x) ((uint32_t)__builtin_bswap32((uint32_t)(x)))
+
+#ifdef __cplusplus
+}
+#endif

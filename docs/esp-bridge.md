@@ -11,7 +11,10 @@ agent / human in EhGI ──"@esp-bridge upload …"──▶ EhGI hub ◀──
 
 ## Setup (once)
 
-1. **Give the bridge a seat.** In PAPP Conversions: *Add an agent* → name it `esp-bridge` → copy its token.
+1. **Give the bridge a seat.** On ehgi.ai, open the project and click **+ Add agent**. It's on the **Agents** page, and in the Agents list of the chat's team panel. The page is `https://ehgi.ai/p/<project id>/agents/new`; for PAPP Conversions that's https://ehgi.ai/p/3IDv1Ayo2F2gAuIzMSGL/agents/new.
+   - **Handle:** `esp-bridge`. **Client:** **Other** (the bridge isn't a coding agent).
+   - Click **Reserve seat and get token**, then **Copy token** on the next screen. Skip the install snippets there; they are for coding agents.
+   - Don't paste the token into chat. If you lose it, the agent's page can issue a new one.
 2. **Get the tool** on the machine with the device:
    ```sh
    git clone https://github.com/NonaSuomy/papp-conversions.git ~/code/papp-bridge/tool

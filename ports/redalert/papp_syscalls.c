@@ -30,9 +30,24 @@ typedef struct block {
 
 static block_t *s_blocks = NULL;
 
+// PSRAM only. Plain malloc() puts blocks under 16 KiB in internal RAM first,
+// and the game makes thousands of small allocations: internal RAM ran out and
+// the firmware aborted when it could not create a mutex (lock_init_generic
+// from fclose, right after "RA: video mode").
+static void *heap_alloc(size_t bytes)
+{
+    if (papp_svc->mem_caps_alloc != NULL) {
+        return papp_svc->mem_caps_alloc(bytes, PAPP_MEM_CAP_SPIRAM);
+    }
+    return papp_svc->mem_alloc(bytes);
+}
+
 static void *block_alloc(size_t size)
 {
-    block_t *b = (block_t *)papp_svc->mem_alloc(sizeof(block_t) + size);
+    if (size > SIZE_MAX - sizeof(block_t)) {
+        return NULL;
+    }
+    block_t *b = (block_t *)heap_alloc(sizeof(block_t) + size);
     if (b == NULL) {
         return NULL;
     }

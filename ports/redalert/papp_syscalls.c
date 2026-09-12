@@ -25,8 +25,18 @@ typedef struct block {
     struct block *prev;
     struct block *next;
     size_t size;
-    size_t pad;  // keeps the payload 16-byte aligned like the loader's blocks
+    uint32_t magic;   // HEAD_MAGIC while the block is live
+    void *caller;     // who allocated it (an address in the app, see .sym)
+    uint32_t pad[3];  // keeps the payload 16-byte aligned like the loader's blocks
 } block_t;
+
+// Heap guards: a magic in each header and GUARD_BYTES of GUARD_FILL after each
+// payload, checked on free and every few seconds (papp_heap_check). A game
+// buffer overrun then shows up in the log with the block's size and owner
+// instead of as a crash somewhere else later.
+#define HEAD_MAGIC 0x5241484bu
+#define GUARD_BYTES 16
+#define GUARD_FILL 0xfd
 
 static block_t *s_blocks = NULL;
 
@@ -42,16 +52,40 @@ static void *heap_alloc(size_t bytes)
     return papp_svc->mem_alloc(bytes);
 }
 
-static void *block_alloc(size_t size)
+static int s_guard_reports = 0;
+
+static int guard_intact(const block_t *b)
 {
-    if (size > SIZE_MAX - sizeof(block_t)) {
+    const unsigned char *g = (const unsigned char *)(b + 1) + b->size;
+    for (int i = 0; i < GUARD_BYTES; i++) {
+        if (g[i] != GUARD_FILL) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void report_block(const block_t *b, const char *what)
+{
+    if (s_guard_reports++ < 8) {
+        papp_svc->log_printf("RA: heap guard: %s: block %p, %u bytes, allocated from %p\n", what, (void *)(b + 1),
+                             (unsigned)b->size, b->caller);
+    }
+}
+
+static void *block_alloc(size_t size, void *caller)
+{
+    if (size > SIZE_MAX - sizeof(block_t) - GUARD_BYTES) {
         return NULL;
     }
-    block_t *b = (block_t *)heap_alloc(sizeof(block_t) + size);
+    block_t *b = (block_t *)heap_alloc(sizeof(block_t) + size + GUARD_BYTES);
     if (b == NULL) {
         return NULL;
     }
     b->size = size;
+    b->magic = HEAD_MAGIC;
+    b->caller = caller;
+    memset((unsigned char *)(b + 1) + size, GUARD_FILL, GUARD_BYTES);
     b->prev = NULL;
     b->next = s_blocks;
     if (s_blocks) {
@@ -67,6 +101,17 @@ static void block_free(void *ptr)
         return;
     }
     block_t *b = (block_t *)ptr - 1;
+    if (b->magic != HEAD_MAGIC) {
+        // Not ours, freed twice, or its header was overwritten: leave it alone.
+        if (s_guard_reports++ < 8) {
+            papp_svc->log_printf("RA: heap guard: free of a bad block %p (header %08x)\n", ptr, (unsigned)b->magic);
+        }
+        return;
+    }
+    if (!guard_intact(b)) {
+        report_block(b, "overrun found on free");
+    }
+    b->magic = 0;
     if (b->prev) {
         b->prev->next = b->next;
     } else {
@@ -78,10 +123,10 @@ static void block_free(void *ptr)
     papp_svc->mem_free(b);
 }
 
-static void *block_realloc(void *ptr, size_t size)
+static void *block_realloc(void *ptr, size_t size, void *caller)
 {
     if (ptr == NULL) {
-        return block_alloc(size);
+        return block_alloc(size, caller);
     }
     if (size == 0) {
         block_free(ptr);
@@ -91,13 +136,41 @@ static void *block_realloc(void *ptr, size_t size)
     if (size <= old->size) {
         return ptr;
     }
-    void *fresh = block_alloc(size);
+    void *fresh = block_alloc(size, caller);
     if (fresh == NULL) {
         return NULL;
     }
     memcpy(fresh, ptr, old->size);
     block_free(ptr);
     return fresh;
+}
+
+// Walk every live block; report the first damaged ones. Game task only (the
+// list is not locked).
+void papp_heap_check(void)
+{
+    int count = 0;
+    for (block_t *b = s_blocks; b != NULL; b = b->next) {
+        if (b->magic != HEAD_MAGIC) {
+            if (s_guard_reports++ < 8) {
+                papp_svc->log_printf("RA: heap guard: header overwritten at %p after %d blocks\n", (void *)(b + 1), count);
+            }
+            return; // the links are not trustworthy past this point
+        }
+        if (!guard_intact(b)) {
+            report_block(b, "overrun");
+            // Re-arm so a second overrun of the same block is reported again.
+            memset((unsigned char *)(b + 1) + b->size, GUARD_FILL, GUARD_BYTES);
+        }
+        if (b->next != NULL && b->next->prev != b) {
+            if (s_guard_reports++ < 8) {
+                papp_svc->log_printf("RA: heap guard: broken link after block %p (%u bytes)\n", (void *)(b + 1),
+                                     (unsigned)b->size);
+            }
+            return;
+        }
+        count++;
+    }
 }
 
 void papp_free_all_memory(void)
@@ -109,15 +182,15 @@ void papp_free_all_memory(void)
     }
 }
 
-void *__wrap_malloc(size_t size) { return block_alloc(size); }
+void *__wrap_malloc(size_t size) { return block_alloc(size, __builtin_return_address(0)); }
 void __wrap_free(void *ptr) { block_free(ptr); }
-void *__wrap_realloc(void *ptr, size_t size) { return block_realloc(ptr, size); }
+void *__wrap_realloc(void *ptr, size_t size) { return block_realloc(ptr, size, __builtin_return_address(0)); }
 void *__wrap_calloc(size_t n, size_t size)
 {
     if (size != 0 && n > SIZE_MAX / size) {
         return NULL;
     }
-    void *p = block_alloc(n * size);
+    void *p = block_alloc(n * size, __builtin_return_address(0));
     if (p) {
         memset(p, 0, n * size);
     }
@@ -171,6 +244,25 @@ static const char *clean_path(const char *path, char *out, size_t size)
 #define MAX_FDS 32
 static void *s_files[MAX_FDS];
 
+// Read-ahead for files opened read-only. The game reads its MIX files and
+// movies ~1 KB at a time; each read went to the SD card separately, and the
+// intro spent more than half its time in them (2.7 s of every 5 s), which
+// made the movie stutter. One 32 KiB read now serves the small ones.
+#define READ_AHEAD 32768
+typedef struct {
+    unsigned char *buf;  // NULL: not cached (written files)
+    size_t len;          // bytes in buf
+    size_t pos;          // next byte to hand out
+} read_ahead_t;
+static read_ahead_t s_ahead[MAX_FDS];
+
+static void drop_read_ahead(int fd)
+{
+    block_free(s_ahead[fd].buf);
+    s_ahead[fd].buf = NULL;
+    s_ahead[fd].len = s_ahead[fd].pos = 0;
+}
+
 void papp_close_all_files(void)
 {
     for (int fd = 3; fd < MAX_FDS; fd++) {
@@ -178,6 +270,7 @@ void papp_close_all_files(void)
             papp_svc->file_close(s_files[fd]);
             s_files[fd] = NULL;
         }
+        drop_read_ahead(fd);
     }
 }
 
@@ -223,6 +316,8 @@ int _open(const char *path, int flags, int mode)
         return -1;
     }
     s_files[fd] = fp;
+    s_ahead[fd].len = s_ahead[fd].pos = 0;
+    s_ahead[fd].buf = (flags & O_ACCMODE) == O_RDONLY ? (unsigned char *)block_alloc(READ_AHEAD, NULL) : NULL;
     return fd;
 }
 
@@ -234,6 +329,7 @@ int _close(int fd)
         return -1;
     }
     s_files[fd] = NULL;
+    drop_read_ahead(fd);
     return papp_svc->file_close(fp);
 }
 
@@ -244,7 +340,35 @@ ssize_t _read(int fd, void *buf, size_t count)
         errno = EBADF;
         return -1;
     }
-    return (ssize_t)papp_svc->file_read(buf, 1, count, fp);
+    read_ahead_t *ra = &s_ahead[fd];
+    size_t done = 0;
+    if (ra->buf == NULL) {
+        done = papp_svc->file_read(buf, 1, count, fp);
+    } else {
+        while (done < count) {
+            if (ra->pos < ra->len) {
+                size_t n = ra->len - ra->pos;
+                if (n > count - done) {
+                    n = count - done;
+                }
+                memcpy((unsigned char *)buf + done, ra->buf + ra->pos, n);
+                ra->pos += n;
+                done += n;
+                continue;
+            }
+            if (count - done >= READ_AHEAD) {
+                // A big read gains nothing from the buffer: straight in.
+                done += papp_svc->file_read((unsigned char *)buf + done, 1, count - done, fp);
+                break;
+            }
+            ra->len = papp_svc->file_read(ra->buf, 1, READ_AHEAD, fp);
+            ra->pos = 0;
+            if (ra->len == 0) {
+                break; // end of file
+            }
+        }
+    }
+    return (ssize_t)done;
 }
 
 ssize_t _write(int fd, const void *buf, size_t count)
@@ -276,6 +400,19 @@ off_t _lseek(int fd, off_t offset, int whence)
         errno = EBADF;
         return -1;
     }
+    read_ahead_t *ra = &s_ahead[fd];
+    if (ra->buf != NULL && whence != SEEK_END) {
+        // The file position is past the read-ahead; the game's is at pos.
+        const long buf_start = papp_svc->file_tell(fp) - (long)ra->len;
+        const long target = whence == SEEK_CUR ? buf_start + (long)ra->pos + (long)offset : (long)offset;
+        if (target >= buf_start && target <= buf_start + (long)ra->len) {
+            ra->pos = (size_t)(target - buf_start); // still inside the buffer
+            return (off_t)target;
+        }
+        offset = target;
+        whence = SEEK_SET;
+    }
+    ra->len = ra->pos = 0;
     if (papp_svc->file_seek(fp, (long)offset, whence) != 0) {
         errno = EINVAL;
         return -1;

@@ -63,8 +63,9 @@ static void game_task(void *)
     s_game_running = false;
     papp_svc->log_printf("RA: game ended (%d)\n", s_exit_code);
     // The loader does not reclaim an app's files or heap: hand everything back.
-    // The mixer task reads the game's sound buffers, so it stops first.
+    // The mixer and presenter tasks read the game's buffers, so they stop first.
     papp_sound_shutdown();
+    papp_video_shutdown();
     papp_close_all_files();
     papp_free_all_memory();
     s_game_done = true;

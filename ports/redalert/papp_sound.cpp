@@ -3,8 +3,8 @@
 // soundio_common.cpp decodes the game's samples into PCM chunks of up to 8 KiB
 // and queues them per voice through the SoundImp_* calls below, from the game
 // task. A mixer task drains the voices, resamples them to the output rate and
-// hands stereo blocks to the loader's speaker. audio_submit() blocks until the
-// speaker has room, which paces the mixer.
+// hands stereo blocks to the loader's speaker, paced to real time with a small
+// lead (see LEAD_US) and with silence between sounds so the speaker stays on.
 //
 // Each voice is a small queue with one producer (the game) and one consumer
 // (the mixer). A per-voice spinlock guards the queue indices; the mixer only
@@ -21,7 +21,7 @@ enum
 {
     QUEUE_LEN = 3,          // chunks per voice (OpenAL used 2)
     CHUNK_MAX = 8192 + 128, // soundio_common's BUFFER_CHUNK_SIZE plus slack
-    MIX_FRAMES = 256,       // per block: ~12 ms at 22,050 Hz
+    MIX_FRAMES = 1024,      // per block: ~46 ms at 22,050 Hz (fewer, larger writes wake ESPHome's audio tasks less)
     MAX_VOICES = 8,
 };
 
@@ -104,11 +104,27 @@ static void mix_voice(SampleTrackerTypeImp* st, int32_t* acc, int frames)
     }
 }
 
+// How far the mixer may run ahead of real time. audio_submit() only blocks
+// once the speaker chain (resampler, mixer, I2S: ~100 ms of buffer each) is
+// full, so without this the sound lagged by the whole chain: lips moved
+// before the words in the movies.
+static const long long LEAD_US = 200000;
+static const int TICK_MS = 10; // one FreeRTOS tick on this firmware (100 Hz)
+
 static void mixer_task(void*)
 {
     static int32_t acc[MIX_FRAMES * 2];
     static int16_t out[MIX_FRAMES * 2];
-    const long long block_us = 1000000LL * MIX_FRAMES / s_out_rate;
+    long long anchor_us = 0;   // when the current run of audio started
+    long long frames_out = 0;  // frames submitted since anchor_us
+    // When the silence began (0: something is playing). Start out idle: the
+    // chain comes up with the first real sound (the intro movie), as it did
+    // before silence was fed; bringing it up while the game loads made it
+    // stop and restart right as the intro began.
+    long long idle_since = -10000000;
+    long long last_restart = 0;
+    int stalls = 0;            // audio_submit calls in a row that waited it out
+    bool chain_idle = false;   // we let the speaker chain stop (a long silence)
     while (!s_quit) {
         bool any = false;
         memset(acc, 0, sizeof(acc));
@@ -124,20 +140,60 @@ static void mixer_task(void*)
                 unlock(st);
             }
         }
-        if (!any) {
-            papp_svc->delay_ms(10); // nothing to play: let the speaker idle
+        // Nothing playing: keep sending silence. ESPHome's speaker chain
+        // stops itself soon after its input runs dry, and restarting it drops
+        // the next sound and stutters the game. Only a long silence (a menu)
+        // lets it idle.
+        if (any) {
+            idle_since = 0;
+        } else if (idle_since == 0) {
+            idle_since = papp_time_us();
+        } else if (papp_time_us() - idle_since > 10000000) {
+            if (frames_out != 0) {
+                chain_idle = true; // we fed it, then let it stop
+            }
+            frames_out = 0; // the next sound starts a new run
+            papp_svc->delay_ms(10);
             continue;
         }
         for (int i = 0; i < MIX_FRAMES * 2; i++) {
             const int32_t v = acc[i];
             out[i] = static_cast<int16_t>(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
         }
+        // Stay at most LEAD_US ahead of real time since the run started. This
+        // alone paces the mixer, speaker or not.
+        const long long now = papp_time_us();
+        const long long played_us = frames_out * 1000000LL / s_out_rate;
+        if (frames_out == 0 || now - anchor_us > played_us + 250000) {
+            // A new run (after a long silence the speaker chain has stopped
+            // itself), or we fell far behind: start over from now.
+            if (chain_idle) {
+                papp_svc->audio_init(s_out_rate);
+                chain_idle = false;
+            }
+            anchor_us = now;
+            frames_out = 0;
+        } else if (played_us - (now - anchor_us) > LEAD_US) {
+            // At least one FreeRTOS tick (10 ms): delay_ms() of less rounds
+            // down to a bare yield, and this priority-6 task then spun and
+            // starved the presenter on core 1 (the intro ran at 2-8 fps).
+            const int ms = static_cast<int>((played_us - (now - anchor_us) - LEAD_US) / 1000) + 1;
+            papp_svc->delay_ms(ms < TICK_MS ? TICK_MS : ms);
+        }
+        frames_out += MIX_FRAMES;
         const long long start = papp_time_us();
         papp_svc->audio_submit(out, MIX_FRAMES);
-        // No speaker (or it returned at once): keep real time instead of spinning.
-        const long long spent = papp_time_us() - start;
-        if (spent < block_us / 2) {
-            papp_svc->delay_ms(static_cast<int>((block_us - spent) / 1000) + 1);
+        // A running chain takes a block at once (we stay ahead by only
+        // LEAD_US). A stopped one makes every audio_submit wait out its 100 ms
+        // and take nothing, which also starves the movie player. Restart it
+        // only after several stalls in a row: start() on a chain that is merely
+        // busy (starting up) restarts it, which stutters everything.
+        const long long end = papp_time_us();
+        stalls = end - start > 60000 ? stalls + 1 : 0;
+        if (stalls >= 10 && end - last_restart > 2000000) { // ~1 s taking nothing
+            papp_svc->audio_init(s_out_rate);
+            last_restart = end;
+            stalls = 0;
         }
     }
     s_mixer_done = true;

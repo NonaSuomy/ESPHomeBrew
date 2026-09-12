@@ -5,8 +5,8 @@
   "description": "LVGL v9 running as a PSRAM app: 400x240 canvas scaled 2x, GT911 touch, exit with the physical X button.",
   "build": "lvgl",
   "source": {
-    "repo": "https://github.com/giltal/RetroESP32-P4",
-    "ref": "339f17ff74eea4fe250d749fdcf0b5e544519c2a",
+    "repo": "https://github.com/NonaSuomy/RetroESP32-P4",
+    "ref": "5c475e9df46c43463bd85c43f647d513d3b9bfa2",
     "path": "apps/psram_lvgl"
   },
   "lvgl": {

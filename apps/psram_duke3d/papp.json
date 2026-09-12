@@ -1,0 +1,126 @@
+{
+  "name": "psram_duke3d",
+  "title": "Duke Nukem 3D",
+  "version": "0.1.0",
+  "description": "Duke Nukem 3D (BUILD engine) as a PSRAM app. Needs your own duke3d.grp on the SD card; the game data is not distributed here.",
+  "build": "custom",
+  "source": {
+    "repo": "https://github.com/giltal/RetroESP32-P4",
+    "ref": "339f17ff74eea4fe250d749fdcf0b5e544519c2a",
+    "path": "apps/psram_duke3d"
+  },
+  "includes": [
+    "apps/psram_duke3d/compat",
+    "components/psram_app_loader/include",
+    "components/duke3d/Engine",
+    "components/duke3d/Game",
+    "components/duke3d/audiolib"
+  ],
+  "cflags": [
+    "-DPAPP_APP_SIDE=1",
+    "-DIRAM_ATTR=",
+    "-DEXT_RAM_ATTR=",
+    "-DPLATFORM_SUPPORTS_SDL=1",
+    "-DPLATFORM_ESP32=1",
+    "-DSTUB_NETWORKING=1",
+    "-std=gnu17",
+    "-Os",
+    "-fcommon",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-Wall",
+    "-Wno-format",
+    "-Wno-unused-variable",
+    "-Wno-unused-function",
+    "-Wno-maybe-uninitialized",
+    "-Wno-implicit-function-declaration",
+    "-Wno-pointer-sign",
+    "-Wno-int-conversion",
+    "-Wno-incompatible-pointer-types",
+    "-Wno-dangling-pointer",
+    "-Wno-array-bounds",
+    "-Wno-address",
+    "-Wno-restrict",
+    "-Wno-builtin-declaration-mismatch",
+    "-Wno-char-subscripts",
+    "-Wno-sign-compare",
+    "-Wno-parentheses",
+    "-Wno-missing-braces",
+    "-Wno-return-type",
+    "-Wno-stringop-overflow",
+    "-Wno-stringop-truncation"
+  ],
+  "groups": [
+    {
+      "dir": "components/duke3d/Engine",
+      "prefix": "eng_",
+      "files": [
+        "cache.c",
+        "display.c",
+        "draw.c",
+        "dummy_multi.c",
+        "engine.c",
+        "filesystem.c",
+        "fixedPoint_math.c",
+        "tiles.c"
+      ]
+    },
+    {
+      "dir": "components/duke3d/Game",
+      "prefix": "game_",
+      "files": [
+        "actors.c",
+        "animlib.c",
+        "config.c",
+        "console.c",
+        "control.c",
+        "cvar_defs.c",
+        "cvars.c",
+        "game.c",
+        "gamedef.c",
+        "global.c",
+        "keyboard.c",
+        "menues.c",
+        "player.c",
+        "premap.c",
+        "rts.c",
+        "scriplib.c",
+        "sector.c",
+        "sounds.c",
+        "dummy_audiolib.c"
+      ]
+    },
+    {
+      "dir": "components/duke3d/audiolib",
+      "prefix": "aud_",
+      "files": [
+        "fx_man.c",
+        "dsl.c",
+        "ll_man.c",
+        "multivoc.c",
+        "mv_mix.c",
+        "mvreverb.c",
+        "nodpmi.c",
+        "pitch.c",
+        "user.c",
+        "nomusic.c"
+      ]
+    },
+    {
+      "dir": "apps/psram_duke3d",
+      "prefix": "papp_",
+      "files": [
+        "papp_main.c",
+        "papp_syscalls.c",
+        "papp_sdl_video.c",
+        "papp_sdl_audio.c",
+        "papp_sdl_event.c",
+        "papp_sdl_system.c"
+      ]
+    }
+  ],
+  "ldflags": [
+    "-Wl,--allow-multiple-definition"
+  ],
+  "newlib": true
+}

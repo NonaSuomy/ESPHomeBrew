@@ -70,6 +70,7 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 | `@esp-bridge run device.yaml source=local device=10.13.37.60 seconds=90` | Flash your local config over OTA, then capture 90 s of logs |
 | `@esp-bridge logs device.yaml source=local device=/dev/ttyUSB0 seconds=60` | Capture 60 s of logs |
 | `@esp-bridge launch url=https://github.com/NonaSuomy/papp-conversions/releases/download/psram_lvgl-v0.1.1/psram_lvgl-0.1.1.papp` | Stream and start that PAPP on the device |
+| `@esp-bridge launch url=… seconds=30 serial=/dev/ttyUSB0` | Start it and return 30 s of device log plus the serial console (a crash's full panic dump and backtrace only go to serial). The port must be in `[esphome].devices` and not open elsewhere; the bridge opens it without resetting the board |
 | `@esp-bridge close` | Close the running PAPP |
 | `@esp-bridge catalog` | Reload the store list on the device |
 | `@esp-bridge screenshot` | Post an 800×480 PNG of the running PAPP in the thread |

@@ -26,8 +26,11 @@ Request format (reply in any channel, mention the bridge):
     @esp-bridge close
     @esp-bridge catalog
     @esp-bridge status
+    @esp-bridge launch url=… seconds=30 serial=/dev/ttyUSB0   # also read the serial port
 launch/close/catalog call the papp_loader API actions from esphome/device_control.yaml
 over the ESPHome native API (needs aioesphomeapi, which the ESPHome venv already has).
+With seconds=N they also return N seconds of device log; serial= (a port from
+[esphome].devices) adds the serial console, where a crash's full panic dump goes.
 Agents may instead send the same fields as message data: {"esp_bridge": {...}}.
 
 Usage:
@@ -176,6 +179,7 @@ class Request:
     seconds: int = 60
     url: str | None = None
     seconds_given: bool = False  # launch/close only capture device logs when asked
+    serial: str | None = None  # also read this serial port during launch/close
 
 
 def request_words(text: str, handle: str) -> list[str] | None:
@@ -239,7 +243,7 @@ def parse_request(text: str, data: dict | None, handle: str) -> Request | None:
         raise BridgeError("`seconds` must be a whole number.")
     return Request(action=action, yaml=fields.get("yaml"), ref=fields.get("ref", "main"),
                    source=fields.get("source", "repo").lower(), device=fields.get("device"), seconds=seconds,
-                   url=fields.get("url"), seconds_given="seconds" in fields)
+                   url=fields.get("url"), seconds_given="seconds" in fields, serial=fields.get("serial"))
 
 
 def _inside(base: Path, rel: str) -> Path:
@@ -260,6 +264,13 @@ def validate(req: Request, cfg: Config) -> Path | None:
             raise BridgeError(f"`{req.action}` needs `device=` (allowed: {', '.join(cfg.devices) or 'none'}).")
         if req.device not in cfg.devices:
             raise BridgeError(f"Device `{req.device}` is not in this bridge's allowlist.")
+    if (req.action in {"logs", "run"} or req.seconds_given) and not 5 <= req.seconds <= cfg.max_log_seconds:
+        raise BridgeError(f"`seconds` must be between 5 and {cfg.max_log_seconds}.")
+    if req.serial is not None:
+        if req.action not in ("launch", "close") or not req.seconds_given:
+            raise BridgeError("`serial=` goes with `launch`/`close` and `seconds=`.")
+        if req.serial not in cfg.devices:
+            raise BridgeError(f"Serial port `{req.serial}` is not in this bridge's allowlist.")
     if req.action in DEVICE_API_ACTIONS:
         if not cfg.api_host:
             raise BridgeError("This bridge has no [device_api] host configured.")
@@ -390,6 +401,7 @@ def call_device_action(cfg: Config, action: str, data: dict[str, str], timeout: 
     stage = ["resolving the name"]
 
     captured: list[str] = []
+    done = [False]  # the action itself went through
 
     async def go() -> None:
         address = await asyncio.get_running_loop().run_in_executor(None, resolve_host, cfg.api_host, cfg.api_port)
@@ -417,25 +429,87 @@ def call_device_action(cfg: Config, action: str, data: dict[str, str], timeout: 
             result = client.execute_service(service, data)
             if inspect.isawaitable(result):
                 await result
+            done[0] = True
             if log_seconds:
                 stage[0] = f"capturing {log_seconds}s of device log"
                 await asyncio.sleep(log_seconds)
                 if callable(unsubscribe):
                     unsubscribe()
         finally:
-            await client.disconnect()
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001 - the device may have rebooted meanwhile
+                pass
 
     try:
         asyncio.run(asyncio.wait_for(go(), timeout + log_seconds))
     except BridgeError:
         raise
-    except asyncio.TimeoutError as error:
-        raise BridgeError(f"The device at {cfg.api_host} did not answer within {timeout:.0f}s "
-                          f"(stuck while {stage[0]}).") from error
-    except Exception as error:  # noqa: BLE001 - connection/auth problems are reported, not fatal
+    except Exception as error:  # noqa: BLE001
+        if done[0] and log_seconds:
+            # The action ran; losing the log connection afterwards (a crash
+            # rebooting the device) is exactly what the caller wants to see.
+            captured.append(f"[esp-bridge] device log ended early: {type(error).__name__}: {error}")
+            return "\n".join(captured)
+        if isinstance(error, asyncio.TimeoutError):
+            raise BridgeError(f"The device at {cfg.api_host} did not answer within {timeout:.0f}s "
+                              f"(stuck while {stage[0]}).") from error
         raise BridgeError(f"Device API call failed while {stage[0]}: {type(error).__name__}: {error}") from error
     return "\n".join(captured)
 
+
+class SerialCapture:
+    """Read a serial port in the background (the full panic dump only goes there).
+
+    DTR/RTS stay low so opening the port does not reset the board. Needs
+    pyserial, which the ESPHome venv has.
+    """
+
+    def __init__(self, port: str, max_bytes: int, baud: int = 115200):
+        self.port, self.max_bytes, self.baud = port, max_bytes, baud
+        self.data = bytearray()
+        self.error: str | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        try:
+            import serial  # pyserial
+        except ImportError:
+            self.error = "pyserial is missing; run the bridge with the ESPHome venv's python"
+            return
+        try:
+            port = serial.Serial()
+            port.port, port.baudrate, port.timeout = self.port, self.baud, 0.2
+            port.dtr = False
+            port.rts = False
+            port.open()
+        except Exception as error:  # noqa: BLE001 - busy port, missing device, permissions
+            self.error = f"could not open {self.port}: {error}"
+            return
+
+        def reader() -> None:
+            try:
+                while not self._stop.is_set():
+                    chunk = port.read(4096)
+                    if chunk and len(self.data) < self.max_bytes:
+                        self.data += chunk[: self.max_bytes - len(self.data)]
+            except Exception as error:  # noqa: BLE001
+                self.error = f"reading {self.port} failed: {error}"
+            finally:
+                port.close()
+
+        self._thread = threading.Thread(target=reader, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> str:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+        text = ANSI.sub("", self.data.decode("utf-8", "replace")).replace("\r\n", "\n")
+        if self.error:
+            text += f"\n[esp-bridge] serial: {self.error}"
+        return text
 
 # ── screenshots (papp_loader diagnostic stream, TCP port 3232) ──────────────
 
@@ -681,8 +755,17 @@ class Runner:
                 served = f" (served from this machine as {data['url']})"
             log = ""
             if not self.dry_run:
-                log = call_device_action(self.cfg, DEVICE_API_ACTIONS[req.action], data,
-                                         log_seconds=req.seconds if req.seconds_given else 0)
+                capture = SerialCapture(req.serial, self.cfg.max_log_bytes) if req.serial else None
+                if capture:
+                    capture.start()
+                try:
+                    log = call_device_action(self.cfg, DEVICE_API_ACTIONS[req.action], data,
+                                             log_seconds=req.seconds if req.seconds_given else 0)
+                finally:
+                    if capture:
+                        serial_log = capture.stop()
+                if capture:
+                    log = f"=== device log (network) ===\n{log}\n\n=== serial {req.serial} ===\n{serial_log}"
             what = f"`{req.action}`" + (f" `{req.url.rsplit('/', 1)[-1]}`" if req.url else "")
             logged = f" Device log for {req.seconds}s attached." if req.seconds_given and not self.dry_run else ""
             return JobResult(True, f"✅ {what} sent to {self.cfg.api_host}{served}{' (dry run)' if self.dry_run else ''}.{logged}",
@@ -826,10 +909,12 @@ def describe(req: "Request") -> str:
             parts.append(f"ref={req.ref}")
     if req.device:
         parts.append(f"device={req.device}")
-    if req.action in ("logs", "run"):
+    if req.action in ("logs", "run") or req.seconds_given:
         parts.append(f"seconds={req.seconds}")
     if req.url:
         parts.append(f"url={req.url}")
+    if req.serial:
+        parts.append(f"serial={req.serial}")
     return " ".join(parts)
 
 

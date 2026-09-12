@@ -360,6 +360,107 @@ class AppLogTests(unittest.TestCase):
         self.assertFalse(plain.seconds_given)
 
 
+class CrashCaptureTests(unittest.TestCase):
+    """launch ... seconds=N serial=PORT: a crashing app reboots the device mid-capture."""
+
+    def tearDown(self):
+        sys.modules.pop("aioesphomeapi", None)
+        sys.modules.pop("serial", None)
+
+    def fake_api(self, events):
+        class Message:
+            def __init__(self, text):
+                self.message = text
+
+        class FakeService:
+            name = "papp_launch"
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def connect(self, login=False):
+                return None
+
+            async def list_entities_services(self):
+                return [], [FakeService()]
+
+            def subscribe_logs(self, on_log, log_level=None):
+                self.on_log = on_log
+                return lambda: None
+
+            async def execute_service(self, service, data):
+                events.append("launch")
+                self.on_log(Message(b"[I][papp_loader]: RA: video mode 640x400 8 bpp"))
+
+            async def disconnect(self):
+                raise ConnectionResetError("device rebooted")
+
+        fake = type(sys)("aioesphomeapi")
+        fake.APIClient = FakeClient
+        sys.modules["aioesphomeapi"] = fake
+
+    def fake_serial(self, opened):
+        class FakeSerial:
+            def __init__(self):
+                self.port = self.baudrate = self.timeout = None
+                self.dtr = self.rts = True
+                self.chunks = [b"Guru Meditation Error: Core  0 panic'ed (Illegal instruction)\r\n", b"MEPC    : 0x4a01234c\r\n"]
+
+            def open(self):
+                opened.append((self.port, self.dtr, self.rts))
+
+            def read(self, n):
+                import time as t
+                if self.chunks:
+                    return self.chunks.pop(0)
+                t.sleep(0.01)
+                return b""
+
+            def close(self):
+                pass
+
+        mod = type(sys)("serial")
+        mod.Serial = FakeSerial
+        sys.modules["serial"] = mod
+
+    def test_serial_dump_and_log_survive_the_reboot(self):
+        events, opened = [], []
+        self.fake_api(events)
+        self.fake_serial(opened)
+        import asyncio
+        real_sleep = asyncio.sleep
+
+        async def short(seconds):
+            await real_sleep(0.05)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_api_config(Path(tmp))
+            cfg.devices = ["/dev/ttyUSB0"]
+            req = eb.parse_request(f"@esp-bridge launch url={STORE} seconds=5 serial=/dev/ttyUSB0", None, "esp-bridge")
+            eb.validate(req, cfg)
+            asyncio.sleep = short
+            try:
+                result = eb.Runner(cfg).execute(req)
+            finally:
+                asyncio.sleep = real_sleep
+        self.assertEqual(opened, [("/dev/ttyUSB0", False, False)])  # no reset on open
+        self.assertIn("RA: video mode", result.log)
+        self.assertIn("=== serial /dev/ttyUSB0 ===", result.log)
+        self.assertIn("Guru Meditation Error", result.log)
+        self.assertIn("MEPC    : 0x4a01234c", result.log)
+
+    def test_serial_needs_an_allowed_port_and_seconds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_api_config(Path(tmp))
+            cfg.devices = ["/dev/ttyUSB0"]
+            for text in [f"launch url={STORE} seconds=5 serial=/dev/ttyACM9",
+                         f"launch url={STORE} serial=/dev/ttyUSB0",
+                         f"launch url={STORE} seconds=9999"]:
+                with self.subTest(text=text), self.assertRaises(eb.BridgeError):
+                    eb.validate(eb.parse_request("@esp-bridge " + text, None, "esp-bridge"), cfg)
+
+
 class ProxyTests(unittest.TestCase):
     def test_github_downloads_are_served_to_the_device_from_here(self):
         import io

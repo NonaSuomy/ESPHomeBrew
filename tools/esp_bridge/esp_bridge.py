@@ -98,20 +98,26 @@ class Config:
     api_port: int = 6053
     api_key: str | None = None
     allowed_url_prefixes: list[str] = field(default_factory=list)
+    token_env: str = "EHGI_BRIDGE_TOKEN"
 
     @staticmethod
     def load(path: Path, *, need_token: bool = True) -> "Config":
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
         hub, repo, local, esp = raw.get("hub", {}), raw.get("repo", {}), raw.get("local", {}), raw.get("esphome", {})
         exp = lambda p: Path(os.path.expanduser(p)).resolve() if p else None  # noqa: E731
-        token = os.environ.get(hub.get("token_env", "EHGI_BRIDGE_TOKEN"), "")
+        token_env = hub.get("token_env", "EHGI_BRIDGE_TOKEN")
+        token = os.environ.get(token_env, "").strip()
         if need_token and not token:
-            raise SystemExit(f"Set {hub.get('token_env', 'EHGI_BRIDGE_TOKEN')} to the bridge agent's token.")
+            raise SystemExit(f"Set {token_env} to the bridge agent's token.")
+        if need_token and (not token.startswith("ac_") or "PASTE" in token.upper() or "…" in token):
+            raise SystemExit(f"{token_env} does not look like an agent token. It should be the ac_... token shown when you "
+                             "add the bridge's agent in the project, not a placeholder.")
         enabled = [a for a in raw.get("actions", {}).get("enabled", ["status", "config", "compile"]) if a in ACTIONS]
         cfg = Config(
             hub_url=hub.get("url", "https://ehgi.ai/api/mcp"),
             project_id=hub["project_id"],
             token=token,
+            token_env=token_env,
             handle=hub.get("handle", "esp-bridge").lstrip("@"),
             allowed_requesters=[h.lstrip("@").lower() for h in hub.get("allowed_requesters", [])],
             repo_url=repo.get("url"),
@@ -474,6 +480,15 @@ class Runner:
 # ── hub (EhGI MCP over streamable HTTP) ─────────────────────────────────────
 
 
+class HubAuthError(RuntimeError):
+    """The hub rejected the token; retrying will not help."""
+
+
+AUTH_HELP = ("The hub rejected the bridge's token (HTTP {code}). Put the token of the bridge's own agent "
+             "(Add an agent in the project, e.g. esp-bridge) in {env}, then run `check` again. "
+             "A token that was rotated or whose agent was removed also gives this.")
+
+
 class Hub:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -486,7 +501,13 @@ class Hub:
         if self.session:
             headers["Mcp-Session-Id"] = self.session
         request = urllib.request.Request(self.cfg.hub_url, data=json.dumps(payload).encode(), headers=headers, method="POST")
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        try:
+            response = urllib.request.urlopen(request, timeout=timeout)
+        except urllib.error.HTTPError as error:
+            if error.code in (401, 403):
+                raise HubAuthError(AUTH_HELP.format(code=error.code, env=self.cfg.token_env)) from None
+            raise
+        with response:
             self.session = response.headers.get("Mcp-Session-Id") or self.session
             body = response.read().decode("utf-8", "replace")
         if "id" not in payload:
@@ -514,6 +535,8 @@ class Hub:
                     raise RuntimeError(f"{tool}: {message and message.get('error')}")
                 text = (message.get("result", {}).get("content") or [{}])[0].get("text", "{}")
                 return json.loads(text)
+            except HubAuthError:
+                raise
             except (urllib.error.URLError, RuntimeError, json.JSONDecodeError, TimeoutError) as error:
                 self.session = None
                 if attempt == 1:
@@ -599,6 +622,8 @@ def serve(cfg: Config, dry_run: bool) -> None:
         try:
             result = hub.call("wait_for_activity", {"since_seq": since, "max_wait_seconds": 45, "only_for_me": True}, timeout=75)
             failures = 0
+        except HubAuthError:
+            raise
         except RuntimeError as error:
             failures += 1
             print(error, file=sys.stderr, flush=True)
@@ -630,6 +655,14 @@ def main() -> int:
     local.add_argument("request", help='e.g. "compile esphome/device.yaml ref=main"')
     args = parser.parse_args()
     cfg = Config.load(args.config, need_token=args.command != "local")
+    try:
+        return run_command(args, cfg)
+    except HubAuthError as error:
+        print(error, file=sys.stderr)
+        return 3
+
+
+def run_command(args: argparse.Namespace, cfg: Config) -> int:
     if args.command == "check":
         me = Hub(cfg).call("get_briefing", {}).get("me", {})
         print(f"Connected as @{me.get('handle')} ({me.get('agent_id') or me.get('id')}); configured handle @{cfg.handle}.")

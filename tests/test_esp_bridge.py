@@ -3,10 +3,13 @@
 Run: python3 -m unittest discover -s tests
 """
 
+import os
 import sys
 import tempfile
 import textwrap
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools" / "esp_bridge"))
@@ -235,6 +238,45 @@ class DeviceApiTests(unittest.TestCase):
         self.assertEqual(calls[-1], ("disconnect",))
         with self.assertRaises(eb.BridgeError):  # device without the package's actions
             eb.call_device_action(self.cfg, "papp_refresh_catalog", {})
+
+
+class TokenTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        make_config(Path(self.tmp.name))  # writes bridge.toml
+        self.path = Path(self.tmp.name) / "bridge.toml"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        os.environ.pop("EHGI_BRIDGE_TOKEN", None)
+
+    def test_missing_or_placeholder_tokens_are_refused_before_connecting(self):
+        for token in ["", "ac_PASTE_TOKEN", "paste-here", "ac_…"]:
+            os.environ["EHGI_BRIDGE_TOKEN"] = token
+            with self.subTest(token=token), self.assertRaises(SystemExit):
+                eb.Config.load(self.path)
+        os.environ["EHGI_BRIDGE_TOKEN"] = " ac_realLookingToken123 \n"
+        self.assertEqual(eb.Config.load(self.path).token, "ac_realLookingToken123")
+
+    def test_rejected_token_is_reported_once_without_retrying(self):
+        os.environ["EHGI_BRIDGE_TOKEN"] = "ac_realLookingToken123"
+        cfg = eb.Config.load(self.path)
+        calls = []
+
+        def refuse(request, timeout=None):
+            calls.append(request.full_url)
+            raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, None)
+
+        original = urllib.request.urlopen
+        urllib.request.urlopen = refuse
+        try:
+            with self.assertRaises(eb.HubAuthError) as caught:
+                eb.Hub(cfg).call("get_briefing", {})
+        finally:
+            urllib.request.urlopen = original
+        self.assertEqual(len(calls), 1)
+        self.assertIn("HTTP 401", str(caught.exception))
+        self.assertIn("EHGI_BRIDGE_TOKEN", str(caught.exception))
 
 
 if __name__ == "__main__":

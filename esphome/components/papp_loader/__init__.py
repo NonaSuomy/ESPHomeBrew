@@ -15,6 +15,7 @@ CONF_REPORT_URL = "report_url"
 CONF_REPORT_LOG_BYTES = "report_log_bytes"
 CONF_DATA_ROOT = "data_root"
 CONF_DOWNLOAD_DATA = "download_data"
+CONF_DATA_SEARCH = "data_search"
 CONF_DISPLAY_ID = "display_id"
 CONF_TOUCHSCREEN_ID = "touchscreen_id"
 CONF_SPEAKER_ID = "speaker_id"
@@ -79,6 +80,9 @@ CONFIG_SCHEMA = cv.Schema(
         # missing ones are downloaded here before launch (docs/esphome-store.md).
         cv.Optional(CONF_DATA_ROOT, default="/sd"): validate_data_root,
         cv.Optional(CONF_DOWNLOAD_DATA, default=True): cv.boolean,
+        # Where the user may already keep app files (SD card, USB drive, ...):
+        # found files are not downloaded, and app reads of /sd/... fall back here.
+        cv.Optional(CONF_DATA_SEARCH, default=["/sd", "/usb0"]): cv.ensure_list(validate_data_root),
         cv.Required(CONF_DISPLAY_ID): cv.use_id(display.Display),
         cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
         cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
@@ -124,6 +128,8 @@ async def to_code(config):
         cg.add(var.set_report_log_bytes(config[CONF_REPORT_LOG_BYTES]))
     cg.add(var.set_data_root(config[CONF_DATA_ROOT]))
     cg.add(var.set_download_data(config[CONF_DOWNLOAD_DATA]))
+    for root in config[CONF_DATA_SEARCH]:
+        cg.add(var.add_data_search_root(root))
 
     display_var = await cg.get_variable(config[CONF_DISPLAY_ID])
     cg.add(var.set_display(display_var))

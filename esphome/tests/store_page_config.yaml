@@ -59,6 +59,7 @@ papp_loader:
   catalog_url: https://nonasuomy.github.io/papp-conversions/
   data_root: /sd
   download_data: true
+  data_search: [/sd, /usb0]
 
 lvgl:
   id: lvgl_component

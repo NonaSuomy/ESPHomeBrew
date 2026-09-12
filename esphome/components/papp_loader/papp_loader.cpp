@@ -496,6 +496,8 @@ void PappLoader::dump_config() {
   ESP_LOGCONFIG(TAG, "  Network PAPPs: enabled with papp_loader.launch_url");
   ESP_LOGCONFIG(TAG, "  App data: %s into %s", this->download_data_ ? "download missing files" : "off",
                 this->data_root_.c_str());
+  for (const auto &root : this->data_search_)
+    ESP_LOGCONFIG(TAG, "  App data also looked for in: %s", root.c_str());
   if (!this->catalog_url_.empty())
     ESP_LOGCONFIG(TAG, "  PAPP catalog: %s", this->catalog_url_.c_str());
 }
@@ -1891,7 +1893,19 @@ int PappLoader::svc_touch_read(int *x, int *y) { return active_ != nullptr ? act
 
 void *PappLoader::svc_file_open(const char *path, const char *mode) {
   const std::string mapped = runtime_path(path);
-  return std::fopen(mapped.c_str(), mode);
+  FILE *file = std::fopen(mapped.c_str(), mode);
+  // Apps open their data at fixed /sd/... paths. When a read-only open misses
+  // the SD card, try the same path under data_root and the data_search roots,
+  // so data kept on (or downloaded to) /usb0 works without changing the app.
+  // Writes (saves, configs) always stay where the app asked.
+  if (file != nullptr || active_ == nullptr || path == nullptr || mode == nullptr || mode[0] != 'r' ||
+      std::strchr(mode, '+') != nullptr || std::strncmp(path, "/sd/", 4) != 0)
+    return file;
+  const std::string found = active_->find_data_file_(path + 4);
+  if (found.empty() || found == mapped)
+    return nullptr;
+  ESP_LOGD(TAG, "App read %s -> %s", path, found.c_str());
+  return std::fopen(found.c_str(), mode);
 }
 int PappLoader::svc_file_close(void *stream) { return stream != nullptr ? std::fclose(static_cast<FILE *>(stream)) : -1; }
 size_t PappLoader::svc_file_read(void *ptr, size_t size, size_t nmemb, void *stream) {
@@ -2568,6 +2582,23 @@ static bool make_parent_dirs(const std::string &root, const std::string &target)
   return true;
 }
 
+// Returns where `target` (relative, e.g. roms/doom/doom1.wad) already exists:
+// under data_root first, then each data_search root; "" when nowhere.
+std::string PappLoader::find_data_file_(const std::string &target) const {
+  std::vector<std::string> roots{this->data_root_};
+  for (const auto &root : this->data_search_) {
+    if (std::find(roots.begin(), roots.end(), root) == roots.end())
+      roots.push_back(root);
+  }
+  for (const auto &root : roots) {
+    const std::string path = runtime_path(root.c_str()) + "/" + target;
+    struct stat st{};
+    if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode))
+      return path;
+  }
+  return {};
+}
+
 esp_err_t PappLoader::sync_app_data_(const std::string &papp_url) {
   if (!this->download_data_)
     return ESP_OK;
@@ -2595,7 +2626,8 @@ esp_err_t PappLoader::sync_app_data_(const std::string &papp_url) {
     return ESP_ERR_INVALID_RESPONSE;
   }
 
-  // A file that is already there is kept whatever its size: it may be the
+  // A file that is already on any storage root (data_root, data_search) is
+  // kept whatever its size: it may be the
   // user's own copy (for example a full game instead of the shareware one).
   // Downloads go to <file>.part and are renamed only once verified, so an
   // interrupted download never leaves a partial file under the real name.
@@ -2603,15 +2635,16 @@ esp_err_t PappLoader::sync_app_data_(const std::string &papp_url) {
   std::vector<size_t> missing;
   uint64_t total = 0;
   for (size_t i = 0; i < files.size(); i++) {
-    const std::string path = root + "/" + files[i].target;
-    struct stat st{};
-    if (stat(path.c_str(), &st) == 0)
+    const std::string found = this->find_data_file_(files[i].target);
+    if (!found.empty()) {
+      ESP_LOGI(TAG, "Have %s at %s; not downloading", files[i].target.c_str(), found.c_str());
       continue;
+    }
     missing.push_back(i);
     total += files[i].size;
   }
   if (missing.empty()) {
-    ESP_LOGI(TAG, "App data present: %u file(s) under %s", static_cast<unsigned>(files.size()), root.c_str());
+    ESP_LOGI(TAG, "App data present: all %u file(s) found", static_cast<unsigned>(files.size()));
     return ESP_OK;
   }
   if (total > UINT32_MAX) {

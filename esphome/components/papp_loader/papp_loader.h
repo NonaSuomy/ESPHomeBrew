@@ -43,6 +43,10 @@ class PappLoader : public Component {
   // Files already on the card are never replaced.
   void set_data_root(const std::string &root) { this->data_root_ = root; }
   void set_download_data(bool download) { this->download_data_ = download; }
+  // Storage roots (for example /sd, /usb0) where the user may already have an
+  // app's files. A file found under any of them is not downloaded, and an app
+  // reading /sd/<path> that is not on the card gets <root>/<path> instead.
+  void add_data_search_root(const std::string &root) { this->data_search_.push_back(root); }
   // Launch progress for a UI: true while a network app (and its data) loads,
   // a fraction 0..1 (-1 when unknown or idle), and a one-line status that
   // stays after a failure until the next launch ("" when there is nothing to say).
@@ -194,6 +198,7 @@ class PappLoader : public Component {
   static void papp_load_task_entry_(void *arg);
   static void papp_catalog_task_entry_(void *arg);
   esp_err_t sync_app_data_(const std::string &papp_url);
+  std::string find_data_file_(const std::string &target) const;
   esp_err_t download_data_file_(const data::DataFile &file, const std::string &path, uint32_t done_before,
                                 uint32_t total, size_t index, size_t count);
   void finish_app_();
@@ -316,6 +321,7 @@ class PappLoader : public Component {
   // progress under progress_lock_; the loop task reads it for the UI.
   std::string data_root_{"/sd"};
   bool download_data_{true};
+  std::vector<std::string> data_search_;
   static constexpr size_t PROGRESS_STATUS_SIZE = 96;
   portMUX_TYPE progress_lock_ = portMUX_INITIALIZER_UNLOCKED;
   char progress_status_[PROGRESS_STATUS_SIZE]{};

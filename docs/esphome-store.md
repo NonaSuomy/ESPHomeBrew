@@ -21,6 +21,7 @@ papp_loader:
   lvgl_id: lvgl_component
   data_root: /sd          # where app data (game files) goes; default /sd
   download_data: true     # default; false never downloads app data
+  data_search: [/sd, /usb0]   # default; where you may already keep app files
   # ... display_id, touchscreen_id, speaker_id, usb_hidx_id, path as before
 ```
 
@@ -61,9 +62,9 @@ substitutions:
 - **On opening the page:** the loader is handed the list (`set_catalog_container`) and the catalog reloads (`refresh_catalog`).
 - **REFRESH** reloads it on demand. It also reloads every `papp_store_refresh`, but only while the store page is on screen and no app is running (LVGL is paused while a PAPP runs).
 - Each button is labelled with the file name, e.g. `psram_lvgl-0.1.0.papp`, so a new version appears as a new label after a refresh. Tapping streams the app from GitHub Pages into PSRAM. The app itself is not cached on the SD card.
-- **App data.** Before a game starts, the loader reads its data list (`psram_doom-0.1.0.files`, next to the `.papp`). It downloads every listed file that is missing under `data_root` (Doom: `/sd/roms/doom/doom1.wad` and `prboom.wad`). Each download goes to `<file>.part`, is checked against its sha256, and is only then renamed, so an interrupted download never leaves a broken file. A file that is already there is **never replaced**, whatever its size, so your own full `duke3d.grp` stays. An app without a list starts straight away. If a download fails, the app does not start; the status line says why, and the test report (if `report_url` is set) says `data_failed`. A close request (the `papp_close` API action, or a tap on the loader's close area) cancels a data download.
+- **App data.** Before a game starts, the loader reads its data list (`psram_doom-0.1.0.files`, next to the `.papp`). It first looks for each file under `data_root` and every `data_search` root (`/sd/roms/doom/doom1.wad`, `/usb0/roms/doom/doom1.wad`, ...). Only files found nowhere are downloaded, into `data_root`. Each download goes to `<file>.part`, is checked against its sha256, and is only then renamed, so an interrupted download never leaves a broken file. A file that is already on any of those storages is **never replaced or downloaded again**, whatever its size, so your own full `duke3d.grp` stays. An app without a list starts straight away. If a download fails, the app does not start; the status line says why, and the test report (if `report_url` is set) says `data_failed`. A close request (the `papp_close` API action, or a tap on the loader's close area) cancels a data download.
 - **Progress.** While the data and then the `.papp` download, a bar and a status line (`1/2 doom1.wad  1.2 / 4.1 MB`, then `Loading psram_doom-0.1.0.papp  120 / 513 KB`) appear under the header. The bar hides again when the app starts; the status line stays after a failure until the next launch.
-- `data_root` can be any mounted folder (`/usb0`, ...), but the current Doom, Quake and Duke3D builds open their files at fixed `/sd/roms/<game>/` paths. Keep `/sd` for them.
+- **Files on other storage.** Apps open their files at fixed `/sd/...` paths. When an app opens a file for reading and it is not on the SD card, the loader tries the same path under `data_root` and the `data_search` roots, for example `/usb0/roms/quake/id1/pak0.pak`. Data kept on a USB drive, or downloaded there with `data_root: /usb0`, works without changing the apps. Writes (save games, configs) always go where the app asked, normally the SD card. A root that isn't mounted is simply skipped.
 - The status line shows `Refreshing...`, then `N apps - tap to launch` about 4 s later. The loader has no "catalog loaded" callback, so on a slow link the count can lag. Tap REFRESH again.
 
 ### Progress on your own page

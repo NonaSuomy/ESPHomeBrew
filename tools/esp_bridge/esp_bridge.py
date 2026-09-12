@@ -110,6 +110,8 @@ class Config:
     allowed_url_prefixes: list[str] = field(default_factory=list)
     token_env: str = "EHGI_BRIDGE_TOKEN"
     show_requests: bool = True
+    firmware_elf: list[str] = field(default_factory=list)  # globs; default: the local/repo build dirs
+    addr2line: str | None = None
 
     @staticmethod
     def load(path: Path, *, need_token: bool = True) -> "Config":
@@ -157,6 +159,9 @@ class Config:
         cfg.screen_port = int(api.get("screen_port", 3232))
         cfg.proxy_port = int(api.get("proxy_port", 8765))
         cfg.show_requests = bool(raw.get("console", {}).get("show_requests", True))
+        elf = api.get("firmware_elf", [])
+        cfg.firmware_elf = [elf] if isinstance(elf, str) else list(elf)
+        cfg.addr2line = api.get("addr2line")
         env_key = os.environ.get(api["encryption_key_env"], "") if api.get("encryption_key_env") else ""
         cfg.api_key = env_key or load_secret_map(cfg.secrets_files).get(api.get("encryption_key_secret", "")) or None
         cfg.allowed_url_prefixes = list(api.get("allowed_url_prefixes", [
@@ -511,6 +516,133 @@ class SerialCapture:
             text += f"\n[esp-bridge] serial: {self.error}"
         return text
 
+
+# ── crash decoding ──────────────────────────────────────────────────────────
+# A panic dump is only addresses. Firmware addresses are looked up in the
+# firmware ELF this machine built (the dump's "ELF file SHA256" picks the
+# right one); PAPP addresses (linked at 0x4A000000) in the app's symbol list,
+# which dev builds publish next to the .papp.
+
+CRASH = re.compile(r"abort\(\) was called|Guru Meditation|panic'ed|^MEPC\s*:|^Backtrace:", re.M)
+ELF_SHA = re.compile(r"ELF file SHA256:\s*([0-9a-fA-F]{8,64})")
+HEX = re.compile(r"0x([0-9a-fA-F]{8})\b")
+PAPP_BASE, PAPP_END = 0x4A000000, 0x4C000000
+PSRAM = (0x48000000, 0x4C000000)  # ESP32-P4: stacks and heap there are data, not code
+DEFAULT_ELF_GLOBS = [".esphome/build/*/.pioenvs/*/firmware.elf", ".esphome/build/*/build/*.elf"]
+ADDR2LINE_GLOBS = [
+    "~/.platformio/packages/toolchain-*/bin/*-elf-addr2line",
+    "~/.espressif/tools/*/*/*/bin/*-elf-addr2line",
+    "~/.esphome/**/bin/*-elf-addr2line",
+]
+
+
+def crash_addresses(text: str) -> tuple[list[int], list[int]]:
+    """Code-looking addresses in the first panic dump: (firmware, app), in order."""
+    found = CRASH.search(text)
+    if not found:
+        return [], []
+    dump = text[max(0, text.rfind("\n", 0, found.start())):]
+    end = dump.find("Rebooting...")
+    dump = dump[:end] if end > 0 else dump[:20000]
+    firmware, app = [], []
+    for match in HEX.finditer(dump):
+        address = int(match.group(1), 16)
+        if PAPP_BASE <= address < PAPP_END:
+            if address not in app:
+                app.append(address)
+        elif 0x40000000 <= address < 0x50000000 and not PSRAM[0] <= address < PSRAM[1] and address not in firmware:
+            firmware.append(address)
+    return firmware[:80], app[:80]
+
+
+def find_firmware_elf(cfg: Config, sha_prefix: str | None) -> tuple[Path | None, str]:
+    import glob
+
+    patterns = [os.path.expanduser(p) for p in cfg.firmware_elf]
+    for base in (cfg.local_dir, cfg.repo_path / "esphome" if cfg.repo_path else None):
+        if base and not cfg.firmware_elf:
+            patterns += [str(base / p) for p in DEFAULT_ELF_GLOBS]
+    candidates = sorted({Path(p) for pat in patterns for p in glob.glob(pat, recursive=True)},
+                        key=lambda p: p.stat().st_mtime, reverse=True)
+    if not candidates:
+        return None, "no firmware ELF found (set [device_api] firmware_elf)"
+    if not sha_prefix:
+        return candidates[0], f"{candidates[0]} (newest; the dump had no ELF SHA256 to check it against)"
+    for path in candidates:
+        if hashlib.sha256(path.read_bytes()).hexdigest().startswith(sha_prefix.lower()):
+            return path, str(path)
+    return None, f"none of the {len(candidates)} firmware ELFs here has SHA256 {sha_prefix} (the device runs another build)"
+
+
+def find_addr2line(cfg: Config, elf: Path) -> str | None:
+    import glob
+
+    if cfg.addr2line:
+        return os.path.expanduser(cfg.addr2line)
+    with open(elf, "rb") as f:
+        machine = struct.unpack_from("<H", f.read(20), 18)[0]
+    arch = "riscv32" if machine == 243 else "xtensa"
+    tools = [shutil.which(f"{arch}-esp-elf-addr2line")]
+    tools += [p for pat in ADDR2LINE_GLOBS for p in sorted(glob.glob(os.path.expanduser(pat), recursive=True))]
+    return next((t for t in tools if t and Path(t).name.startswith(arch)), None)
+
+
+def load_papp_symbols(url: str | None, cfg: Config, opener=urllib.request.urlopen) -> list[tuple[int, str, bool]]:
+    """(address, name, is_code) from the .sym published next to a dev-build .papp."""
+    if not url or not url.endswith(".papp") or not url.startswith(tuple(cfg.allowed_url_prefixes)):
+        return []
+    try:
+        with opener(url[: -len(".papp")] + ".sym", timeout=60) as response:
+            text = response.read(16 * 1024 * 1024).decode("utf-8", "replace")
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return []
+    symbols = []
+    for line in text.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and len(parts[1]) == 1 and re.fullmatch(r"[0-9a-fA-F]+", parts[0]):
+            symbols.append((int(parts[0], 16), parts[2], parts[1] in "TtWw"))
+    return sorted(symbols)
+
+
+def decode_crash(cfg: Config, text: str, url: str | None = None, opener=urllib.request.urlopen) -> str:
+    """Readable backtrace for a panic dump in `text`, or "" when there is none."""
+    firmware, app = crash_addresses(text)
+    if not firmware and not app:
+        return ""
+    out = []
+    if app:
+        symbols = load_papp_symbols(url, cfg, opener)
+        if symbols:
+            import bisect
+
+            starts = [s[0] for s in symbols]
+            out.append("PAPP (app symbols):")
+            for address in app:
+                i = bisect.bisect_right(starts, address) - 1
+                base, name, code = symbols[i] if i >= 0 else (address, "", False)
+                if name and address - base < 0x4000:  # further away: unnamed data (strings, tables)
+                    out.append(f"  0x{address:08x}  {'' if code else 'data: '}{name} + 0x{address - base:x}")
+        else:
+            out.append("PAPP addresses (no symbol list for this app): " + " ".join(f"0x{a:08x}" for a in app))
+    if firmware:
+        sha = ELF_SHA.search(text)
+        elf, where = find_firmware_elf(cfg, sha.group(1) if sha else None)
+        tool = find_addr2line(cfg, elf) if elf else None
+        if elf and tool:
+            try:
+                result = subprocess.run([tool, "-pfiaC", "-e", str(elf), *(f"0x{a:08x}" for a in firmware)],
+                                        capture_output=True, text=True, timeout=60)
+                lines = [ln for ln in result.stdout.splitlines() if "?? ??:0" not in ln and ": ?? at" not in ln]
+                out.append(f"Firmware ({where}):")
+                out += [f"  {ln}" for ln in lines] or ["  (no code addresses)"]
+            except (OSError, subprocess.SubprocessError) as error:
+                out.append(f"Firmware: addr2line failed: {error}")
+        else:
+            out.append(f"Firmware addresses ({where if not elf else 'no addr2line found; set [device_api] addr2line'}): "
+                       + " ".join(f"0x{a:08x}" for a in firmware[:24]))
+    return "\n".join(out)
+
+
 # ── screenshots (papp_loader diagnostic stream, TCP port 3232) ──────────────
 
 STREAM_HEADER = struct.Struct("<8sHHII")         # PAPPFB01 thumbnail / PAPPSS01 screenshot
@@ -768,6 +900,10 @@ class Runner:
                     log = f"=== device log (network) ===\n{log}\n\n=== serial {req.serial} ===\n{serial_log}"
             what = f"`{req.action}`" + (f" `{req.url.rsplit('/', 1)[-1]}`" if req.url else "")
             logged = f" Device log for {req.seconds}s attached." if req.seconds_given and not self.dry_run else ""
+            decoded = decode_crash(self.cfg, log, req.url) if log else ""
+            if decoded:
+                log += f"\n\n=== crash decoded ===\n{decoded}"
+                logged += " 💥 The device crashed: the decoded backtrace is at the end of the log."
             return JobResult(True, f"✅ {what} sent to {self.cfg.api_host}{served}{' (dry run)' if self.dry_run else ''}.{logged}",
                              log, time.monotonic() - start)
         assert base is not None and req.yaml is not None

@@ -3,11 +3,13 @@
 Run: python3 -m unittest discover -s tests
 """
 
+import io
 import os
 import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -441,7 +443,8 @@ class CrashCaptureTests(unittest.TestCase):
             eb.validate(req, cfg)
             asyncio.sleep = short
             try:
-                result = eb.Runner(cfg).execute(req)
+                with mock.patch.object(eb, "load_papp_symbols", return_value=[]):
+                    result = eb.Runner(cfg).execute(req)
             finally:
                 asyncio.sleep = real_sleep
         self.assertEqual(opened, [("/dev/ttyUSB0", False, False)])  # no reset on open
@@ -449,6 +452,8 @@ class CrashCaptureTests(unittest.TestCase):
         self.assertIn("=== serial /dev/ttyUSB0 ===", result.log)
         self.assertIn("Guru Meditation Error", result.log)
         self.assertIn("MEPC    : 0x4a01234c", result.log)
+        self.assertIn("=== crash decoded ===", result.log)
+        self.assertIn("crashed", result.summary)
 
     def test_serial_needs_an_allowed_port_and_seconds(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -459,6 +464,78 @@ class CrashCaptureTests(unittest.TestCase):
                          f"launch url={STORE} seconds=9999"]:
                 with self.subTest(text=text), self.assertRaises(eb.BridgeError):
                     eb.validate(eb.parse_request("@esp-bridge " + text, None, "esp-bridge"), cfg)
+
+
+PANIC = """\
+[I][papp_loader:1985][redalert]: PAPP: RA: video mode 640x400 8 bpp
+
+abort() was called at PC 0x40093715 on core 0
+Core  0 register dump:
+MEPC    : 0x4ff0a146  RA      : 0x4ff0a0fc  SP      : 0x48661d30  GP      : 0x4ff0f300
+Stack memory:
+48661db0: 0x00000000 0x4934d044 0x4ff25000 0x400e88e2 0x4934cd74 0x4a0e762c 0x4934d044 0x400e87c2
+48661dd0: 0x4a191b3c 0x4a0e762c 0x4934d044 0x400e8782 0x00000000 0x4a0e762c 0x4ff89874 0x4a0bbede
+
+ELF file SHA256: {sha}
+
+Rebooting...
+rst:0xc (SW_CPU_RESET)
+MEPC    : 0x40000001
+"""
+
+
+class CrashDecodeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = make_api_config(Path(self.tmp.name))
+        build = Path(self.tmp.name) / "local" / ".esphome" / "build" / "p4" / ".pioenvs" / "p4"
+        build.mkdir(parents=True)
+        self.elf = build / "firmware.elf"
+        self.elf.write_bytes(b"\x7fELF" + bytes(14) + (243).to_bytes(2, "little") + bytes(40))
+        self.sha = __import__("hashlib").sha256(self.elf.read_bytes()).hexdigest()[:9]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_addresses_come_from_the_first_dump_only(self):
+        firmware, app = eb.crash_addresses(PANIC.format(sha=self.sha))
+        self.assertEqual(firmware[0], 0x40093715)  # the abort() call site first
+        self.assertIn(0x400e8782, firmware)
+        self.assertNotIn(0x48661d30, firmware)  # PSRAM stack pointer: data
+        self.assertNotIn(0x40000001, firmware)  # after "Rebooting..."
+        self.assertEqual(app, [0x4a0e762c, 0x4a191b3c, 0x4a0bbede])
+        self.assertEqual(eb.crash_addresses("all fine\n"), ([], []))
+
+    def test_decodes_firmware_and_app_addresses(self):
+        sym = b"4a0bbe68 T _fclose_r\n4a0e762c D _impure_data\n4a196fe8 B _bss_end\n"
+
+        def opener(url, timeout=0):
+            self.assertTrue(url.endswith("/psram_redalert.sym"))
+            return io.BytesIO(sym)
+
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = argv
+            out = "0x40093715: abort at abort.c:38\n0x4ff0a146: ?? ??:0\n0x400e8782: esphome::papp_loader::PappLoader::svc_file_close(void*) at papp_loader.cpp:1950\n"
+            return eb.subprocess.CompletedProcess(argv, 0, out, "")
+
+        self.cfg.addr2line = "riscv32-esp-elf-addr2line"
+        url = "https://github.com/NonaSuomy/papp-conversions/releases/download/dev-builds/psram_redalert.papp"
+        with mock.patch.object(eb.subprocess, "run", fake_run):
+            text = eb.decode_crash(self.cfg, PANIC.format(sha=self.sha), url, opener=opener)
+        self.assertIn("0x4a0bbede  _fclose_r + 0x76", text)
+        self.assertIn("data: _impure_data + 0x0", text)
+        self.assertIn("svc_file_close", text)
+        self.assertNotIn("??", text)
+        self.assertEqual(Path(seen["argv"][3]), self.elf)
+        self.assertEqual(seen["argv"][4], "0x40093715")
+
+    def test_wrong_build_is_not_used(self):
+        text = eb.decode_crash(self.cfg, PANIC.format(sha="0123abcde"), None)
+        self.assertIn("none of the 1 firmware ELFs here has SHA256 0123abcde", text)
+        self.assertIn("0x40093715", text)
+        self.assertIn("no symbol list", text)
 
 
 class ProxyTests(unittest.TestCase):

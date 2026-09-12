@@ -49,6 +49,12 @@ allowed_url_prefixes = [
   "https://github.com/NonaSuomy/papp-conversions/releases/download/",
   "https://nonasuomy.github.io/papp-conversions/",
 ]
+# Crash decoding for `launch/close ... serial=`: the panic dump's firmware
+# addresses are looked up with addr2line in the firmware ELF whose SHA256
+# matches the dump. By default the bridge looks in [local].dir/.esphome/build
+# and the repo checkout, and finds addr2line in ~/.platformio or ~/.espressif.
+# firmware_elf = ["~/code/esphome006/config/.esphome/build/*/.pioenvs/*/firmware.elf"]
+# addr2line = "~/.platformio/packages/toolchain-riscv32-esp/bin/riscv32-esp-elf-addr2line"
 
 [console]
 # Print every request the bridge gets (who, which command) and its result in

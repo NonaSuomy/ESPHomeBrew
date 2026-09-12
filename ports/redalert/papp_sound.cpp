@@ -148,8 +148,10 @@ static void mixer_task(void*)
         } else if (idle_since == 0) {
             idle_since = papp_time_us();
         } else if (papp_time_us() - idle_since > 10000000) {
+            if (frames_out != 0) {
+                chain_idle = true; // we fed it, then let it stop
+            }
             frames_out = 0; // the next sound starts a new run
-            chain_idle = true;
             papp_svc->delay_ms(10);
             continue;
         }

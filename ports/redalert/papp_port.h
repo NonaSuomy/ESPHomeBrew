@@ -43,6 +43,12 @@ void papp_sound_shutdown(void);
 // Stop the presenter task (papp_video.cpp); safe when it never started.
 void papp_video_shutdown(void);
 
+// Sockets (papp_net.cpp) use descriptors PAPP_SOCKET_FD_BASE.. so close()
+// can tell them from files; they must stay below newlib's FD_SETSIZE (64).
+#define PAPP_SOCKET_FD_BASE 40
+#define PAPP_SOCKET_FD_COUNT 8
+int papp_socket_close(int fd);
+
 // Microseconds since boot.
 long long papp_time_us(void);
 

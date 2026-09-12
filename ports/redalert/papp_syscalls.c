@@ -323,6 +323,9 @@ int _open(const char *path, int flags, int mode)
 
 int _close(int fd)
 {
+    if (fd >= PAPP_SOCKET_FD_BASE && fd < PAPP_SOCKET_FD_BASE + PAPP_SOCKET_FD_COUNT) {
+        return papp_socket_close(fd);
+    }
     void *fp = fd_file(fd);
     if (fp == NULL) {
         errno = EBADF;

@@ -172,7 +172,8 @@ static void presenter_task(void*)
 {
     while (!s_presenter_quit) {
         if (!s_snap_ready) {
-            papp_svc->delay_ms(1);
+            // delay_ms() below one tick (10 ms) is only a yield: sleep a tick.
+            papp_svc->delay_ms(10);
             continue;
         }
         __atomic_thread_fence(__ATOMIC_ACQUIRE);

@@ -109,6 +109,7 @@ static void mix_voice(SampleTrackerTypeImp* st, int32_t* acc, int frames)
 // full, so without this the sound lagged by the whole chain: lips moved
 // before the words in the movies.
 static const long long LEAD_US = 200000;
+static const int TICK_MS = 10; // one FreeRTOS tick on this firmware (100 Hz)
 
 static void mixer_task(void*)
 {
@@ -173,7 +174,11 @@ static void mixer_task(void*)
             anchor_us = now;
             frames_out = 0;
         } else if (played_us - (now - anchor_us) > LEAD_US) {
-            papp_svc->delay_ms(static_cast<int>((played_us - (now - anchor_us) - LEAD_US) / 1000) + 1);
+            // At least one FreeRTOS tick (10 ms): delay_ms() of less rounds
+            // down to a bare yield, and this priority-6 task then spun and
+            // starved the presenter on core 1 (the intro ran at 2-8 fps).
+            const int ms = static_cast<int>((played_us - (now - anchor_us) - LEAD_US) / 1000) + 1;
+            papp_svc->delay_ms(ms < TICK_MS ? TICK_MS : ms);
         }
         frames_out += MIX_FRAMES;
         const long long start = papp_time_us();

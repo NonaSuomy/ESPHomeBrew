@@ -1,0 +1,87 @@
+name: Dev builds
+
+# Work-in-progress apps ("publish": false in papp.json) are not released or
+# listed in the store. For testing on a device, pushes to claude/* and nona/*
+# branches upload them to the "dev-builds" prerelease at stable URLs such as
+#   https://github.com/<owner>/<repo>/releases/download/dev-builds/psram_redalert.papp
+# The ESP bridge serves those to the device over the LAN (the device cannot
+# verify github.com's TLS chain): @esp-bridge launch url=<that URL>
+on:
+  push:
+    branches: ["claude/**", "nona/**"]
+    paths: ["apps/**", "ports/**", "tools/build_papp.py", ".github/workflows/dev-builds.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dev-builds
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.1
+    outputs:
+      apps: ${{ steps.build.outputs.apps }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache upstream sources
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: papp-dev-${{ hashFiles('apps/*/papp.json', 'tools/build_papp.py', 'ports/**') }}
+          restore-keys: papp-dev-
+
+      - name: Build work-in-progress apps
+        id: build
+        shell: bash
+        run: |
+          git config --global --add safe.directory '*'
+          . "$IDF_PATH/export.sh" > /dev/null
+          apps=$(python3 -c 'import json, pathlib; print(" ".join(p.parent.name for p in sorted(pathlib.Path("apps").glob("*/papp.json")) if json.loads(p.read_text()).get("publish", True) is False))')
+          echo "apps=$apps" >> "$GITHUB_OUTPUT"
+          if [ -z "$apps" ]; then echo "No work-in-progress apps."; exit 0; fi
+          python3 tools/build_papp.py --out dist $apps
+
+      - uses: actions/upload-artifact@v4
+        if: steps.build.outputs.apps != ''
+        with:
+          name: dev-papps
+          path: dist/
+
+  upload:
+    needs: build
+    if: needs.build.outputs.apps != ''
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dev-papps
+          path: dist
+
+      - name: Upload to the dev-builds prerelease
+        shell: bash
+        run: |
+          if ! gh release view dev-builds -R "$REPO" > /dev/null 2>&1; then
+            gh release create dev-builds -R "$REPO" --prerelease --target "$GITHUB_SHA" \
+              --title "Dev builds (work in progress, not for the store)" \
+              --notes "Latest test builds of work-in-progress apps, replaced on every push. Not in the store."
+          fi
+          gh release upload dev-builds -R "$REPO" --clobber dist/*.papp dist/*.json
+          {
+            echo "Latest test builds of work-in-progress apps, replaced on every push. Not in the store."
+            echo
+            echo "Last upload: \`${GITHUB_REF_NAME}\` @ \`${GITHUB_SHA:0:10}\` ($(date -u +%Y-%m-%dT%H:%MZ))"
+            echo
+            for f in dist/*.json; do
+              [ "$(basename "$f")" = build.json ] && continue
+              jq -r '"- `\(.file)` \(.size) bytes, sha256 `\(.sha256[0:16])`"' "$f"
+            done
+          } > notes.md
+          gh release edit dev-builds -R "$REPO" --notes-file notes.md

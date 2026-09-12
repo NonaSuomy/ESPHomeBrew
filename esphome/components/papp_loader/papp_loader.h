@@ -173,6 +173,12 @@ class PappLoader : public Component {
   static int svc_input_mouse_read(int *dx, int *dy, int *buttons);
   static int svc_input_keyboard_read(papp_keyboard_event_t *event);
   static int svc_touch_read(int *x, int *y);
+  static int svc_net_udp_open(uint16_t port, int broadcast);
+  static int svc_net_udp_send(int handle, const void *buf, int len, uint32_t ip, uint16_t port);
+  static int svc_net_udp_recv(int handle, void *buf, int len, uint32_t *ip, uint16_t *port);
+  static void svc_net_udp_close(int handle);
+  static int svc_net_ipv4(uint32_t *ip, uint32_t *netmask);
+  static void close_app_sockets_();
   static void *svc_file_open(const char *path, const char *mode);
   static int svc_file_close(void *stream);
   static size_t svc_file_read(void *ptr, size_t size, size_t nmemb, void *stream);

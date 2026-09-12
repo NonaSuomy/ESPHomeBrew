@@ -81,7 +81,7 @@ jobs:
             echo
             for f in dist/*.json; do
               [ "$(basename "$f")" = build.json ] && continue
-              python3 -c 'import json, sys; a = json.load(open(sys.argv[1])); print(f"- `{a[\"file\"]}` {a[\"size\"]:,} bytes, sha256 `{a[\"sha256\"][:16]}`")' "$f"
+              jq -r '"- `\(.file)` \(.size) bytes, sha256 `\(.sha256[0:16])`"' "$f"
             done
           } > notes.md
           gh release edit dev-builds -R "$REPO" --notes-file notes.md

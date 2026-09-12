@@ -21,6 +21,7 @@
 #include "esphome/components/usb_hidx/usb_hidx.h"
 #endif
 
+#include "papp_data.h"
 #include "psram_app.h"
 
 namespace esphome {
@@ -37,6 +38,20 @@ class PappLoader : public Component {
   // how it ended, its return code or load error, runtime and the tail of its log.
   void set_report_url(const std::string &url) { this->report_url_ = url; }
   void set_report_log_bytes(size_t bytes) { this->report_log_bytes_ = bytes; }
+  // App data: before a network launch the loader reads <app>.files next to the
+  // .papp and downloads every listed file that is missing under data_root.
+  // Files already on the card are never replaced.
+  void set_data_root(const std::string &root) { this->data_root_ = root; }
+  void set_download_data(bool download) { this->download_data_ = download; }
+  // Launch progress for a UI: true while a network app (and its data) loads,
+  // a fraction 0..1 (-1 when unknown or idle), and a one-line status that
+  // stays after a failure until the next launch ("" when there is nothing to say).
+  bool is_loading() const { return this->papp_loading_; }
+  float get_load_progress();
+  std::string get_load_status();
+  // Called by the download code on the loader task; thread safe.
+  void set_progress_(bool active, uint32_t done, uint32_t total, const char *format, ...)
+      __attribute__((format(printf, 5, 6)));
   void request_launch(const std::string &path) {
     if (path.empty()) {
       ESP_LOGW("papp_loader", "Ignoring empty PAPP launch request");
@@ -79,6 +94,16 @@ class PappLoader : public Component {
   }
   void handle_launcher_controls_();
   void set_catalog_selection_(uint16_t index);
+  // Optional progress widgets the loader keeps up to date while an app and
+  // its data download: `fill` is an object inside a track object; its width is
+  // set to the percentage done and the track (its parent) is hidden when idle.
+  // `label` shows the status line. Either may be null. Plain objects and a
+  // label keep this independent of which LVGL widgets the config enables.
+  void set_progress_widgets(lv_obj_t *fill, lv_obj_t *label) {
+    this->progress_fill_ = fill;
+    this->progress_label_ = label;
+    this->progress_ui_seq_ = this->progress_seq_ - 1;  // redraw on the next loop
+  }
 #endif
   void set_toggle_button(binary_sensor::BinarySensor *sensor) { this->toggle_button_ = sensor; }
   void set_launch_button(binary_sensor::BinarySensor *sensor) { this->launch_button_ = sensor; }
@@ -168,8 +193,12 @@ class PappLoader : public Component {
   static void papp_task_entry_(void *arg);
   static void papp_load_task_entry_(void *arg);
   static void papp_catalog_task_entry_(void *arg);
+  esp_err_t sync_app_data_(const std::string &papp_url);
+  esp_err_t download_data_file_(const data::DataFile &file, const std::string &path, uint32_t done_before,
+                                uint32_t total, size_t index, size_t count);
   void finish_app_();
   void update_catalog_ui_();
+  void update_progress_ui_();
   void flush_framebuffer_();
   void render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t in_h, float scale, bool byte_swap);
   void render_emu_();
@@ -282,6 +311,19 @@ class PappLoader : public Component {
   volatile int papp_load_result_{-1};
   volatile bool papp_task_done_{false};
   volatile int papp_task_result_{-1};
+  volatile bool papp_load_data_failed_{false};
+  // App data (data_root) and launch progress. The loader task writes the
+  // progress under progress_lock_; the loop task reads it for the UI.
+  std::string data_root_{"/sd"};
+  bool download_data_{true};
+  static constexpr size_t PROGRESS_STATUS_SIZE = 96;
+  portMUX_TYPE progress_lock_ = portMUX_INITIALIZER_UNLOCKED;
+  char progress_status_[PROGRESS_STATUS_SIZE]{};
+  uint32_t progress_done_{0};
+  uint32_t progress_total_{0};
+  bool progress_active_{false};
+  volatile uint32_t progress_seq_{0};
+  uint32_t progress_ui_seq_{0};
   // Test reports (report_url). report_log_ holds the newest app log lines, up to
   // report_log_bytes_; the PAPP worker appends and the loop task sends, so both
   // go through report_mutex_.
@@ -305,6 +347,8 @@ class PappLoader : public Component {
   // seeing a touch release while the PAPP is active.
   lv_obj_t *touch_modal_shield_{nullptr};
   bool catalog_ui_pending_{false};
+  lv_obj_t *progress_fill_{nullptr};
+  lv_obj_t *progress_label_{nullptr};
   uint16_t catalog_selection_{0};
   uint8_t launcher_direction_state_{0};
   bool launcher_a_state_{false};

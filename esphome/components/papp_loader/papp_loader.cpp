@@ -373,6 +373,7 @@ void PappLoader::setup() {
 }
 
 void PappLoader::loop() {
+  this->update_progress_ui_();
   if (this->catalog_loading_ && this->catalog_done_) {
     if (this->papp_catalog_task_handle_ != nullptr) {
       vTaskDelete(this->papp_catalog_task_handle_);
@@ -446,15 +447,23 @@ void PappLoader::loop() {
       this->papp_loading_ = false;
 
       if (this->papp_load_result_ != ESP_OK || this->papp_load_handle_ == nullptr) {
-        ESP_LOGE(TAG, "Network PAPP load failed: %s (0x%x)",
+        const bool data_failed = this->papp_load_data_failed_;
+        ESP_LOGE(TAG, "Network PAPP %s failed: %s (0x%x)", data_failed ? "data download" : "load",
                  esp_err_to_name(static_cast<esp_err_t>(this->papp_load_result_)), this->papp_load_result_);
+        // A data failure already set a specific status line; keep it on screen.
+        if (!data_failed) {
+          this->set_progress_(false, 0, 0, "Could not load the app: %s",
+                              esp_err_to_name(static_cast<esp_err_t>(this->papp_load_result_)));
+        }
         this->papp_load_handle_ = nullptr;
         this->launched_ = false;
         this->begin_report_(this->papp_load_source_);
-        this->send_report_("load_failed", this->papp_load_result_, this->papp_load_source_);
+        this->send_report_(data_failed ? "data_failed" : "load_failed", this->papp_load_result_,
+                           this->papp_load_source_);
         return;
       }
 
+      this->set_progress_(false, 0, 0, "%s", "");
       psram_app_handle_t app = this->papp_load_handle_;
       this->papp_load_handle_ = nullptr;
       const std::string source = this->papp_load_source_;
@@ -471,6 +480,7 @@ void PappLoader::loop() {
     return;
   ESP_LOGI(TAG, "Processing launch request: %s", this->path_.c_str());
   this->launch_pending_ = false;
+  this->set_progress_(false, 0, 0, "%s", "");  // drop the previous launch's status
   this->launched_ = true;
   this->toggle_close_requested_ = false;
   this->global_close_requested_ = false;
@@ -484,6 +494,8 @@ void PappLoader::dump_config() {
   ESP_LOGCONFIG(TAG, "  Path: %s", this->path_.c_str());
   ESP_LOGCONFIG(TAG, "  Autostart: %s", YESNO(this->autostart_));
   ESP_LOGCONFIG(TAG, "  Network PAPPs: enabled with papp_loader.launch_url");
+  ESP_LOGCONFIG(TAG, "  App data: %s into %s", this->download_data_ ? "download missing files" : "off",
+                this->data_root_.c_str());
   if (!this->catalog_url_.empty())
     ESP_LOGCONFIG(TAG, "  PAPP catalog: %s", this->catalog_url_.c_str());
 }
@@ -839,7 +851,14 @@ void PappLoader::papp_task_entry_(void *arg) {
 void PappLoader::papp_load_task_entry_(void *arg) {
   auto *self = static_cast<PappLoader *>(arg);
   const std::string url = self->papp_load_source_;
-  self->papp_load_result_ = psram_app_load_url(url.c_str(), &self->papp_load_handle_);
+  // Fetch the app's data files first, so it never starts without them.
+  const esp_err_t data_result = self->sync_app_data_(url);
+  self->papp_load_data_failed_ = data_result != ESP_OK;
+  if (data_result != ESP_OK) {
+    self->papp_load_result_ = data_result;
+  } else {
+    self->papp_load_result_ = psram_app_load_url(url.c_str(), &self->papp_load_handle_);
+  }
   self->papp_load_done_ = true;
   // Cleanup is owned by ESPHome's loop task. Keeping this task alive until
   // the loop deletes it avoids the ESP-IDF task-exit abort path used by the
@@ -2337,15 +2356,20 @@ static esp_err_t fetch_http_text(const char *url, std::string *out) {
   }
   if (content_length == -ESP_ERR_HTTP_EAGAIN)
     return http_finish(client, ESP_ERR_TIMEOUT);
-  if (content_length > static_cast<int64_t>(MAX_CATALOG_SIZE)) {
-    ESP_LOGE(TAG, "PAPP catalog is too large: %lld bytes", static_cast<long long>(content_length));
-    return http_finish(client, ESP_ERR_INVALID_SIZE);
-  }
-
   const int status_code = esp_http_client_get_status_code(client);
+  if (status_code == 404) {
+    // Callers decide whether a missing file is an error (the catalog) or
+    // normal (an app without a data list).
+    ESP_LOGD(TAG, "HTTP 404: %s", url);
+    return http_finish(client, ESP_ERR_NOT_FOUND);
+  }
   if (status_code != 200) {
-    ESP_LOGE(TAG, "PAPP catalog HTTP status: %d", status_code);
+    ESP_LOGE(TAG, "HTTP status %d: %s", status_code, url);
     return http_finish(client, ESP_ERR_INVALID_RESPONSE);
+  }
+  if (content_length > static_cast<int64_t>(MAX_CATALOG_SIZE)) {
+    ESP_LOGE(TAG, "%s is too large: %lld bytes", url, static_cast<long long>(content_length));
+    return http_finish(client, ESP_ERR_INVALID_SIZE);
   }
 
   char buffer[2048];
@@ -2445,6 +2469,284 @@ static std::vector<std::pair<std::string, std::string>> parse_papp_catalog(const
   return entries;
 }
 
+// ── Launch progress and app data (data_root) ───────────────────────────────
+
+void PappLoader::set_progress_(bool active, uint32_t done, uint32_t total, const char *format, ...) {
+  char status[PROGRESS_STATUS_SIZE];
+  va_list args;
+  va_start(args, format);
+  std::vsnprintf(status, sizeof(status), format, args);
+  va_end(args);
+  portENTER_CRITICAL(&this->progress_lock_);
+  std::memcpy(this->progress_status_, status, sizeof(status));
+  this->progress_active_ = active;
+  this->progress_done_ = done;
+  this->progress_total_ = total;
+  this->progress_seq_ = this->progress_seq_ + 1;
+  portEXIT_CRITICAL(&this->progress_lock_);
+}
+
+float PappLoader::get_load_progress() {
+  portENTER_CRITICAL(&this->progress_lock_);
+  const bool active = this->progress_active_;
+  const uint32_t done = this->progress_done_;
+  const uint32_t total = this->progress_total_;
+  portEXIT_CRITICAL(&this->progress_lock_);
+  if (!active || total == 0)
+    return -1.0f;
+  return static_cast<float>(static_cast<double>(done) / static_cast<double>(total));
+}
+
+std::string PappLoader::get_load_status() {
+  char status[PROGRESS_STATUS_SIZE];
+  portENTER_CRITICAL(&this->progress_lock_);
+  std::memcpy(status, this->progress_status_, sizeof(status));
+  portEXIT_CRITICAL(&this->progress_lock_);
+  status[sizeof(status) - 1] = '\0';
+  return status;
+}
+
+void PappLoader::update_progress_ui_() {
+#ifdef PAPP_LOADER_USE_LVGL
+  if ((this->progress_fill_ == nullptr && this->progress_label_ == nullptr) || this->lvgl_ == nullptr ||
+      !this->lvgl_->is_loop_started() || this->lvgl_->is_paused())
+    return;
+  const uint32_t seq = this->progress_seq_;
+  if (seq == this->progress_ui_seq_)
+    return;
+  this->progress_ui_seq_ = seq;
+
+  char status[PROGRESS_STATUS_SIZE];
+  portENTER_CRITICAL(&this->progress_lock_);
+  std::memcpy(status, this->progress_status_, sizeof(status));
+  const bool active = this->progress_active_;
+  const uint32_t done = this->progress_done_;
+  const uint32_t total = this->progress_total_;
+  portEXIT_CRITICAL(&this->progress_lock_);
+  status[sizeof(status) - 1] = '\0';
+
+  if (this->progress_fill_ != nullptr) {
+    lv_obj_t *track = lv_obj_get_parent(this->progress_fill_);
+    lv_obj_t *shown = track != nullptr ? track : this->progress_fill_;
+    if (active && total > 0) {
+      const int32_t percent = static_cast<int32_t>(std::min<uint64_t>(100, static_cast<uint64_t>(done) * 100 / total));
+      lv_obj_set_width(this->progress_fill_, lv_pct(percent));
+      lv_obj_remove_flag(shown, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(shown, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  if (this->progress_label_ != nullptr) {
+    if (status[0] != '\0') {
+      lv_label_set_text(this->progress_label_, status);
+      lv_obj_remove_flag(this->progress_label_, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(this->progress_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+#endif
+}
+
+// Creates the folders between `root` and the file `target` (root itself must
+// already exist: it is the card's mount point or a folder on it).
+static bool make_parent_dirs(const std::string &root, const std::string &target) {
+  size_t slash = target.find('/');
+  while (slash != std::string::npos) {
+    const std::string dir = root + "/" + target.substr(0, slash);
+    struct stat st{};
+    if (stat(dir.c_str(), &st) != 0) {
+      if (mkdir(dir.c_str(), 0775) != 0 && errno != EEXIST) {
+        ESP_LOGE(TAG, "Cannot create %s (errno %d)", dir.c_str(), errno);
+        return false;
+      }
+    } else if (!S_ISDIR(st.st_mode)) {
+      ESP_LOGE(TAG, "%s exists and is not a folder", dir.c_str());
+      return false;
+    }
+    slash = target.find('/', slash + 1);
+  }
+  return true;
+}
+
+esp_err_t PappLoader::sync_app_data_(const std::string &papp_url) {
+  if (!this->download_data_)
+    return ESP_OK;
+  const std::string list_url = data::list_url_for(papp_url);
+  if (list_url.empty())
+    return ESP_OK;
+
+  this->set_progress_(true, 0, 0, "%s", "Checking app data...");
+  std::string text;
+  esp_err_t err = fetch_http_text(list_url.c_str(), &text);
+  if (err == ESP_ERR_NOT_FOUND) {
+    ESP_LOGD(TAG, "No data list for this app: %s", list_url.c_str());
+    return ESP_OK;
+  }
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Could not read the data list %s: %s", list_url.c_str(), esp_err_to_name(err));
+    this->set_progress_(false, 0, 0, "Could not read the app's data list: %s", esp_err_to_name(err));
+    return err;
+  }
+  std::vector<data::DataFile> files;
+  std::string error;
+  if (!data::parse_list(text, &files, &error)) {
+    ESP_LOGE(TAG, "Bad data list %s: %s", list_url.c_str(), error.c_str());
+    this->set_progress_(false, 0, 0, "Bad data list: %.60s", error.c_str());
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+
+  // A file that is already there is kept whatever its size: it may be the
+  // user's own copy (for example a full game instead of the shareware one).
+  // Downloads go to <file>.part and are renamed only once verified, so an
+  // interrupted download never leaves a partial file under the real name.
+  const std::string root = runtime_path(this->data_root_.c_str());
+  std::vector<size_t> missing;
+  uint64_t total = 0;
+  for (size_t i = 0; i < files.size(); i++) {
+    const std::string path = root + "/" + files[i].target;
+    struct stat st{};
+    if (stat(path.c_str(), &st) == 0)
+      continue;
+    missing.push_back(i);
+    total += files[i].size;
+  }
+  if (missing.empty()) {
+    ESP_LOGI(TAG, "App data present: %u file(s) under %s", static_cast<unsigned>(files.size()), root.c_str());
+    return ESP_OK;
+  }
+  if (total > UINT32_MAX) {
+    this->set_progress_(false, 0, 0, "%s", "App data is too large");
+    return ESP_ERR_INVALID_SIZE;
+  }
+  ESP_LOGI(TAG, "Downloading %u of %u app data file(s), %lu bytes, into %s", static_cast<unsigned>(missing.size()),
+           static_cast<unsigned>(files.size()), static_cast<unsigned long>(total), root.c_str());
+
+  uint32_t done = 0;
+  for (size_t n = 0; n < missing.size(); n++) {
+    const data::DataFile &file = files[missing[n]];
+    if (!make_parent_dirs(root, file.target)) {
+      this->set_progress_(false, 0, 0, "Cannot write to %.40s - is the card in?", this->data_root_.c_str());
+      return ESP_ERR_NOT_FOUND;
+    }
+    err = this->download_data_file_(file, root + "/" + file.target, done, static_cast<uint32_t>(total), n + 1,
+                                    missing.size());
+    if (err != ESP_OK) {
+      if (err == ESP_ERR_INVALID_STATE) {
+        this->set_progress_(false, 0, 0, "%s", "Download cancelled");
+      } else {
+        this->set_progress_(false, 0, 0, "Download failed: %.48s (%s)", file.target.c_str(), esp_err_to_name(err));
+      }
+      return err;
+    }
+    done += file.size;
+  }
+  ESP_LOGI(TAG, "App data ready under %s", root.c_str());
+  return ESP_OK;
+}
+
+esp_err_t PappLoader::download_data_file_(const data::DataFile &file, const std::string &path, uint32_t done_before,
+                                          uint32_t total, size_t index, size_t count) {
+  ESP_LOGI(TAG, "Downloading %s (%lu bytes) from %s", path.c_str(), static_cast<unsigned long>(file.size),
+           file.url.c_str());
+  esp_http_client_config_t config{};
+  config.url = file.url.c_str();
+  config.timeout_ms = HTTP_TIMEOUT_MS;
+  config.buffer_size = HTTP_READ_BUFFER_SIZE;
+  config.buffer_size_tx = 4096;
+  config.disable_auto_redirect = false;
+  config.max_redirection_count = HTTP_MAX_REDIRECTIONS;
+  config.keep_alive_enable = false;
+#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+  if (file.url.rfind("https://", 0) == 0)
+    config.crt_bundle_attach = esp_crt_bundle_attach;
+#endif
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+  if (client == nullptr)
+    return ESP_ERR_NO_MEM;
+  esp_err_t err = esp_http_client_open(client, 0);
+  if (err != ESP_OK)
+    return http_finish(client, err);
+  int64_t content_length = -1;
+  for (uint8_t attempt = 0; attempt < 6; attempt++) {
+    content_length = esp_http_client_fetch_headers(client);
+    if (content_length != -ESP_ERR_HTTP_EAGAIN)
+      break;
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+  if (content_length == -ESP_ERR_HTTP_EAGAIN)
+    return http_finish(client, ESP_ERR_TIMEOUT);
+  const int status_code = esp_http_client_get_status_code(client);
+  if (status_code != 200) {
+    ESP_LOGE(TAG, "HTTP status %d: %s", status_code, file.url.c_str());
+    return http_finish(client, ESP_ERR_INVALID_RESPONSE);
+  }
+  if (content_length > 0 && static_cast<uint64_t>(content_length) != file.size) {
+    ESP_LOGE(TAG, "%s is %lld bytes, the list says %lu", file.url.c_str(), static_cast<long long>(content_length),
+             static_cast<unsigned long>(file.size));
+    return http_finish(client, ESP_ERR_INVALID_SIZE);
+  }
+
+  const std::string part = path + ".part";
+  FILE *out = std::fopen(part.c_str(), "wb");
+  if (out == nullptr) {
+    ESP_LOGE(TAG, "Cannot create %s (errno %d)", part.c_str(), errno);
+    return http_finish(client, ESP_ERR_NOT_FOUND);
+  }
+  auto *buffer = static_cast<uint8_t *>(heap_caps_malloc(HTTP_READ_BUFFER_SIZE, MALLOC_CAP_8BIT));
+  if (buffer == nullptr) {
+    std::fclose(out);
+    std::remove(part.c_str());
+    return http_finish(client, ESP_ERR_NO_MEM);
+  }
+
+  const char *slash = std::strrchr(file.target.c_str(), '/');
+  const char *name = slash != nullptr ? slash + 1 : file.target.c_str();
+  data::Sha256 hash;
+  uint32_t received = 0;
+  while (received < file.size) {
+    if (this->global_close_requested_) {
+      err = ESP_ERR_INVALID_STATE;
+      break;
+    }
+    const size_t chunk = std::min<size_t>(HTTP_READ_BUFFER_SIZE, file.size - received);
+    err = http_read_exact(client, buffer, chunk);
+    if (err != ESP_OK)
+      break;
+    if (std::fwrite(buffer, 1, chunk, out) != chunk) {
+      ESP_LOGE(TAG, "Write to %s failed (errno %d); is the card full?", part.c_str(), errno);
+      err = ESP_FAIL;
+      break;
+    }
+    hash.update(buffer, chunk);
+    received += static_cast<uint32_t>(chunk);
+    const uint32_t overall = done_before + received;
+    this->set_progress_(true, overall, total, "%u/%u %.40s  %.1f / %.1f MB", static_cast<unsigned>(index),
+                        static_cast<unsigned>(count), name, overall / 1048576.0, total / 1048576.0);
+  }
+  heap_caps_free(buffer);
+  if (std::fclose(out) != 0 && err == ESP_OK)
+    err = ESP_FAIL;
+  http_finish(client, ESP_OK);
+
+  if (err == ESP_OK) {
+    const std::string digest = hash.hex();
+    if (digest != file.sha256) {
+      ESP_LOGE(TAG, "%s: sha256 %s, expected %s", path.c_str(), digest.c_str(), file.sha256.c_str());
+      err = ESP_ERR_INVALID_CRC;
+    }
+  }
+  if (err == ESP_OK && std::rename(part.c_str(), path.c_str()) != 0) {
+    ESP_LOGE(TAG, "Cannot rename %s (errno %d)", part.c_str(), errno);
+    err = ESP_FAIL;
+  }
+  if (err != ESP_OK) {
+    std::remove(part.c_str());
+    return err;
+  }
+  ESP_LOGI(TAG, "Saved %s (sha256 ok)", path.c_str());
+  return ESP_OK;
+}
+
 esp_err_t psram_app_load_url(const char *url, psram_app_handle_t *out_handle) {
   if (url == nullptr || out_handle == nullptr || !is_network_url(url))
     return ESP_ERR_INVALID_ARG;
@@ -2541,6 +2843,8 @@ esp_err_t psram_app_load_url(const char *url, psram_app_handle_t *out_handle) {
     return http_finish(client, ESP_ERR_NO_MEM);
   }
 
+  const char *slash = std::strrchr(url, '/');
+  const char *file_name = slash != nullptr ? slash + 1 : url;
   size_t received = 0;
   while (received < load_size) {
     const size_t chunk = std::min(HTTP_READ_BUFFER_SIZE, load_size - received);
@@ -2549,6 +2853,12 @@ esp_err_t psram_app_load_url(const char *url, psram_app_handle_t *out_handle) {
       break;
     std::memcpy(static_cast<uint8_t *>(app->code_buf) + received, transfer_buffer, chunk);
     received += chunk;
+    if (PappLoader::active() != nullptr) {
+      PappLoader::active()->set_progress_(true, static_cast<uint32_t>(received), static_cast<uint32_t>(load_size),
+                                          "Loading %.60s  %u / %u KB", file_name,
+                                          static_cast<unsigned>(received / 1024),
+                                          static_cast<unsigned>(load_size / 1024));
+    }
     if ((received % (256 * 1024)) < chunk || received == load_size)
       ESP_LOGI(TAG, "Network PAPP download: %u/%u bytes", static_cast<unsigned>(received),
                static_cast<unsigned>(load_size));

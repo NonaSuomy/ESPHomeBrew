@@ -13,6 +13,8 @@ CONF_AUTOSTART = "autostart"
 CONF_CATALOG_URL = "catalog_url"
 CONF_REPORT_URL = "report_url"
 CONF_REPORT_LOG_BYTES = "report_log_bytes"
+CONF_DATA_ROOT = "data_root"
+CONF_DOWNLOAD_DATA = "download_data"
 CONF_DISPLAY_ID = "display_id"
 CONF_TOUCHSCREEN_ID = "touchscreen_id"
 CONF_SPEAKER_ID = "speaker_id"
@@ -56,6 +58,14 @@ BUTTON_SCHEMAS = {
     for name in BUTTON_FIELDS
 }
 
+def validate_data_root(value):
+    """An absolute folder such as /sd (the SD card) or /usb0, without a trailing slash."""
+    value = cv.string_strict(value).rstrip("/")
+    if not value.startswith("/") or "//" in value or any(part in (".", "..") for part in value.split("/")):
+        raise cv.Invalid("data_root must be an absolute folder such as /sd or /usb0")
+    return value
+
+
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(PappLoader),
@@ -65,6 +75,10 @@ CONFIG_SCHEMA = cv.Schema(
         # POST a JSON test report here after every app run (see docs/feedback.md).
         cv.Optional(CONF_REPORT_URL): cv.url,
         cv.Optional(CONF_REPORT_LOG_BYTES, default=4096): cv.int_range(min=256, max=32768),
+        # Store apps can list data files (game WADs etc.) next to their .papp;
+        # missing ones are downloaded here before launch (docs/esphome-store.md).
+        cv.Optional(CONF_DATA_ROOT, default="/sd"): validate_data_root,
+        cv.Optional(CONF_DOWNLOAD_DATA, default=True): cv.boolean,
         cv.Required(CONF_DISPLAY_ID): cv.use_id(display.Display),
         cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
         cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
@@ -108,6 +122,8 @@ async def to_code(config):
     if report_url := config.get(CONF_REPORT_URL):
         cg.add(var.set_report_url(report_url))
         cg.add(var.set_report_log_bytes(config[CONF_REPORT_LOG_BYTES]))
+    cg.add(var.set_data_root(config[CONF_DATA_ROOT]))
+    cg.add(var.set_download_data(config[CONF_DOWNLOAD_DATA]))
 
     display_var = await cg.get_variable(config[CONF_DISPLAY_ID])
     cg.add(var.set_display(display_var))

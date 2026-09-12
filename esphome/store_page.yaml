@@ -24,7 +24,8 @@
 # when tapped. The file name (e.g. psram_lvgl-0.1.0.papp) is the label, so a
 # new version shows up after a refresh. The catalog reloads when the page opens,
 # on REFRESH, and every ${papp_store_refresh} while the page is on screen and no
-# app is running.
+# app is running. While an app and its data files download, a progress bar and
+# a status line appear under the header (the loader drives them).
 
 substitutions:
   papp_loader_id: papp_runtime
@@ -75,7 +76,9 @@ lvgl:
         type: FLEX
         flex_flow: COLUMN
       on_load:
-        - lambda: id(${papp_loader_id})->set_catalog_container(id(papp_store_list));
+        - lambda: |-
+            id(${papp_loader_id})->set_catalog_container(id(papp_store_list));
+            id(${papp_loader_id})->set_progress_widgets(id(papp_store_progress), id(papp_store_progress_label));
         - script.execute: papp_store_refresh
       widgets:
         - obj:
@@ -113,6 +116,37 @@ lvgl:
                         text_font: ${papp_font_small}
                   on_click:
                     - script.execute: papp_store_refresh
+        # Download progress: the loader sets the fill's width in percent and hides
+        # the track when nothing is loading. The label keeps the last error.
+        - obj:
+            id: papp_store_progress_track
+            width: 100%
+            height: 6
+            radius: 0
+            border_width: 0
+            pad_all: 0
+            bg_color: 0x1B2836
+            bg_opa: COVER
+            scrollbar_mode: "OFF"
+            hidden: true
+            widgets:
+              - obj:
+                  id: papp_store_progress
+                  width: 1
+                  height: 100%
+                  radius: 0
+                  border_width: 0
+                  bg_color: 0x38BDF8
+                  bg_opa: COVER
+        - label:
+            id: papp_store_progress_label
+            width: 100%
+            pad_left: 12
+            pad_top: 4
+            text: ""
+            text_color: 0xE2E8F0
+            text_font: ${papp_font_small}
+            hidden: true
         - obj:
             id: papp_store_list
             width: 100%

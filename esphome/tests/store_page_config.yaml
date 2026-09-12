@@ -57,6 +57,8 @@ papp_loader:
   touchscreen_id: touch_panel
   lvgl_id: lvgl_component
   catalog_url: https://nonasuomy.github.io/papp-conversions/
+  data_root: /sd
+  download_data: true
 
 lvgl:
   id: lvgl_component

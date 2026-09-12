@@ -15,6 +15,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
@@ -22,6 +23,7 @@
 
 #include "esp_cache.h"
 #include "esp_err.h"
+#include "esp_netif.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_mmu_map.h"
@@ -1070,6 +1072,7 @@ void PappLoader::finish_app_() {
     this->app_handle_ = nullptr;
     ESP_LOGI(TAG, "PAPP close: app unloaded");
   }
+  close_app_sockets_();
   this->toggle_wait_release_ = this->toggle_button_ != nullptr;
   this->toggle_close_requested_ = false;
   this->global_close_requested_ = false;
@@ -1948,6 +1951,99 @@ int PappLoader::svc_input_keyboard_read(papp_keyboard_event_t *event) {
 }
 int PappLoader::svc_touch_read(int *x, int *y) { return active_ != nullptr ? active_->read_touch_(x, y) : 0; }
 
+// ── UDP for apps (LAN multiplayer) ──────────────────────────────────────────
+// Sockets are plain lwIP descriptors. The loader remembers them so a crashing
+// or careless app cannot leak them past its exit.
+static constexpr int APP_SOCKET_MAX = 8;
+static int s_app_sockets[APP_SOCKET_MAX] = {-1, -1, -1, -1, -1, -1, -1, -1};
+
+int PappLoader::svc_net_udp_open(uint16_t port, int broadcast) {
+  int slot = 0;
+  while (slot < APP_SOCKET_MAX && s_app_sockets[slot] >= 0)
+    slot++;
+  if (slot == APP_SOCKET_MAX)
+    return -1;
+  const int fd = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (fd < 0)
+    return -1;
+  const int yes = 1;
+  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+  if (broadcast)
+    ::setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  const int flags = ::fcntl(fd, F_GETFL, 0);
+  if (::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0 ||
+      ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+    ESP_LOGW(TAG, "PAPP UDP: cannot bind port %u (errno %d)", port, errno);
+    ::close(fd);
+    return -1;
+  }
+  s_app_sockets[slot] = fd;
+  ESP_LOGI(TAG, "PAPP UDP: port %u open%s", port, broadcast ? " (broadcast)" : "");
+  return fd;
+}
+
+int PappLoader::svc_net_udp_send(int handle, const void *buf, int len, uint32_t ip, uint16_t port) {
+  if (handle < 0 || buf == nullptr || len < 0)
+    return -1;
+  sockaddr_in to{};
+  to.sin_family = AF_INET;
+  to.sin_port = htons(port);
+  to.sin_addr.s_addr = htonl(ip);
+  const int sent = ::sendto(handle, buf, len, 0, reinterpret_cast<sockaddr *>(&to), sizeof(to));
+  if (sent < 0)
+    return (errno == EWOULDBLOCK || errno == EAGAIN || errno == ENOMEM) ? 0 : -1;
+  return sent;
+}
+
+int PappLoader::svc_net_udp_recv(int handle, void *buf, int len, uint32_t *ip, uint16_t *port) {
+  if (handle < 0 || buf == nullptr || len <= 0)
+    return -1;
+  sockaddr_in from{};
+  socklen_t from_len = sizeof(from);
+  const int got = ::recvfrom(handle, buf, len, 0, reinterpret_cast<sockaddr *>(&from), &from_len);
+  if (got < 0)
+    return (errno == EWOULDBLOCK || errno == EAGAIN) ? 0 : -1;
+  if (ip != nullptr)
+    *ip = ntohl(from.sin_addr.s_addr);
+  if (port != nullptr)
+    *port = ntohs(from.sin_port);
+  return got;
+}
+
+void PappLoader::svc_net_udp_close(int handle) {
+  for (int &fd : s_app_sockets) {
+    if (fd == handle && fd >= 0) {
+      ::close(fd);
+      fd = -1;
+    }
+  }
+}
+
+int PappLoader::svc_net_ipv4(uint32_t *ip, uint32_t *netmask) {
+  esp_netif_t *netif = esp_netif_get_default_netif();
+  esp_netif_ip_info_t info{};
+  if (netif == nullptr || esp_netif_get_ip_info(netif, &info) != ESP_OK || info.ip.addr == 0)
+    return 0;
+  if (ip != nullptr)
+    *ip = ntohl(info.ip.addr);
+  if (netmask != nullptr)
+    *netmask = ntohl(info.netmask.addr);
+  return 1;
+}
+
+void PappLoader::close_app_sockets_() {
+  for (int &fd : s_app_sockets) {
+    if (fd >= 0) {
+      ::close(fd);
+      fd = -1;
+    }
+  }
+}
+
 void *PappLoader::svc_file_open(const char *path, const char *mode) {
   const std::string mapped = runtime_path(path);
   FILE *file = std::fopen(mapped.c_str(), mode);
@@ -2146,6 +2242,11 @@ void PappLoader::populate_services(app_services_t *services) {
   services->touch_read = &PappLoader::svc_touch_read;
   services->input_mouse_read = &PappLoader::svc_input_mouse_read;
   services->input_keyboard_read = &PappLoader::svc_input_keyboard_read;
+  services->net_udp_open = &PappLoader::svc_net_udp_open;
+  services->net_udp_send = &PappLoader::svc_net_udp_send;
+  services->net_udp_recv = &PappLoader::svc_net_udp_recv;
+  services->net_udp_close = &PappLoader::svc_net_udp_close;
+  services->net_ipv4 = &PappLoader::svc_net_ipv4;
 }
 
 esp_err_t psram_app_load(const char *path, psram_app_handle_t *out_handle) {

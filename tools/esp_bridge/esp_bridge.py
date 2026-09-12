@@ -410,8 +410,10 @@ STREAM_AUDIO_HEADER = struct.Struct("<8sIHHII")  # PAPPAU01
 
 
 def rgb565_to_png(raw: bytes, width: int, height: int) -> bytes:
-    """PNG of a papp_loader frame: little-endian 16-bit pixels, red in the low
-    5 bits and blue in the high 5 (the panel's wiring; PIL calls it BGR;16)."""
+    """PNG of a papp_loader frame: little-endian RGB565, red in the high 5 bits.
+
+    That is how PAPPs draw (e.g. 0xF800 is red). Checked on the first live
+    screenshot against a photo of the panel running Touch test."""
     if len(raw) != width * height * 2:
         raise BridgeError(f"Screenshot is {len(raw)} bytes, expected {width * height * 2}.")
     five = bytes((v << 3) | (v >> 2) for v in range(32))
@@ -421,7 +423,7 @@ def rgb565_to_png(raw: bytes, width: int, height: int) -> bytes:
     for y in range(height):
         rows.append(0)  # PNG filter type 0 (none)
         for v in pixels[y * width:(y + 1) * width]:
-            rows += bytes((five[v & 0x1F], six[(v >> 5) & 0x3F], five[v >> 11]))
+            rows += bytes((five[v >> 11], six[(v >> 5) & 0x3F], five[v & 0x1F]))
 
     def chunk(kind: bytes, body: bytes) -> bytes:
         return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)

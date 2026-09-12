@@ -292,8 +292,9 @@ def stream_packet(magic: bytes, width: int, height: int, payload: bytes) -> byte
 
 
 class ScreenshotTests(unittest.TestCase):
-    # Pixels as papp_loader sends them: red in the low 5 bits, blue in the high 5.
-    RED, GREEN, BLUE, WHITE = 0x001F, 0x07E0, 0xF800, 0xFFFF
+    # Pixels as PAPPs draw them: RGB565 with red in the high 5 bits (Touch test's
+    # C_RED is 0xF800; the live screenshot matched a photo of the panel).
+    RED, GREEN, BLUE, WHITE = 0xF800, 0x07E0, 0x001F, 0xFFFF
 
     def frame(self):
         import array

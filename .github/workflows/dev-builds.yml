@@ -45,6 +45,9 @@ jobs:
           echo "apps=$apps" >> "$GITHUB_OUTPUT"
           if [ -z "$apps" ]; then echo "No work-in-progress apps."; exit 0; fi
           python3 tools/build_papp.py --out dist $apps
+          # Symbol lists (address order) so a crash PC from the device log can
+          # be mapped to a function: tools/papp_symbolize.py.
+          for a in $apps; do riscv32-esp-elf-nm -n -C ".cache/build/$a/$a.elf" > "dist/$a.sym"; done
 
       - uses: actions/upload-artifact@v4
         if: steps.build.outputs.apps != ''
@@ -73,7 +76,7 @@ jobs:
               --title "Dev builds (work in progress, not for the store)" \
               --notes "Latest test builds of work-in-progress apps, replaced on every push. Not in the store."
           fi
-          gh release upload dev-builds -R "$REPO" --clobber dist/*.papp dist/*.json
+          gh release upload dev-builds -R "$REPO" --clobber dist/*.papp dist/*.json dist/*.sym
           {
             echo "Latest test builds of work-in-progress apps, replaced on every push. Not in the store."
             echo

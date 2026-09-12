@@ -50,6 +50,11 @@ allowed_url_prefixes = [
   "https://nonasuomy.github.io/papp-conversions/",
 ]
 
+[console]
+# Print every request the bridge gets (who, which command) and its result in
+# this terminal. Set to false to keep the terminal quiet.
+show_requests = true
+
 [actions]
 # Start read-only; add "upload", "run", "logs" when you're happy with it.
 enabled = ["status", "config", "compile", "upload", "logs", "run", "launch", "close", "catalog", "screenshot"]

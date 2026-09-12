@@ -104,6 +104,7 @@ class Config:
     screen_port: int = 3232
     allowed_url_prefixes: list[str] = field(default_factory=list)
     token_env: str = "EHGI_BRIDGE_TOKEN"
+    show_requests: bool = True
 
     @staticmethod
     def load(path: Path, *, need_token: bool = True) -> "Config":
@@ -149,6 +150,7 @@ class Config:
         cfg.api_host = api.get("host")
         cfg.api_port = int(api.get("port", 6053))
         cfg.screen_port = int(api.get("screen_port", 3232))
+        cfg.show_requests = bool(raw.get("console", {}).get("show_requests", True))
         env_key = os.environ.get(api["encryption_key_env"], "") if api.get("encryption_key_env") else ""
         cfg.api_key = env_key or load_secret_map(cfg.secrets_files).get(api.get("encryption_key_secret", "")) or None
         cfg.allowed_url_prefixes = list(api.get("allowed_url_prefixes", [
@@ -704,6 +706,36 @@ def tail(text: str, lines: int = TAIL_LINES) -> str:
     return "\n".join(rows[-lines:]).replace("```", "'''")
 
 
+def describe(req: "Request") -> str:
+    """The request as a one-line command, for the bridge's terminal."""
+    parts = [req.action]
+    if req.yaml:
+        parts.append(req.yaml)
+    if req.action in NEEDS_YAML:
+        parts.append(f"source={req.source}")
+        if req.source == "repo":
+            parts.append(f"ref={req.ref}")
+    if req.device:
+        parts.append(f"device={req.device}")
+    if req.action in ("logs", "run"):
+        parts.append(f"seconds={req.seconds}")
+    if req.url:
+        parts.append(f"url={req.url}")
+    return " ".join(parts)
+
+
+def console(cfg: Config, text: str) -> None:
+    """Show what the bridge is asked and what it answers ([console] show_requests)."""
+    if not cfg.show_requests:
+        return
+    line = f"[{time.strftime('%H:%M:%S')}] {text}"
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:  # a console without emoji support
+        encoding = sys.stdout.encoding or "ascii"
+        print(line.encode(encoding, "replace").decode(encoding), flush=True)
+
+
 def handle_event(event: dict, cfg: Config, hub: Hub, runner: Runner) -> None:
     author = str(event.get("from", "")).lower()
     if author == cfg.handle.lower():
@@ -727,13 +759,17 @@ def handle_event(event: dict, cfg: Config, hub: Hub, runner: Runner) -> None:
     # The hub rejects a message that mentions its own author, so never write @<own handle>.
     own = re.compile(re.escape(f"@{cfg.handle}"), re.IGNORECASE)
     reply = lambda text, **extra: hub.call("post_message", {"channel": channel, "thread_id": thread, "text": own.sub(cfg.handle, text), **extra})  # noqa: E731
+    where = f"#{channel}" if channel else "hub"
     if refusal:
+        console(cfg, f"@{author} in {where}: refused: {refusal}")
         reply(f"🚫 {refusal}")
         return
     assert req is not None
+    console(cfg, f"@{author} in {where}: {describe(req)}")
     try:
         validate(req, cfg) if req.action != "status" else None
     except BridgeError as error:
+        console(cfg, f"  refused: {error}")
         reply(f"🚫 {error}")
         return
     if req.action != "status":
@@ -747,6 +783,7 @@ def handle_event(event: dict, cfg: Config, hub: Hub, runner: Runner) -> None:
         result = JobResult(False, f"❌ `{req.action}` crashed: {type(error).__name__}: {error}", "", 0.0)
     finally:
         hub.call("set_status", {"state": "online", "note": f"ESP bridge ready ({', '.join(cfg.enabled)})"})
+    console(cfg, f"  {'ok' if result.ok else 'failed'} in {result.seconds:.1f}s: {result.summary}")
     attachments = [hub.upload(name, content, kind) for name, content, kind in result.files]
     if result.log:
         attachments.append(hub.upload(f"{req.action}-{int(time.time())}.log", result.log.encode()))

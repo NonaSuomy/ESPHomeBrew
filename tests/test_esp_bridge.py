@@ -46,7 +46,9 @@ def make_config(tmp: Path, **overrides) -> eb.Config:
     """)
     path = tmp / "bridge.toml"
     path.write_text(toml)
-    return eb.Config.load(path, need_token=False)
+    cfg = eb.Config.load(path, need_token=False)
+    cfg.show_requests = overrides.get("show_requests", False)  # keep test output quiet
+    return cfg
 
 
 class ParseTests(unittest.TestCase):
@@ -454,6 +456,45 @@ class EventTests(unittest.TestCase):
             self.assertEqual(len(posted), 1)
             self.assertIn("is up", posted[0])
             self.assertNotIn("@esp-bridge", posted[0].lower())
+
+
+class ConsoleTests(unittest.TestCase):
+    def test_requests_and_results_are_printed_by_default(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp), show_requests=True)
+            # Default when bridge.toml has no [console] section: on.
+            self.assertTrue(eb.Config.load(Path(tmp) / "bridge.toml", need_token=False).show_requests)
+
+            class FakeHub:
+                def call(self, tool, args, timeout=90):
+                    return {}
+
+                def upload(self, name, content, content_type="text/plain"):
+                    return "att"
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                eb.handle_event({"from": "nona", "from_kind": "human", "channel": "general", "id": "m",
+                                 "text": "@esp-bridge compile esphome/device.yaml ref=main"}, cfg, FakeHub(),
+                                eb.Runner(cfg, dry_run=True))
+                eb.handle_event({"from": "mallory", "from_kind": "human", "channel": "general", "id": "m2",
+                                 "text": "@esp-bridge status"}, cfg, FakeHub(), eb.Runner(cfg, dry_run=True))
+            text = out.getvalue()
+            self.assertIn("@nona in #general: compile esphome/device.yaml source=repo ref=main", text)
+            self.assertIn("ok in", text)
+            self.assertIn("@mallory in #general: refused", text)
+
+    def test_show_requests_false_keeps_the_terminal_quiet(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                eb.console(cfg, "hidden")
+            self.assertEqual(out.getvalue(), "")
 
 
 class TokenTests(unittest.TestCase):

@@ -77,6 +77,12 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 - **Where the code comes from.** `source=repo` (the default) builds from a clean checkout of this repository at `ref=`. `extra_files` (e.g. your `secrets.yaml`) are copied in first and never committed. `source=local` builds a file in your `[local].dir` as it is.
 - **Agents** can send the same fields as message data: `post_message { text: "@esp-bridge compile", data: { esp_bridge: { action: "compile", yaml: "esphome/device.yaml", ref: "main" } } }`.
 - **Replies:** the bridge answers in the request's thread with ⏳ when it starts, then ✅/❌ with the last 40 log lines and the full log attached. It runs one job at a time; others wait their turn.
+- **In the bridge's terminal** every request is printed with who sent it and the result, e.g.
+  ```
+  [14:02:11] @claude in #general: launch url=https://nonasuomy.github.io/papp-conversions/psram_touchtest-0.1.0.papp
+  [14:02:13]   ok in 1.8s: ✅ `launch` `psram_touchtest-0.1.0.papp` sent to 10.20.30.180.
+  ```
+  Refusals are printed too. To turn it off, set `[console] show_requests = false` in `bridge.toml`.
 
 ## Launching and closing PAPPs on demand
 

@@ -152,6 +152,7 @@ public:
         if (fb == nullptr) {
             return;
         }
+        const long long start = papp_time_us();
         const int ox = (CANVAS_W - w) / 2 > 0 ? (CANVAS_W - w) / 2 : 0;
         const int oy = (CANVAS_H - h) / 2 > 0 ? (CANVAS_H - h) / 2 : 0;
         const int cw = w < CANVAS_W ? w : CANVAS_W;
@@ -181,7 +182,31 @@ public:
                 }
             }
         }
+        const long long converted = papp_time_us();
         papp_svc->display_flush();
+        Log_Rate(start, converted, papp_time_us());
+    }
+
+    // Every 5 s: frames presented per second and where a frame's time goes.
+    static void Log_Rate(long long start, long long converted, long long flushed)
+    {
+        static long long window = 0, convert_us = 0, flush_us = 0;
+        static int frames = 0;
+        if (window == 0) {
+            window = start;
+        }
+        frames++;
+        convert_us += converted - start;
+        flush_us += flushed - converted;
+        if (flushed - window >= 5000000) {
+            const long long elapsed = flushed - window;
+            papp_svc->log_printf("RA: %d.%d fps, per frame: convert %lld us, flush %lld us\n",
+                                 (int)(frames * 10000000LL / elapsed / 10), (int)(frames * 10000000LL / elapsed % 10),
+                                 convert_us / frames, flush_us / frames);
+            window = flushed;
+            frames = 0;
+            convert_us = flush_us = 0;
+        }
     }
 
 private:

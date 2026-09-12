@@ -250,43 +250,33 @@ int VQA_CopyAudio(VQAHandle* handle)
 
     VQA_AudioCallback();
 
-    if (config->OptionFlags & VQAOPTF_AUDIO && audio->Buffer != nullptr && audio->TempBufSize > 0) {
-        int current_block = audio->AudBufPos / config->HMIBufSize;
-        int next_block = (audio->TempBufSize + audio->AudBufPos) / config->HMIBufSize;
-
-        if ((unsigned)next_block >= audio->NumAudBlocks) {
-            next_block -= audio->NumAudBlocks;
-        }
+    const unsigned ring = (unsigned)config->AudioBufSize;
+    const unsigned block = (unsigned)config->HMIBufSize;
+    if (config->OptionFlags & VQAOPTF_AUDIO && audio->Buffer != nullptr && audio->TempBufSize > 0 && ring > 0
+        && block > 0 && audio->NumAudBlocks > 0) {
+        // Same as the OpenAL build, but every copy is bounded by the ring. The
+        // original wrapped with ring - AudBufPos, which went negative (a huge
+        // memcpy: the briefing-movie crash) when the write position had run
+        // past the end of the ring.
+        const unsigned pos = audio->AudBufPos % ring;
+        const unsigned n = audio->TempBufSize < ring ? audio->TempBufSize : ring;
+        const unsigned end = pos + n;
+        const unsigned next_block = (end / block) % audio->NumAudBlocks;
 
         if (audio->IsLoaded[next_block] == 1) {
-            return -10;
+            return -10; // the ring is full: try again next frame
         }
 
-        if (next_block < current_block) {
-            // Wraps around the ring.
-            int end_space = config->AudioBufSize - audio->AudBufPos;
-            int remaining = audio->TempBufSize - end_space;
-            memcpy(&audio->Buffer[audio->AudBufPos], audio->TempBuf, end_space);
-            memcpy(audio->Buffer, &audio->TempBuf[end_space], remaining);
-            audio->AudBufPos = remaining;
-            audio->TempBufSize = 0;
+        const unsigned first = n < ring - pos ? n : ring - pos;
+        memcpy(&audio->Buffer[pos], audio->TempBuf, first);
+        memcpy(audio->Buffer, &audio->TempBuf[first], n - first);
 
-            for (unsigned i = current_block; i < audio->NumAudBlocks; ++i) {
-                audio->IsLoaded[i] = 1;
-            }
-
-            for (int i = 0; i < next_block; ++i) {
-                audio->IsLoaded[i] = 1;
-            }
-        } else {
-            memcpy(&audio->Buffer[audio->AudBufPos], audio->TempBuf, audio->TempBufSize);
-            audio->AudBufPos += audio->TempBufSize;
-            audio->TempBufSize = 0;
-
-            for (int i = current_block; i < next_block; ++i) {
-                audio->IsLoaded[i] = 1;
-            }
+        for (unsigned b = pos / block; b < end / block; ++b) {
+            audio->IsLoaded[b % audio->NumAudBlocks] = 1;
         }
+
+        audio->AudBufPos = end % ring;
+        audio->TempBufSize = 0;
     }
     return 0;
 }

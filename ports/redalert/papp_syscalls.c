@@ -253,6 +253,25 @@ static const char *clean_path(const char *path, char *out, size_t size)
 #define MAX_FDS 32
 static void *s_files[MAX_FDS];
 
+// Read-ahead for files opened read-only. The game reads its MIX files and
+// movies ~1 KB at a time; each read went to the SD card separately, and the
+// intro spent more than half its time in them (2.7 s of every 5 s), which
+// made the movie stutter. One 32 KiB read now serves the small ones.
+#define READ_AHEAD 32768
+typedef struct {
+    unsigned char *buf;  // NULL: not cached (written files)
+    size_t len;          // bytes in buf
+    size_t pos;          // next byte to hand out
+} read_ahead_t;
+static read_ahead_t s_ahead[MAX_FDS];
+
+static void drop_read_ahead(int fd)
+{
+    free(s_ahead[fd].buf);
+    s_ahead[fd].buf = NULL;
+    s_ahead[fd].len = s_ahead[fd].pos = 0;
+}
+
 void papp_close_all_files(void)
 {
     for (int fd = 3; fd < MAX_FDS; fd++) {
@@ -260,6 +279,7 @@ void papp_close_all_files(void)
             papp_svc->file_close(s_files[fd]);
             s_files[fd] = NULL;
         }
+        drop_read_ahead(fd);
     }
 }
 
@@ -305,6 +325,8 @@ int _open(const char *path, int flags, int mode)
         return -1;
     }
     s_files[fd] = fp;
+    s_ahead[fd].len = s_ahead[fd].pos = 0;
+    s_ahead[fd].buf = (flags & O_ACCMODE) == O_RDONLY ? (unsigned char *)malloc(READ_AHEAD) : NULL;
     return fd;
 }
 
@@ -316,6 +338,7 @@ int _close(int fd)
         return -1;
     }
     s_files[fd] = NULL;
+    drop_read_ahead(fd);
     return papp_svc->file_close(fp);
 }
 
@@ -331,13 +354,40 @@ ssize_t _read(int fd, void *buf, size_t count)
         return -1;
     }
     const long long t = papp_time_us();
-    const ssize_t n = (ssize_t)papp_svc->file_read(buf, 1, count, fp);
+    read_ahead_t *ra = &s_ahead[fd];
+    size_t done = 0;
+    if (ra->buf == NULL) {
+        done = papp_svc->file_read(buf, 1, count, fp);
+    } else {
+        while (done < count) {
+            if (ra->pos < ra->len) {
+                size_t n = ra->len - ra->pos;
+                if (n > count - done) {
+                    n = count - done;
+                }
+                memcpy((unsigned char *)buf + done, ra->buf + ra->pos, n);
+                ra->pos += n;
+                done += n;
+                continue;
+            }
+            if (count - done >= READ_AHEAD) {
+                // A big read gains nothing from the buffer: straight in.
+                done += papp_svc->file_read((unsigned char *)buf + done, 1, count - done, fp);
+                break;
+            }
+            ra->len = papp_svc->file_read(ra->buf, 1, READ_AHEAD, fp);
+            ra->pos = 0;
+            if (ra->len == 0) {
+                break; // end of file
+            }
+        }
+    }
     const long long spent = papp_time_us() - t;
     papp_read_us += spent;
     if (spent > papp_read_max_us) {
         papp_read_max_us = spent;
     }
-    return n;
+    return (ssize_t)done;
 }
 
 ssize_t _write(int fd, const void *buf, size_t count)
@@ -369,6 +419,19 @@ off_t _lseek(int fd, off_t offset, int whence)
         errno = EBADF;
         return -1;
     }
+    read_ahead_t *ra = &s_ahead[fd];
+    if (ra->buf != NULL && whence != SEEK_END) {
+        // The file position is past the read-ahead; the game's is at pos.
+        const long buf_start = papp_svc->file_tell(fp) - (long)ra->len;
+        const long target = whence == SEEK_CUR ? buf_start + (long)ra->pos + (long)offset : (long)offset;
+        if (target >= buf_start && target <= buf_start + (long)ra->len) {
+            ra->pos = (size_t)(target - buf_start); // still inside the buffer
+            return (off_t)target;
+        }
+        offset = target;
+        whence = SEEK_SET;
+    }
+    ra->len = ra->pos = 0;
     if (papp_svc->file_seek(fp, (long)offset, whence) != 0) {
         errno = EINVAL;
         return -1;

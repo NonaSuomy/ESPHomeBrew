@@ -352,6 +352,41 @@ unsigned sleep(unsigned seconds)
     return 0;
 }
 
+// ── pthread for libstdc++/libgcc (built with POSIX threads) ────────────────
+// The game runs on one task: mutexes have nothing to do and thread-specific
+// data is plain global data. <pthread.h> is not included on purpose; only the
+// symbol names matter to the linker.
+
+int pthread_mutex_init(void *mutex, const void *attr) { (void)mutex; (void)attr; return 0; }
+int pthread_mutex_destroy(void *mutex) { (void)mutex; return 0; }
+int pthread_mutex_lock(void *mutex) { (void)mutex; return 0; }
+int pthread_mutex_trylock(void *mutex) { (void)mutex; return 0; }
+int pthread_mutex_unlock(void *mutex) { (void)mutex; return 0; }
+
+#define MAX_KEYS 16
+static const void *s_key_values[MAX_KEYS];
+static unsigned long s_keys_used;
+
+int pthread_key_create(unsigned long *key, void (*destructor)(void *))
+{
+    (void)destructor;
+    if (s_keys_used >= MAX_KEYS) {
+        return EAGAIN;
+    }
+    *key = s_keys_used++;
+    return 0;
+}
+int pthread_key_delete(unsigned long key) { (void)key; return 0; }
+void *pthread_getspecific(unsigned long key) { return key < MAX_KEYS ? (void *)s_key_values[key] : NULL; }
+int pthread_setspecific(unsigned long key, const void *value)
+{
+    if (key >= MAX_KEYS) {
+        return EINVAL;
+    }
+    s_key_values[key] = value;
+    return 0;
+}
+
 // ── Exit and the C++ runtime ────────────────────────────────────────────────
 
 void __wrap_exit(int code) { papp_quit(code); }

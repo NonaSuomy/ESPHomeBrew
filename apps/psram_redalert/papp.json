@@ -313,7 +313,8 @@
         "xordelta.cpp",
         "xpipe.cpp",
         "xstraw.cpp"
-      ]
+      ],
+      "archive": true
     },
     {
       "dir": "local:ports/redalert",

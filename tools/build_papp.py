@@ -47,6 +47,7 @@ CXX = "riscv32-esp-elf-g++"
 OBJCOPY = "riscv32-esp-elf-objcopy"
 NM = "riscv32-esp-elf-nm"
 SIZE = "riscv32-esp-elf-size"
+AR = "riscv32-esp-elf-ar"
 
 # ESP32-P4 RISC-V ABI; must match ESP-IDF.
 ARCH_FLAGS = ["-march=rv32imafc_zicsr_zifencei", "-mabi=ilp32f"]
@@ -166,8 +167,9 @@ def parse_header(data: bytes) -> dict:
 class Unit:
     """One source file to compile: compiler, flags and object path."""
 
-    def __init__(self, src: Path, obj: Path, flags: list[str], compiler: str = CC):
+    def __init__(self, src: Path, obj: Path, flags: list[str], compiler: str = CC, archive: str | None = None):
         self.src, self.obj, self.flags, self.compiler = src, obj, flags, compiler
+        self.archive = archive  # name of the static library this object goes into, if any
 
 
 def compile_one(unit: Unit, env: dict | None = None) -> None:
@@ -262,13 +264,17 @@ def custom_units(manifest: dict, src_root: Path, build_dir: Path) -> tuple[list[
     units: list[Unit] = []
     for group in manifest["groups"]:
         extra = [f"-I{source_file(src_root, inc)}" for inc in group.get("includes", [])]
+        # "archive": link the group as a static library, like upstream CMake
+        # libraries: only objects that resolve something are pulled in, and the
+        # app's own definitions win over the library's.
+        archive = f"lib{group.get('prefix', 'group').strip('_')}.a" if group.get("archive") else None
         for name in group_files(src_root, group):
             src = source_file(src_root, f"{group['dir']}/{name}")
             obj = build_dir / (group.get("prefix", "") + Path(name).stem + ".o")
             if src.suffix in (".cpp", ".cc", ".cxx"):
-                units.append(Unit(src, obj, cxxflags + extra, CXX))
+                units.append(Unit(src, obj, cxxflags + extra, CXX, archive))
             elif src.suffix == ".c":
-                units.append(Unit(src, obj, cflags + extra))
+                units.append(Unit(src, obj, cflags + extra, archive=archive))
             else:
                 raise ValueError(f"{name}: not a C or C++ source")
     objs = [u.obj for u in units]
@@ -368,7 +374,14 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
         raise RuntimeError(f"{name}: {len(failures)} of {len(units)} files failed to compile")
 
     elf = build_dir / f"{name}.elf"
-    link = [linker, *ldflags, f"-T{linker_script}", "-o", str(elf), *[str(u.obj) for u in units], *link_tail]
+    archives: dict[str, list[str]] = {}
+    for unit in units:
+        if unit.archive:
+            archives.setdefault(unit.archive, []).append(str(unit.obj))
+    for library, objects in archives.items():
+        run([AR, "rcs", str(build_dir / library), *objects])
+    objects = [str(u.obj) for u in units if not u.archive] + [str(build_dir / library) for library in archives]
+    link = [linker, *ldflags, f"-T{linker_script}", "-o", str(elf), *objects, *link_tail]
     run(link)
     run([SIZE, str(elf)])
 

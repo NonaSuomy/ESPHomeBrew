@@ -343,6 +343,23 @@ void PappLoader::setup() {
       }
     });
   }
+#ifdef PAPP_LOADER_USE_USB_HIDX
+  // USB keyboard keys and mouse/touchpad motion reach the PAPP through
+  // usb_hidx's keyboard text sensor and mouse X/Y sensors. Subscribe here so
+  // the device YAML only has to declare those sensors, no lambdas.
+  if (this->usb_hidx_ != nullptr) {
+#ifdef USE_TEXT_SENSOR
+    if (auto *keys = this->usb_hidx_->get_keyboard_sensor(); keys != nullptr)
+      keys->add_on_state_callback([this](const std::string &key) { this->enqueue_keyboard_text(key); });
+#endif
+#ifdef USE_SENSOR
+    if (auto *mouse_x = this->usb_hidx_->get_mouse_x_sensor(); mouse_x != nullptr)
+      mouse_x->add_on_state_callback([this](float dx) { this->enqueue_mouse_delta(dx, 0.0f); });
+    if (auto *mouse_y = this->usb_hidx_->get_mouse_y_sensor(); mouse_y != nullptr)
+      mouse_y->add_on_state_callback([this](float dy) { this->enqueue_mouse_delta(0.0f, dy); });
+#endif
+  }
+#endif
   ESP_LOGCONFIG(TAG, "PAPP runtime ready");
   ESP_LOGCONFIG(TAG, "  Path: %s", this->path_.c_str());
   const std::string mapped = runtime_path(this->path_.c_str());

@@ -119,6 +119,7 @@ static void mixer_task(void*)
     long long idle_since = 0;  // when the silence began (0: something is playing)
     long long last_restart = 0;
     int stalls = 0;            // audio_submit calls in a row that waited it out
+    bool chain_idle = false;   // we let the speaker chain stop (a long silence)
     while (!s_quit) {
         bool any = false;
         memset(acc, 0, sizeof(acc));
@@ -144,6 +145,7 @@ static void mixer_task(void*)
             idle_since = papp_time_us();
         } else if (papp_time_us() - idle_since > 10000000) {
             frames_out = 0; // the next sound starts a new run
+            chain_idle = true;
             papp_svc->delay_ms(10);
             continue;
         }
@@ -158,8 +160,9 @@ static void mixer_task(void*)
         if (frames_out == 0 || now - anchor_us > played_us + 250000) {
             // A new run (after a long silence the speaker chain has stopped
             // itself), or we fell far behind: start over from now.
-            if (frames_out == 0) {
+            if (chain_idle) {
                 papp_svc->audio_init(s_out_rate);
+                chain_idle = false;
             }
             anchor_us = now;
             frames_out = 0;
@@ -176,7 +179,7 @@ static void mixer_task(void*)
         // busy (starting up) restarts it, which stutters everything.
         const long long end = papp_time_us();
         stalls = end - start > 60000 ? stalls + 1 : 0;
-        if (stalls >= 3 && end - last_restart > 2000000) {
+        if (stalls >= 10 && end - last_restart > 2000000) { // ~1 s taking nothing
             papp_svc->audio_init(s_out_rate);
             last_restart = end;
             stalls = 0;

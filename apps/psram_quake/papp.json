@@ -1,8 +1,8 @@
 {
   "name": "psram_quake",
   "title": "Quake",
-  "version": "0.1.0",
-  "description": "WinQuake as a PSRAM app, with MP3 music. Needs id1/pak0.pak in /sd/roms/quake/.",
+  "version": "0.1.1",
+  "description": "WinQuake as a PSRAM app, with MP3 music. The store downloads the shareware id1/pak0.pak to /sd/roms/quake/.",
   "build": "custom",
   "source": {
     "repo": "https://github.com/NonaSuomy/RetroESP32-P4",
@@ -200,5 +200,18 @@
   "ldflags": [
     "-Wl,--allow-multiple-definition"
   ],
-  "newlib": true
+  "newlib": true,
+  "data": {
+    "repo": "https://github.com/NonaSuomy/RetroESP32-P4",
+    "ref": "ae04c88d166c55fa60722276ccc1cc50b7d100f2",
+    "license": "id1/pak0.pak is the Quake shareware v1.06 data (id Software permits redistributing the unmodified shareware release).",
+    "files": [
+      {
+        "path": "SDcard/roms/quake/id1/pak0.pak",
+        "target": "roms/quake/id1/pak0.pak",
+        "size": 18689235,
+        "sha256": "35a9c55e5e5a284a159ad2a62e0e8def23d829561fe2f54eb402dbc0a9a946af"
+      }
+    ]
+  }
 }

@@ -1,8 +1,8 @@
 {
   "name": "psram_duke3d",
   "title": "Duke Nukem 3D",
-  "version": "0.1.0",
-  "description": "Duke Nukem 3D (BUILD engine) as a PSRAM app. Needs your own duke3d.grp on the SD card; the game data is not distributed here.",
+  "version": "0.1.1",
+  "description": "Duke Nukem 3D (BUILD engine) as a PSRAM app. The store downloads the shareware duke3d.grp to /sd/roms/duke3d/.",
   "build": "custom",
   "source": {
     "repo": "https://github.com/giltal/RetroESP32-P4",
@@ -122,5 +122,18 @@
   "ldflags": [
     "-Wl,--allow-multiple-definition"
   ],
-  "newlib": true
+  "newlib": true,
+  "data": {
+    "repo": "https://github.com/NonaSuomy/RetroESP32-P4",
+    "ref": "ae04c88d166c55fa60722276ccc1cc50b7d100f2",
+    "license": "DUKE3D.GRP from the Duke Nukem 3D shareware release (episode 1 only, contains DUKESW.BIN), which 3D Realms allowed to be freely distributed.",
+    "files": [
+      {
+        "path": "SDcard/roms/duke3d/DUKE3D.grp",
+        "target": "roms/duke3d/duke3d.grp",
+        "size": 10442980,
+        "sha256": "b218feef4a7b0e48027de17746bd744dc0624b275b9dac0ea8a726f85b48887f"
+      }
+    ]
+  }
 }

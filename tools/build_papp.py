@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -111,6 +112,44 @@ def fetch(repo: str, ref: str, dest: Path, sparse: list[str] | None = None) -> P
     return dest
 
 
+DATA_TARGET = re.compile(r"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$")
+
+
+def check_data(name: str, data: dict | None) -> dict | None:
+    """Validate an app's "data" block: files the app needs on the card.
+
+    Each file is pinned by repository commit, size and sha256; the store only
+    publishes exactly those bytes. `target` is the path under the device's
+    data root (for example roms/doom/doom1.wad -> /sd/roms/doom/doom1.wad).
+    """
+    if data is None:
+        return None
+    if not re.fullmatch(r"[0-9a-f]{40}", data.get("ref", "")):
+        raise ValueError(f"{name}: data.ref must be a full commit SHA")
+    if not data.get("repo", "").startswith("https://github.com/"):
+        raise ValueError(f"{name}: data.repo must be a https://github.com/ repository")
+    if not data.get("license"):
+        raise ValueError(f"{name}: data.license must say why the files may be redistributed")
+    files, targets = [], set()
+    for f in data.get("files", []):
+        target = f.get("target", "")
+        if not DATA_TARGET.match(target) or any(part in (".", "..") for part in target.split("/")):
+            raise ValueError(f"{name}: bad data target '{target}'")
+        if target.lower() in targets:
+            raise ValueError(f"{name}: data target '{target}' listed twice")
+        targets.add(target.lower())
+        if not isinstance(f.get("size"), int) or f["size"] <= 0:
+            raise ValueError(f"{name}: {target}: size must be a positive integer")
+        if not re.fullmatch(r"[0-9a-f]{64}", f.get("sha256", "")):
+            raise ValueError(f"{name}: {target}: sha256 must be 64 hex digits")
+        if not f.get("path") or f["path"].startswith("/") or ".." in f["path"].split("/"):
+            raise ValueError(f"{name}: {target}: bad source path")
+        files.append({k: f[k] for k in ("path", "target", "size", "sha256")})
+    if not files:
+        raise ValueError(f"{name}: data.files is empty")
+    return {"repo": data["repo"], "ref": data["ref"], "license": data["license"], "files": files}
+
+
 def parse_header(data: bytes) -> dict:
     if len(data) < PAPP_HEADER.size:
         raise ValueError("file is shorter than the 32-byte PAPP header")
@@ -131,11 +170,23 @@ class Unit:
         self.src, self.obj, self.flags, self.compiler = src, obj, flags, compiler
 
 
-def compile_one(unit: Unit) -> None:
+def compile_one(unit: Unit, env: dict | None = None) -> None:
     unit.obj.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run([unit.compiler, *unit.flags, "-c", "-o", str(unit.obj), str(unit.src)], capture_output=True, text=True)
+    result = subprocess.run([unit.compiler, *unit.flags, "-c", "-o", str(unit.obj), str(unit.src)],
+                            capture_output=True, text=True, env=env)
     if result.returncode != 0:
         raise RuntimeError(f"compile failed: {unit.src}\n{result.stderr}")
+
+
+def reproducible_env(src_root: Path) -> tuple[dict, int]:
+    """Compiler environment that makes __DATE__/__TIME__ the source commit's time.
+
+    Some ports print their build time (WinQuake: __TIME__ __DATE__; PrBoom and
+    Duke3D: __DATE__). Without this every CI run produces a different binary,
+    and Publish store refuses a changed binary under an already released version.
+    """
+    epoch = int(run(["git", "log", "-1", "--format=%ct", "HEAD"], cwd=src_root, capture_output=True).stdout.strip())
+    return {**os.environ, "SOURCE_DATE_EPOCH": str(epoch)}, epoch
 
 
 def source_file(root: Path, rel: str) -> Path:
@@ -185,6 +236,7 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
     if manifest_path.parent.name != name:
         raise ValueError(f"{manifest_path}: name '{name}' must match its folder")
     print(f"=== {name} ===", flush=True)
+    data_files = check_data(name, manifest.get("data"))
 
     source = manifest["source"]
     build = manifest["build"]
@@ -230,9 +282,14 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
     if build != "custom":
         for c in sorted(app_dir.glob("*.c")):
             units.append(Unit(c, build_dir / (c.stem + ".o"), cflags))
-    print(f"  compiling {len(units)} files", flush=True)
+    # Same bytes on every machine and run: pinned timestamps, and the local
+    # checkout path (which __FILE__ would embed) mapped to a fixed name.
+    env, epoch = reproducible_env(src_root)
+    for unit in units:
+        unit.flags = unit.flags + [f"-ffile-prefix-map={cache}=/papp-src"]
+    print(f"  compiling {len(units)} files (SOURCE_DATE_EPOCH={epoch})", flush=True)
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        list(pool.map(compile_one, units))
+        list(pool.map(lambda unit: compile_one(unit, env), units))
 
     elf = build_dir / f"{name}.elf"
     link = [linker, *ldflags, f"-T{sdk / 'tools/psram_app.ld'}", "-o", str(elf), *[str(u.obj) for u in units], *link_tail]
@@ -270,6 +327,8 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
         "source": {"repo": source["repo"], "ref": source["ref"], "path": source["path"]},
         "sdk": {"repo": source["repo"], "ref": source["ref"]},
     }
+    if data_files:
+        info["data"] = data_files
     (out / f"{name}.json").write_text(json.dumps(info, indent=2) + "\n")
     print(f"  {papp.name}: {len(data)} bytes, text={header['text_size']} bss={header['bss_size']}, sha256 {info['sha256'][:16]}", flush=True)
     return info

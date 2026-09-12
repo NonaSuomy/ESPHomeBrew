@@ -32,6 +32,25 @@ class ManifestTests(unittest.TestCase):
                     self.assertRegex(m["lvgl"]["ref"], r"^[0-9a-f]{40}$")
                 if m["build"] == "custom":
                     self.assertTrue(m["groups"])
+                bp.check_data(m["name"], m.get("data"))
+
+    def test_data_blocks_are_checked(self):
+        good = {"repo": "https://github.com/o/r", "ref": "a" * 40, "license": "shareware",
+                "files": [{"path": "SDcard/roms/doom/doom1.wad", "target": "roms/doom/doom1.wad",
+                           "size": 4, "sha256": "b" * 64}]}
+        self.assertEqual(bp.check_data("x", good)["files"][0]["target"], "roms/doom/doom1.wad")
+        self.assertIsNone(bp.check_data("x", None))
+        bad_files = [
+            {"target": "../etc/passwd"}, {"target": "/abs/path"}, {"target": "roms/a b.wad"},
+            {"target": "roms\\doom.wad"}, {"size": 0}, {"size": "4"}, {"sha256": "xyz"}, {"path": "../x"},
+        ]
+        for change in bad_files:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                bp.check_data("x", {**good, "files": [{**good["files"][0], **change}]})
+        for change in ({"ref": "main"}, {"repo": "http://example.com/r"}, {"license": ""}, {"files": []},
+                       {"files": good["files"] * 2}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                bp.check_data("x", {**good, **change})
 
 
 class CustomRecipeTests(unittest.TestCase):

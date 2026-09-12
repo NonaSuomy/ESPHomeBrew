@@ -3,9 +3,9 @@ name: Python tools
 on:
   push:
     branches: [main]
-    paths: ["tools/esp_bridge/**", "tools/build_papp.py", "apps/**", "tests/**", ".github/workflows/python-tools.yml"]
+    paths: ["tools/esp_bridge/**", "tools/build_papp.py", "tools/make_catalog.py", "apps/**", "tests/**", ".github/workflows/python-tools.yml"]
   pull_request:
-    paths: ["tools/esp_bridge/**", "tools/build_papp.py", "apps/**", "tests/**", ".github/workflows/python-tools.yml"]
+    paths: ["tools/esp_bridge/**", "tools/build_papp.py", "tools/make_catalog.py", "apps/**", "tests/**", ".github/workflows/python-tools.yml"]
   workflow_dispatch:
 
 permissions:
@@ -20,3 +20,19 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m unittest discover -s tests -v
+
+      # Download every pinned app data file and check its size and sha256, so a
+      # bad pin fails here instead of in Publish store on main.
+      - name: Verify pinned app data
+        shell: python
+        run: |
+          import json, pathlib, sys, tempfile
+          sys.path.insert(0, "tools")
+          import build_papp, make_catalog
+          for path in sorted(pathlib.Path("apps").glob("*/papp.json")):
+              app = json.loads(path.read_text())
+              data = build_papp.check_data(app["name"], app.get("data"))
+              if data:
+                  with tempfile.TemporaryDirectory() as tmp:
+                      make_catalog.publish_data("o/r", {**app, "data": data}, pathlib.Path(tmp), None)
+                  print(f"{app['name']}: {len(data['files'])} file(s) verified")

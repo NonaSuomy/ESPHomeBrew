@@ -80,8 +80,16 @@ jobs:
               --notes "$(printf 'PAPP `%s` %s, built by CI from %s.\n\nsha256: %s\n' "$name" "$version" "${{ steps.run.outputs.sha }}" "$sha")"
           done < releases.tsv
 
-      - name: Write catalog
-        run: python3 tools/make_catalog.py --repo "$REPO" --dist dist --out site
+      # App data (game WADs/PAKs) is pinned by sha256, so cached copies are
+      # checked and reused instead of downloaded again on every publish.
+      - uses: actions/cache@v4
+        with:
+          path: .data-cache
+          key: papp-data-${{ hashFiles('apps/*/papp.json') }}
+          restore-keys: papp-data-
+
+      - name: Write catalog and app data
+        run: python3 tools/make_catalog.py --repo "$REPO" --dist dist --out site --data-cache .data-cache
 
       # One artifact name per attempt: a re-run keeps the earlier attempt's
       # artifact, and deploy-pages refuses when two share a name.

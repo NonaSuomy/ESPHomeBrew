@@ -1,8 +1,8 @@
 {
   "name": "psram_doom",
   "title": "Doom",
-  "version": "0.1.0",
-  "description": "PrBoom as a PSRAM app. Needs a Doom IWAD and prboom.wad in /sd/roms/doom/.",
+  "version": "0.1.1",
+  "description": "PrBoom as a PSRAM app. The store downloads the shareware doom1.wad and prboom.wad to /sd/roms/doom/.",
   "build": "custom",
   "source": {
     "repo": "https://github.com/NonaSuomy/RetroESP32-P4",
@@ -131,5 +131,24 @@
       ]
     }
   ],
-  "newlib": true
+  "newlib": true,
+  "data": {
+    "repo": "https://github.com/NonaSuomy/RetroESP32-P4",
+    "ref": "ae04c88d166c55fa60722276ccc1cc50b7d100f2",
+    "license": "doom1.wad is the Doom shareware v1.9 IWAD (id Software permits redistributing the unmodified shareware release); prboom.wad is part of PrBoom (GPL-2.0).",
+    "files": [
+      {
+        "path": "SDcard/roms/doom/doom1.wad",
+        "target": "roms/doom/doom1.wad",
+        "size": 4196020,
+        "sha256": "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771"
+      },
+      {
+        "path": "SDcard/roms/doom/prboom.wad",
+        "target": "roms/doom/prboom.wad",
+        "size": 143312,
+        "sha256": "b4dd3642932193cc42bca0ee98bf30004888ca4850d69e85023b8baacfba1d1d"
+      }
+    ]
+  }
 }

@@ -44,6 +44,29 @@ jobs:
               print(f"| {a['file']} | {a['version']} | {a['size']:,} | {a['text_size']:,} | {a['bss_size']:,} | `{a['sha256'][:16]}` |")
           EOF
 
+      # Publish store refuses a new binary under an already released version.
+      # Catch that here, before merge: compare with the live store.
+      - name: Changed binaries have a new version
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          import json, sys, urllib.request
+          try:
+              with urllib.request.urlopen("https://nonasuomy.github.io/papp-conversions/store.json", timeout=30) as r:
+                  published = {(a["name"], a["version"]): a["sha256"] for a in json.load(r)["apps"]}
+          except Exception as error:  # first publish, or Pages unreachable: nothing to compare
+              print(f"store.json not available ({error}); skipping")
+              sys.exit(0)
+          bad = []
+          for a in json.load(open("dist/build.json"))["apps"]:
+              old = published.get((a["name"], a["version"]))
+              if old and old != a["sha256"]:
+                  bad.append(f"{a['name']} {a['version']}: published {old[:12]}, built {a['sha256'][:12]}")
+          for line in bad:
+              print(f"::error::{line}. Bump \"version\" in apps/{line.split()[0]}/papp.json.")
+          sys.exit(1 if bad else 0)
+          EOF
+
       - uses: actions/upload-artifact@v4
         with:
           name: papps

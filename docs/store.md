@@ -17,6 +17,25 @@ papp_loader:
 
 `store.json` has the same list with title, size, sha256 and pinned source, for tools and people.
 
+## App data (game files)
+
+Some apps need files on the card before they run: Doom needs an IWAD, Quake needs `id1/pak0.pak`. Such an app lists them under `data` in its `papp.json` (see [building.md](building.md#app-data)). Only files that may be redistributed are listed. Today that means the shareware `doom1.wad`, PrBoom's `prboom.wad`, the Quake shareware `pak0.pak` and the Duke Nukem 3D shareware `duke3d.grp`. Commercial game data and save files are never published.
+
+Publish store downloads each file from its source repository at the pinned commit. It checks the size and sha256 (and fails on any mismatch), then publishes the file on Pages under `data/<app>/<target>`. The Python tools CI does the same download and check on every pull request that touches `apps/`.
+
+Each app with data also gets a plain-text list next to its `.papp`: `psram_doom-0.1.0.papp` gets `psram_doom-0.1.0.files`.
+
+```
+# papp-data 1
+# psram_doom 0.1.0: <why these files may be redistributed>
+4196020 1d7d43be…c771 roms/doom/doom1.wad https://nonasuomy.github.io/papp-conversions/data/psram_doom/roms/doom/doom1.wad
+143312 b4dd3642…1d1d roms/doom/prboom.wad https://nonasuomy.github.io/papp-conversions/data/psram_doom/roms/doom/prboom.wad
+```
+
+Each line has four fields: size, sha256, the target path under the device's data root, and the URL. Lines starting with `#` are comments. The loader reads this list before it launches the app and downloads whatever the card is missing. `store.json` carries the same information under each app's `data`.
+
+The apps currently open their files at fixed `/sd/roms/<game>/…` paths, so the data root has to be `/sd` for them to find it.
+
 ## One-time repository setup (host)
 
 - **Settings → Pages → Build and deployment → Source: GitHub Actions.**

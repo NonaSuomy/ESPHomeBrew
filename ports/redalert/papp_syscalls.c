@@ -267,7 +267,7 @@ static read_ahead_t s_ahead[MAX_FDS];
 
 static void drop_read_ahead(int fd)
 {
-    free(s_ahead[fd].buf);
+    block_free(s_ahead[fd].buf);
     s_ahead[fd].buf = NULL;
     s_ahead[fd].len = s_ahead[fd].pos = 0;
 }
@@ -326,7 +326,7 @@ int _open(const char *path, int flags, int mode)
     }
     s_files[fd] = fp;
     s_ahead[fd].len = s_ahead[fd].pos = 0;
-    s_ahead[fd].buf = (flags & O_ACCMODE) == O_RDONLY ? (unsigned char *)malloc(READ_AHEAD) : NULL;
+    s_ahead[fd].buf = (flags & O_ACCMODE) == O_RDONLY ? (unsigned char *)block_alloc(READ_AHEAD, NULL) : NULL;
     return fd;
 }
 

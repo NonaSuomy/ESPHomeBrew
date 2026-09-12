@@ -87,7 +87,8 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
      papp_control: github://NonaSuomy/papp-conversions/esphome/device_control.yaml@main
    ```
    The device must already have `api:` with an encryption key. Home Assistant can call the same actions as `esphome.<device>_papp_launch`.
-2. **The bridge** has a `[device_api]` section: the device's `host`, and the name of its API key in `secrets.yaml` (`encryption_key_secret`). Run it with the ESPHome venv's python, which already has `aioesphomeapi`.
+2. **The bridge** has a `[device_api]` section: the device's `host`, and the name of its API key in `secrets.yaml` (`encryption_key_secret`). Leave that out if the device's `api:` has no encryption key. Run the bridge with the ESPHome venv's python, which already has `aioesphomeapi`.
+   - **Use the device's IP for `host`**, not `name.local`. On the first live test, `launch` worked through `esp32-p4-elecrow-papp.local`, but a later `close` timed out twice. With the IP, both worked, which points at the name lookup on the bridge machine. If an action times out, the message names the step that hung: resolving the name, connecting, listing actions or running the action.
 
 `launch` only accepts `https://` URLs to a `.papp` under `[device_api].allowed_url_prefixes` (by default this repo's release downloads and its Pages site). Combine it with `logs … seconds=60` to watch what the app does.
 

@@ -45,6 +45,7 @@ import json
 import os
 import re
 import shlex
+import socket
 import shutil
 import subprocess
 import sys
@@ -342,7 +343,19 @@ def mask(text: str, secrets: list[str]) -> str:
 # ── device API (papp_loader actions over the ESPHome native API) ────────────
 
 
-def call_device_action(cfg: Config, action: str, data: dict[str, str], timeout: float = 20.0) -> None:
+def resolve_host(host: str, port: int) -> str:
+    """The device address to dial: the system resolver's answer when it has one.
+
+    Linux resolves `name.local` through Avahi/nss-mdns when installed; when it
+    cannot, aioesphomeapi falls back to its own mDNS lookup of the name.
+    """
+    try:
+        return socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)[0][4][0]
+    except (socket.gaierror, IndexError, OSError):
+        return host
+
+
+def call_device_action(cfg: Config, action: str, data: dict[str, str], timeout: float = 30.0) -> None:
     """Execute an ESPHome API action on the configured device."""
     import asyncio
     import inspect
@@ -352,14 +365,22 @@ def call_device_action(cfg: Config, action: str, data: dict[str, str], timeout: 
     except ImportError as error:
         raise BridgeError("aioesphomeapi is missing; run the bridge with the ESPHome venv's python.") from error
 
+    # Which step was running when the time ran out tells a name/network problem
+    # (resolving, connecting) from a device that is up but slow (listing, running).
+    stage = ["resolving the name"]
+
     async def go() -> None:
-        client = APIClient(cfg.api_host, cfg.api_port, None, noise_psk=cfg.api_key, client_info="esp-bridge")
+        address = await asyncio.get_running_loop().run_in_executor(None, resolve_host, cfg.api_host, cfg.api_port)
+        stage[0] = f"connecting to {address}:{cfg.api_port}" if address != cfg.api_host else f"connecting to {cfg.api_host}:{cfg.api_port}"
+        client = APIClient(address, cfg.api_port, None, noise_psk=cfg.api_key, client_info="esp-bridge")
         await client.connect(login=True)
         try:
+            stage[0] = "listing the device's actions"
             _, services = await client.list_entities_services()
             service = next((s for s in services if s.name == action), None)
             if service is None:
                 raise BridgeError(f"The device has no `{action}` API action. Include esphome/device_control.yaml.")
+            stage[0] = f"running `{action}`"
             result = client.execute_service(service, data)
             if inspect.isawaitable(result):
                 await result
@@ -371,9 +392,10 @@ def call_device_action(cfg: Config, action: str, data: dict[str, str], timeout: 
     except BridgeError:
         raise
     except asyncio.TimeoutError as error:
-        raise BridgeError(f"The device at {cfg.api_host} did not answer within {timeout:.0f}s.") from error
+        raise BridgeError(f"The device at {cfg.api_host} did not answer within {timeout:.0f}s "
+                          f"(stuck while {stage[0]}).") from error
     except Exception as error:  # noqa: BLE001 - connection/auth problems are reported, not fatal
-        raise BridgeError(f"Device API call failed: {type(error).__name__}: {error}") from error
+        raise BridgeError(f"Device API call failed while {stage[0]}: {type(error).__name__}: {error}") from error
 
 
 # ── running jobs ────────────────────────────────────────────────────────────

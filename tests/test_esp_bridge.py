@@ -268,6 +268,40 @@ class DeviceApiTests(unittest.TestCase):
             eb.call_device_action(self.cfg, "papp_refresh_catalog", {})
 
 
+class DeviceStageTests(unittest.TestCase):
+    def tearDown(self):
+        sys.modules.pop("aioesphomeapi", None)
+
+    def test_timeout_says_which_step_hung(self):
+        import asyncio
+
+        class SlowListClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def connect(self, login=False):
+                return None
+
+            async def list_entities_services(self):
+                await asyncio.sleep(5)
+
+            async def disconnect(self):
+                return None
+
+        fake = type(sys)("aioesphomeapi")
+        fake.APIClient = SlowListClient
+        sys.modules["aioesphomeapi"] = fake
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_api_config(Path(tmp))
+            with self.assertRaises(eb.BridgeError) as caught:
+                eb.call_device_action(cfg, "papp_close", {}, timeout=0.5)
+        self.assertIn("listing the device's actions", str(caught.exception))
+
+    def test_unresolvable_names_are_left_to_aioesphomeapi(self):
+        self.assertEqual(eb.resolve_host("no-such-device.invalid", 6053), "no-such-device.invalid")
+        self.assertEqual(eb.resolve_host("127.0.0.1", 6053), "127.0.0.1")
+
+
 class EventTests(unittest.TestCase):
     def test_system_and_github_messages_are_never_answered(self):
         with tempfile.TemporaryDirectory() as tmp:

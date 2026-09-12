@@ -3,8 +3,10 @@
 
 Each app is described by apps/<name>/papp.json. Sources are fetched from their
 upstream repositories at the pinned commit rather than copied into this repo.
-The compile and link steps mirror RetroESP32-P4's tools/build_lvgl_papp.ps1,
-so a .papp built here matches one built with the upstream PowerShell scripts.
+The compile and link steps mirror RetroESP32-P4's PowerShell build scripts
+(tools/build_lvgl_papp.ps1 for "lvgl", tools/build_psram_app.ps1 for "plain",
+and tools/build_<game>_papp.ps1 for "custom" recipes), so a .papp built here
+matches one built with those scripts.
 
 Needs the ESP-IDF RISC-V toolchain (riscv32-esp-elf-*) on PATH and git.
 
@@ -28,10 +30,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 APPS = ROOT / "apps"
 
-# The PAPP SDK (ABI header, linker script, packer) comes from RetroESP32-P4.
-SDK_REPO = "https://github.com/giltal/RetroESP32-P4"
-SDK_REF = "339f17ff74eea4fe250d749fdcf0b5e544519c2a"
-SDK_PATHS = ["components/psram_app_loader/include", "tools/psram_app.ld", "tools/pack_papp.py"]
+# The PAPP SDK (ABI header, linker script, packer) is taken from the app's own
+# source repository at the same commit, so an app always builds against the
+# loader ABI it was written for.
+SDK_INCLUDE = "components/psram_app_loader/include"
+SDK_PATHS = [SDK_INCLUDE, "tools/psram_app.ld", "tools/pack_papp.py"]
 
 PAPP_MAGIC = 0x50415050
 PAPP_ABI_VERSION = 1
@@ -39,6 +42,7 @@ PAPP_HEADER = struct.Struct("<IIIIIIII")
 LINK_BASE = 0x4A000000
 
 CC = "riscv32-esp-elf-gcc"
+CXX = "riscv32-esp-elf-g++"
 OBJCOPY = "riscv32-esp-elf-objcopy"
 NM = "riscv32-esp-elf-nm"
 SIZE = "riscv32-esp-elf-size"
@@ -70,15 +74,29 @@ LDFLAGS = [
     "-Wl,--no-warn-rwx-segments",
 ] + ARCH_FLAGS
 
+# "custom" builds link newlib (-lc -lgcc -lm). Its heap and lock entry points
+# are wrapped so they go through the loader's app_services_t instead.
+NEWLIB_WRAPS = [
+    "malloc", "free", "calloc", "realloc",
+    "_malloc_r", "_free_r", "_calloc_r", "_realloc_r",
+    "__retarget_lock_init", "__retarget_lock_init_recursive",
+    "__retarget_lock_close", "__retarget_lock_close_recursive",
+    "__retarget_lock_acquire", "__retarget_lock_try_acquire",
+    "__retarget_lock_acquire_recursive", "__retarget_lock_try_acquire_recursive",
+    "__retarget_lock_release", "__retarget_lock_release_recursive",
+]
+NEWLIB_LIBS = ["-lc", "-lgcc", "-lm"]
+
 
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, text=True, **kwargs)
 
 
 def fetch(repo: str, ref: str, dest: Path, sparse: list[str] | None = None) -> Path:
-    """Check out `repo` at the exact commit `ref` into `dest` (cached by ref)."""
+    """Check out `repo` at the exact commit `ref` into `dest` (cached by ref and paths)."""
     stamp = dest / ".papp-ref"
-    if stamp.exists() and stamp.read_text().strip() == ref:
+    key = "\n".join([ref, *sorted(sparse or [])])
+    if stamp.exists() and stamp.read_text().strip() == key:
         return dest
     if dest.exists():
         shutil.rmtree(dest)
@@ -89,7 +107,7 @@ def fetch(repo: str, ref: str, dest: Path, sparse: list[str] | None = None) -> P
         run(["git", "sparse-checkout", "set", "--no-cone", *sparse], cwd=dest)
     run(["git", "fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", ref], cwd=dest)
     run(["git", "checkout", "-q", "FETCH_HEAD"], cwd=dest)
-    stamp.write_text(ref)
+    stamp.write_text(key)
     return dest
 
 
@@ -106,11 +124,59 @@ def parse_header(data: bytes) -> dict:
     return {"entry_offset": entry, "text_size": text, "data_size": data_size, "bss_size": bss, "flags": flags}
 
 
-def compile_one(src: Path, obj: Path, cflags: list[str]) -> None:
-    obj.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run([CC, *cflags, "-c", "-o", str(obj), str(src)], capture_output=True, text=True)
+class Unit:
+    """One source file to compile: compiler, flags and object path."""
+
+    def __init__(self, src: Path, obj: Path, flags: list[str], compiler: str = CC):
+        self.src, self.obj, self.flags, self.compiler = src, obj, flags, compiler
+
+
+def compile_one(unit: Unit) -> None:
+    unit.obj.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run([unit.compiler, *unit.flags, "-c", "-o", str(unit.obj), str(unit.src)], capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"compile failed: {src}\n{result.stderr}")
+        raise RuntimeError(f"compile failed: {unit.src}\n{result.stderr}")
+
+
+def source_file(root: Path, rel: str) -> Path:
+    """Resolve a manifest path inside the source checkout, refusing to leave it."""
+    root = root.resolve()
+    path = (root / rel).resolve()
+    if path != root and root not in path.parents:
+        raise ValueError(f"path '{rel}' leaves the source checkout")
+    return path
+
+
+def custom_units(manifest: dict, src_root: Path, build_dir: Path) -> tuple[list[Unit], list[str]]:
+    """Compile units and extra link flags for a "custom" recipe.
+
+    Mirrors RetroESP32-P4's tools/build_<game>_papp.ps1: explicit source lists
+    per directory, one include list, C and C++ flags, and newlib with its heap
+    wrapped through the loader.
+    """
+    includes = [f"-I{source_file(src_root, inc)}" for inc in manifest.get("includes", [])]
+    base = ARCH_FLAGS + ["-mcmodel=medany"]
+    cflags = base + manifest.get("cflags", []) + includes
+    cxxflags = base + manifest.get("cxxflags", []) + includes
+    units: list[Unit] = []
+    for group in manifest["groups"]:
+        extra = [f"-I{source_file(src_root, inc)}" for inc in group.get("includes", [])]
+        for name in group["files"]:
+            src = source_file(src_root, f"{group['dir']}/{name}")
+            obj = build_dir / (group.get("prefix", "") + Path(name).stem + ".o")
+            if src.suffix in (".cpp", ".cc", ".cxx"):
+                units.append(Unit(src, obj, cxxflags + extra, CXX))
+            elif src.suffix == ".c":
+                units.append(Unit(src, obj, cflags + extra))
+            else:
+                raise ValueError(f"{name}: not a C or C++ source")
+    objs = [u.obj for u in units]
+    if len(set(objs)) != len(objs):
+        raise ValueError("two sources map to the same object file; give a group a 'prefix'")
+    ldflags = list(manifest.get("ldflags", []))
+    if manifest.get("newlib"):
+        ldflags += [f"-Wl,--wrap={sym}" for sym in NEWLIB_WRAPS] + NEWLIB_LIBS
+    return units, ldflags
 
 
 def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
@@ -120,18 +186,29 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
         raise ValueError(f"{manifest_path}: name '{name}' must match its folder")
     print(f"=== {name} ===", flush=True)
 
-    sdk = fetch(SDK_REPO, SDK_REF, cache / f"sdk-{SDK_REF[:12]}", SDK_PATHS)
     source = manifest["source"]
-    src_root = fetch(source["repo"], source["ref"], cache / f"src-{name}-{source['ref'][:12]}", [source["path"]])
+    build = manifest["build"]
+    sparse = [source["path"], *SDK_PATHS]
+    if build == "custom":
+        sparse += [g["dir"] for g in manifest["groups"]] + manifest.get("includes", [])
+    sdk = src_root = fetch(source["repo"], source["ref"], cache / f"src-{name}-{source['ref'][:12]}", sparse)
     app_dir = src_root / source["path"]
 
-    cflags = CFLAGS + [f"-I{sdk / 'components/psram_app_loader/include'}", f"-I{app_dir}"]
+    cflags = CFLAGS + [f"-I{sdk / SDK_INCLUDE}", f"-I{app_dir}"]
     build_dir = cache / "build" / name
     if build_dir.exists():
         shutil.rmtree(build_dir)
-    sources: list[tuple[Path, Path]] = []
+    units: list[Unit] = []
+    ldflags = list(LDFLAGS)
+    linker = CC
 
-    if manifest["build"] == "lvgl":
+    if build == "custom":
+        units, link_tail = custom_units(manifest, src_root, build_dir)
+        # newlib is linked, so -nostdlib goes; libraries follow the objects.
+        ldflags = [f for f in LDFLAGS if f != "-nostdlib"]
+        if any(u.compiler == CXX for u in units):
+            linker = CXX
+    elif build == "lvgl":
         lvgl = manifest["lvgl"]
         lvgl_dir = fetch(lvgl["repo"], lvgl["ref"], cache / f"lvgl-{lvgl['ref'][:12]}", ["/src/", "/*.h"])
         # lv_conf.h lives in the app folder; "lvgl/..." and "src/..." include styles both resolve.
@@ -141,22 +218,24 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
             rel = c.relative_to(lvgl_dir / "src")
             if rel.parts[0] == "drivers":
                 continue
-            sources.append((c, build_dir / "lvgl" / ("_".join(rel.parts)[:-2] + ".o")))
-    elif manifest["build"] != "plain":
-        raise ValueError(f"{name}: unknown build type '{manifest['build']}'")
-
-    for c in sorted(app_dir.glob("*.c")):
-        sources.append((c, build_dir / (c.stem + ".o")))
-    print(f"  compiling {len(sources)} files", flush=True)
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
-        list(pool.map(lambda pair: compile_one(pair[0], pair[1], cflags), sources))
-
-    elf = build_dir / f"{name}.elf"
-    link = [CC, *LDFLAGS, f"-T{sdk / 'tools/psram_app.ld'}", "-o", str(elf), *[str(o) for _, o in sources]]
-    if manifest["build"] == "lvgl":
+            units.append(Unit(c, build_dir / "lvgl" / ("_".join(rel.parts)[:-2] + ".o"), cflags))
         # libgcc supplies compiler helpers (64-bit divide etc.); safe because the
         # linker script binds the app at its real runtime address.
-        link.append("-lgcc")
+        link_tail = ["-lgcc"]
+    elif build == "plain":
+        link_tail = []
+    else:
+        raise ValueError(f"{name}: unknown build type '{build}'")
+
+    if build != "custom":
+        for c in sorted(app_dir.glob("*.c")):
+            units.append(Unit(c, build_dir / (c.stem + ".o"), cflags))
+    print(f"  compiling {len(units)} files", flush=True)
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        list(pool.map(compile_one, units))
+
+    elf = build_dir / f"{name}.elf"
+    link = [linker, *ldflags, f"-T{sdk / 'tools/psram_app.ld'}", "-o", str(elf), *[str(u.obj) for u in units], *link_tail]
     run(link)
     run([SIZE, str(elf)])
 
@@ -189,7 +268,7 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
         "abi": PAPP_ABI_VERSION,
         **header,
         "source": {"repo": source["repo"], "ref": source["ref"], "path": source["path"]},
-        "sdk": {"repo": SDK_REPO, "ref": SDK_REF},
+        "sdk": {"repo": source["repo"], "ref": source["ref"]},
     }
     (out / f"{name}.json").write_text(json.dumps(info, indent=2) + "\n")
     print(f"  {papp.name}: {len(data)} bytes, text={header['text_size']} bss={header['bss_size']}, sha256 {info['sha256'][:16]}", flush=True)

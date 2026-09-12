@@ -1,0 +1,115 @@
+"""Tests for tools/build_papp.py: manifests, custom recipes and the PAPP header.
+
+Run: python3 -m unittest discover -s tests
+"""
+
+import json
+import struct
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+
+import build_papp as bp  # noqa: E402
+
+APPS = Path(__file__).resolve().parent.parent / "apps"
+
+
+class ManifestTests(unittest.TestCase):
+    def test_every_manifest_is_valid(self):
+        manifests = sorted(APPS.glob("*/papp.json"))
+        self.assertTrue(manifests)
+        for path in manifests:
+            with self.subTest(app=path.parent.name):
+                m = json.loads(path.read_text())
+                self.assertEqual(m["name"], path.parent.name)
+                self.assertIn(m["build"], ("lvgl", "plain", "custom"))
+                self.assertRegex(m["source"]["ref"], r"^[0-9a-f]{40}$")
+                self.assertRegex(m["version"], r"^\d+\.\d+\.\d+$")
+                if m["build"] == "lvgl":
+                    self.assertRegex(m["lvgl"]["ref"], r"^[0-9a-f]{40}$")
+                if m["build"] == "custom":
+                    self.assertTrue(m["groups"])
+
+
+class CustomRecipeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "src"
+        for rel in ["engine/a.c", "engine/b.c", "app/main.c", "app/mp3.cpp", "app/inc/x.h"]:
+            (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / rel).write_text("")
+        self.build = Path(self.tmp.name) / "build"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def manifest(self, **extra):
+        m = {
+            "includes": ["app/inc"],
+            "cflags": ["-std=gnu99"],
+            "cxxflags": ["-fno-rtti"],
+            "groups": [
+                {"dir": "engine", "files": ["a.c", "b.c"]},
+                {"dir": "app", "files": ["main.c", "mp3.cpp"], "prefix": "app_", "includes": ["app"]},
+            ],
+            "ldflags": ["-Wl,--allow-multiple-definition"],
+            "newlib": True,
+        }
+        m.update(extra)
+        return m
+
+    def test_units_use_the_right_compiler_and_flags(self):
+        units, ldflags = bp.custom_units(self.manifest(), self.root, self.build)
+        by_name = {u.obj.name: u for u in units}
+        self.assertEqual(sorted(by_name), ["a.o", "app_main.o", "app_mp3.o", "b.o"])
+        self.assertEqual(by_name["app_mp3.o"].compiler, bp.CXX)
+        self.assertIn("-fno-rtti", by_name["app_mp3.o"].flags)
+        self.assertNotIn("-std=gnu99", by_name["app_mp3.o"].flags)
+        self.assertEqual(by_name["a.o"].compiler, bp.CC)
+        self.assertIn("-std=gnu99", by_name["a.o"].flags)
+        self.assertIn("-mcmodel=medany", by_name["a.o"].flags)
+        self.assertIn(f"-I{(self.root / 'app/inc').resolve()}", by_name["a.o"].flags)
+        self.assertIn(f"-I{(self.root / 'app').resolve()}", by_name["app_main.o"].flags)
+        self.assertNotIn(f"-I{(self.root / 'app').resolve()}", by_name["a.o"].flags)
+        self.assertEqual(ldflags[0], "-Wl,--allow-multiple-definition")
+        self.assertIn("-Wl,--wrap=malloc", ldflags)
+        self.assertIn("-Wl,--wrap=__retarget_lock_release_recursive", ldflags)
+        self.assertEqual(ldflags[-3:], ["-lc", "-lgcc", "-lm"])
+
+    def test_without_newlib_nothing_is_wrapped(self):
+        _, ldflags = bp.custom_units(self.manifest(newlib=False, ldflags=[]), self.root, self.build)
+        self.assertEqual(ldflags, [])
+
+    def test_paths_must_stay_inside_the_checkout(self):
+        for bad in ({"groups": [{"dir": "..", "files": ["etc.c"]}]},
+                    {"groups": [{"dir": "engine", "files": ["../../x.c"]}]},
+                    {"includes": ["/usr/include"]}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                bp.custom_units(self.manifest(**bad), self.root, self.build)
+
+    def test_object_name_collisions_are_refused(self):
+        groups = [{"dir": "engine", "files": ["a.c"]}, {"dir": "engine", "files": ["a.c"]}]
+        with self.assertRaises(ValueError):
+            bp.custom_units(self.manifest(groups=groups), self.root, self.build)
+
+    def test_only_c_and_cpp_sources(self):
+        with self.assertRaises(ValueError):
+            bp.custom_units(self.manifest(groups=[{"dir": "app/inc", "files": ["x.h"]}]), self.root, self.build)
+
+
+class HeaderTests(unittest.TestCase):
+    def test_parse_header(self):
+        body = b"\x00" * 24
+        data = bp.PAPP_HEADER.pack(bp.PAPP_MAGIC, 1, 0, 20, 4, 100, 0, 0) + body
+        self.assertEqual(bp.parse_header(data)["bss_size"], 100)
+        with self.assertRaises(ValueError):
+            bp.parse_header(data[:-1])
+        with self.assertRaises(ValueError):
+            bp.parse_header(struct.pack("<I", 0) + data[4:])
+
+
+if __name__ == "__main__":
+    unittest.main()

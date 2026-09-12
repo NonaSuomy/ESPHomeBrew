@@ -1,0 +1,12 @@
+{
+  "name": "psram_touchtest",
+  "title": "Touch test",
+  "version": "0.1.0",
+  "description": "Draws a colored marker in each corner and a crosshair where you touch, to check touch_read and the canvas orientation.",
+  "build": "plain",
+  "source": {
+    "repo": "https://github.com/NonaSuomy/RetroESP32-P4",
+    "ref": "5c475e9df46c43463bd85c43f647d513d3b9bfa2",
+    "path": "apps/psram_touchtest"
+  }
+}

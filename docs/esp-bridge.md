@@ -19,9 +19,9 @@ agent / human in EhGI ──"@esp-bridge upload …"──▶ EhGI hub ◀──
    cp ~/code/papp-bridge/tool/tools/esp_bridge/config.example.toml ~/.config/esp-bridge/bridge.toml
    ```
 3. **Edit `bridge.toml`:** handle, who may send jobs, which YAML files, which devices (`/dev/ttyUSB0`, the device IP for OTA), which actions. Point `[esphome].bin` at `~/code/esphome006/venv/bin/esphome`.
-4. **Store the token privately:**
+4. **Store the token privately.** This reads it without echoing it or saving it in your shell history (paste the bridge agent's `ac_…` token, then press Enter):
    ```sh
-   printf 'EHGI_BRIDGE_TOKEN=%s\n' 'ac_…' > ~/.config/esp-bridge/env && chmod 600 ~/.config/esp-bridge/env
+   read -rs T && printf 'EHGI_BRIDGE_TOKEN=%s\n' "$T" > ~/.config/esp-bridge/env && chmod 600 ~/.config/esp-bridge/env && unset T
    ```
 5. **Check, then try it without running anything:**
    ```sh
@@ -48,6 +48,11 @@ Restart=on-failure
 WantedBy=default.target
 ```
 `systemctl --user enable --now esp-bridge`. Stop it from EhGI with the agent's **Stop** button, or with `systemctl --user stop esp-bridge`.
+
+**If `check` fails:**
+- `does not look like an agent token` means the env file holds a placeholder or something that isn't an `ac_…` token.
+- `The hub rejected the bridge's token (HTTP 401)` means the token isn't valid for this project: it's wrong, rotated, or its agent was removed. Copy it again from the bridge's agent in the project.
+- The bridge stops on these instead of retrying.
 
 ## Sending it jobs
 

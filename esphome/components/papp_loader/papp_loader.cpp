@@ -1796,6 +1796,19 @@ void PappLoader::audio_submit_(short *stereo_buf, int frame_count) {
       last_short_write_log_us = now_us;
     }
   }
+  // A mixer/resampler speaker chain can end up "running" while nothing
+  // drains it (its downstream speaker stopped on its own): every write then
+  // waits out the timeout and takes nothing, and the app's audio (and a
+  // movie waiting on it) stalls for good. start() does not help a speaker
+  // that thinks it is running, so restart the chain after ~1 s of that.
+  static int empty_writes = 0;
+  empty_writes = written == 0 ? empty_writes + 1 : 0;
+  if (empty_writes >= 10) {
+    ESP_LOGW(TAG, "PAPP audio: speaker is not draining; restarting it");
+    this->speaker_->stop();
+    this->speaker_->start();
+    empty_writes = 0;
+  }
 }
 
 uint16_t *PappLoader::svc_display_get_framebuffer() { return active_ != nullptr ? active_->framebuffer_ : nullptr; }

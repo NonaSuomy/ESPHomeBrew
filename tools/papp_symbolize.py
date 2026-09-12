@@ -25,24 +25,27 @@ DEV_BUILDS = "https://github.com/NonaSuomy/papp-conversions/releases/download/de
 LINE = re.compile(r"^([0-9a-fA-F]+)\s+([A-Za-z])\s+(.+)$")
 
 
-def load_symbols(text: str) -> list[tuple[int, str]]:
+def load_symbols(text: str) -> list[tuple[int, str, bool]]:
+    """(address, name, is_code) for every symbol: stacks also hold data pointers."""
     symbols = []
     for line in text.splitlines():
         m = LINE.match(line.strip())
-        if m and m.group(2) in "TtWw":  # code
-            symbols.append((int(m.group(1), 16), m.group(3)))
+        if m:
+            symbols.append((int(m.group(1), 16), m.group(3), m.group(2) in "TtWw"))
     symbols.sort()
     return symbols
 
 
-def symbolize(symbols: list[tuple[int, str]], address: int) -> str:
+def symbolize(symbols: list[tuple[int, str, bool]], address: int) -> str:
     if not 0x4A000000 <= address < 0x4C000000:
         return "outside the app (loader / ESP-IDF: use addr2line on the firmware ELF)"
-    i = bisect.bisect_right([a for a, _ in symbols], address) - 1
+    i = bisect.bisect_right([s[0] for s in symbols], address) - 1
     if i < 0:
         return "before the first symbol"
-    base, name = symbols[i]
-    return f"{name} + 0x{address - base:x}"
+    base, name, code = symbols[i]
+    if address - base >= 0x4000:
+        return "no symbol (unnamed data such as strings)"
+    return f"{'' if code else 'data: '}{name} + 0x{address - base:x}"
 
 
 def main() -> int:

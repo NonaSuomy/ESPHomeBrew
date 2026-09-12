@@ -47,7 +47,9 @@
     "-Wno-narrowing",
     "-Wno-deprecated-declarations",
     "-Wno-register",
-    "-Wno-attributes"
+    "-Wno-attributes",
+    "-D_DEBUG",
+    "-DLOGGING_LEVEL=4"
   ],
   "groups": [
     {

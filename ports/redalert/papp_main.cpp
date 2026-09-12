@@ -50,6 +50,14 @@ static void game_task(void *)
     static char *argv[] = {arg0, nullptr};
     if (setjmp(s_exit_jmp) == 0) {
         s_game_running = true;
+        // Global constructors run here, on the game's big stack: some build
+        // INI parsers and heaps, too much for the loader's 16 KiB worker task.
+        const unsigned ctors = (unsigned)(__init_array_end - __init_array_start);
+        papp_svc->log_printf("RA: running %u global constructors\n", ctors);
+        for (init_fn* fn = __init_array_start; fn < __init_array_end; ++fn) {
+            (*fn)();
+        }
+        papp_svc->log_printf("RA: constructors done, entering main()\n");
         s_exit_code = main(1, argv);
     }
     s_game_running = false;
@@ -68,12 +76,6 @@ extern "C" __attribute__((section(".text.entry"), used)) int app_entry(const app
 {
     papp_svc = svc;
     svc->log_printf("RA: Vanilla Conquer Red Alert PAPP starting\n");
-
-    const size_t ctors = __init_array_end - __init_array_start;
-    for (init_fn *fn = __init_array_start; fn < __init_array_end; ++fn) {
-        (*fn)();
-    }
-    svc->log_printf("RA: %u global constructors done\n", (unsigned)ctors);
 
     void *handle = nullptr;
     // Deep call chains (dialogs, pathfinding) and a few large locals: give the

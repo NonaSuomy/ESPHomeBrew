@@ -309,6 +309,17 @@ static bool local_ipv4(uint32_t* ip_net, uint32_t* mask_net)
     return true;
 }
 
+int gethostname(char* name, size_t len)
+{
+    static const char host[] = "redalert-p4";
+    if (name == nullptr || len < sizeof(host)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(name, host, sizeof(host));
+    return 0;
+}
+
 struct hostent* gethostbyname(const char* name)
 {
     (void)name; // only ever asked for this machine

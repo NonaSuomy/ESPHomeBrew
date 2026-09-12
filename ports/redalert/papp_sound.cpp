@@ -104,11 +104,19 @@ static void mix_voice(SampleTrackerTypeImp* st, int32_t* acc, int frames)
     }
 }
 
+// How far the mixer may run ahead of real time. audio_submit() only blocks
+// once the speaker chain (resampler, mixer, I2S: ~100 ms of buffer each) is
+// full, so without this the sound lagged by the whole chain: lips moved
+// before the words in the movies.
+static const long long LEAD_US = 120000;
+
 static void mixer_task(void*)
 {
     static int32_t acc[MIX_FRAMES * 2];
     static int16_t out[MIX_FRAMES * 2];
     const long long block_us = 1000000LL * MIX_FRAMES / s_out_rate;
+    long long anchor_us = 0;   // when the current run of audio started
+    long long frames_out = 0;  // frames submitted since anchor_us
     while (!s_quit) {
         bool any = false;
         memset(acc, 0, sizeof(acc));
@@ -125,6 +133,7 @@ static void mixer_task(void*)
             }
         }
         if (!any) {
+            frames_out = 0; // the next sound starts a new run
             papp_svc->delay_ms(10); // nothing to play: let the speaker idle
             continue;
         }
@@ -132,6 +141,16 @@ static void mixer_task(void*)
             const int32_t v = acc[i];
             out[i] = static_cast<int16_t>(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
         }
+        // Stay at most LEAD_US ahead of the audio actually played.
+        long long now = papp_time_us();
+        const long long played_us = frames_out * 1000000LL / s_out_rate;
+        if (frames_out == 0 || now - anchor_us > played_us + 250000) {
+            anchor_us = now; // first block, or we fell far behind: start over
+            frames_out = 0;
+        } else if (played_us - (now - anchor_us) > LEAD_US) {
+            papp_svc->delay_ms(static_cast<int>((played_us - (now - anchor_us) - LEAD_US) / 1000) + 1);
+        }
+        frames_out += MIX_FRAMES;
         const long long start = papp_time_us();
         papp_svc->audio_submit(out, MIX_FRAMES);
         // No speaker (or it returned at once): keep real time instead of spinning.

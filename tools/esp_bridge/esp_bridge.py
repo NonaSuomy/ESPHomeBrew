@@ -166,22 +166,47 @@ class Request:
     url: str | None = None
 
 
+def request_words(text: str, handle: str) -> list[str] | None:
+    """The words of the request line in a chat message, or None if it has none.
+
+    A request is a line that starts with the mention (`@esp-bridge compile x.yaml`,
+    optionally in backticks or a quote). Mentions inside a sentence, quoted
+    inline, or in pasted output (the bridge's own "@esp-bridge listening ..."
+    line) are not requests. The first request line with a known action wins; a
+    message that is nothing but one request line gets the "unknown action"
+    help, so typos are answered while chatter is ignored.
+    """
+    mention = f"@{handle}".lower()
+    candidates: list[list[str]] = []
+    for line in text.splitlines():
+        stripped = line.strip().lstrip(">").strip().strip("`").strip()
+        if not stripped.lower().startswith(mention):
+            continue
+        rest = stripped[len(mention):]
+        if rest and not rest[0].isspace():
+            continue  # @esp-bridge-2, @esp-bridges, ...
+        try:
+            words = shlex.split(rest.strip().rstrip("`"))
+        except ValueError as error:
+            raise BridgeError(f"Could not read the request: {error}.")
+        if words:
+            words[0] = words[0].strip("`.,:;!?").lower()
+            candidates.append(words)
+    for words in candidates:
+        if words[0] in ACTIONS:
+            return words
+    only_line = len([ln for ln in text.splitlines() if ln.strip()]) == 1
+    return candidates[0] if candidates and only_line else None
+
+
 def parse_request(text: str, data: dict | None, handle: str) -> Request | None:
     """Return the request addressed to this bridge, or None if the message has none."""
     fields: dict[str, str] = {}
     if isinstance(data, dict) and isinstance(data.get("esp_bridge"), dict):
         fields = {k: str(v) for k, v in data["esp_bridge"].items()}
     else:
-        mention = f"@{handle}".lower()
-        line = next((ln for ln in text.splitlines() if mention in ln.lower()), None)
-        if line is None:
-            return None
-        after = line[line.lower().index(mention) + len(mention):].strip().strip("`")
-        try:
-            words = shlex.split(after)
-        except ValueError as error:
-            raise BridgeError(f"Could not read the request: {error}.")
-        if not words:
+        words = request_words(text, handle)
+        if words is None:
             return None
         fields["action"] = words[0]
         for word in words[1:]:
@@ -570,6 +595,10 @@ def tail(text: str, lines: int = TAIL_LINES) -> str:
 def handle_event(event: dict, cfg: Config, hub: Hub, runner: Runner) -> None:
     author = str(event.get("from", "")).lower()
     if author == cfg.handle.lower():
+        return
+    # Only people and agents send jobs. System and GitHub feed messages (a PR
+    # description quoting a request, task updates) are never answered.
+    if event.get("from_kind", "human") not in ("human", "agent"):
         return
     thread = event.get("thread_id") or event.get("id")
     channel = event.get("channel")

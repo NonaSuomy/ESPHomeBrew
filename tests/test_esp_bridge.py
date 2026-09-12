@@ -295,6 +295,71 @@ def stream_packet(magic: bytes, width: int, height: int, payload: bytes) -> byte
     return eb.STREAM_HEADER.pack(magic, width, height, len(payload), 1) + payload
 
 
+class AppLogTests(unittest.TestCase):
+    def tearDown(self):
+        sys.modules.pop("aioesphomeapi", None)
+
+    def test_launch_with_seconds_attaches_the_device_log(self):
+        events = []
+
+        class Message:
+            def __init__(self, text):
+                self.message = text
+
+        class FakeService:
+            name = "papp_launch"
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def connect(self, login=False):
+                return None
+
+            async def list_entities_services(self):
+                return [], [FakeService()]
+
+            def subscribe_logs(self, on_log, log_level=None):
+                events.append("subscribe")
+                self.on_log = on_log
+                return lambda: events.append("unsubscribe")
+
+            async def execute_service(self, service, data):
+                events.append("launch")
+                self.on_log(Message(b"\x1b[0;32m[I][papp_loader]: RA: starting\x1b[0m"))
+                self.on_log(Message("[E][papp]: crash"))
+
+            async def disconnect(self):
+                return None
+
+        fake = type(sys)("aioesphomeapi")
+        fake.APIClient = FakeClient
+        sys.modules["aioesphomeapi"] = fake
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_api_config(Path(tmp))
+            req = eb.parse_request(f"@esp-bridge launch url={STORE} seconds=5", None, "esp-bridge")
+            self.assertTrue(req.seconds_given)
+            eb.validate(req, cfg)
+            original_sleep = eb.time.sleep
+            import asyncio
+            real_sleep = asyncio.sleep
+
+            async def no_wait(seconds):
+                await real_sleep(0)
+
+            asyncio.sleep = no_wait
+            try:
+                result = eb.Runner(cfg).execute(req)
+            finally:
+                asyncio.sleep = real_sleep
+        self.assertEqual(events, ["subscribe", "launch", "unsubscribe"])  # log starts before the launch
+        self.assertIn("[I][papp_loader]: RA: starting", result.log)
+        self.assertNotIn("\x1b", result.log)
+        self.assertIn("Device log for 5s attached", result.summary)
+        plain = eb.parse_request(f"@esp-bridge launch url={STORE}", None, "esp-bridge")
+        self.assertFalse(plain.seconds_given)
+
+
 class ProxyTests(unittest.TestCase):
     def test_github_downloads_are_served_to_the_device_from_here(self):
         import io

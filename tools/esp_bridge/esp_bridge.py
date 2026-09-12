@@ -175,6 +175,7 @@ class Request:
     device: str | None = None
     seconds: int = 60
     url: str | None = None
+    seconds_given: bool = False  # launch/close only capture device logs when asked
 
 
 def request_words(text: str, handle: str) -> list[str] | None:
@@ -238,7 +239,7 @@ def parse_request(text: str, data: dict | None, handle: str) -> Request | None:
         raise BridgeError("`seconds` must be a whole number.")
     return Request(action=action, yaml=fields.get("yaml"), ref=fields.get("ref", "main"),
                    source=fields.get("source", "repo").lower(), device=fields.get("device"), seconds=seconds,
-                   url=fields.get("url"))
+                   url=fields.get("url"), seconds_given="seconds" in fields)
 
 
 def _inside(base: Path, rel: str) -> Path:
@@ -270,7 +271,7 @@ def validate(req: Request, cfg: Config) -> Path | None:
             if not req.url.lower().endswith(".papp") or ".." in req.url or any(c.isspace() for c in req.url):
                 raise BridgeError("`url` must point at a .papp file.")
         return None
-    if req.action in {"logs", "run"} and not 5 <= req.seconds <= cfg.max_log_seconds:
+    if (req.action in {"logs", "run"} or req.seconds_given) and not 5 <= req.seconds <= cfg.max_log_seconds:
         raise BridgeError(f"`seconds` must be between 5 and {cfg.max_log_seconds}.")
     if req.action not in NEEDS_YAML:
         return None
@@ -365,8 +366,17 @@ def resolve_host(host: str, port: int) -> str:
         return host
 
 
-def call_device_action(cfg: Config, action: str, data: dict[str, str], timeout: float = 30.0) -> None:
-    """Execute an ESPHome API action on the configured device."""
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def call_device_action(cfg: Config, action: str, data: dict[str, str], timeout: float = 30.0,
+                       log_seconds: int = 0) -> str:
+    """Execute an ESPHome API action on the configured device.
+
+    With log_seconds, the device's log is also captured over the same
+    connection, from just before the action for that many seconds, and returned
+    (what an app prints while it starts or crashes).
+    """
     import asyncio
     import inspect
 
@@ -379,6 +389,8 @@ def call_device_action(cfg: Config, action: str, data: dict[str, str], timeout: 
     # (resolving, connecting) from a device that is up but slow (listing, running).
     stage = ["resolving the name"]
 
+    captured: list[str] = []
+
     async def go() -> None:
         address = await asyncio.get_running_loop().run_in_executor(None, resolve_host, cfg.api_host, cfg.api_port)
         stage[0] = f"connecting to {address}:{cfg.api_port}" if address != cfg.api_host else f"connecting to {cfg.api_host}:{cfg.api_port}"
@@ -390,15 +402,31 @@ def call_device_action(cfg: Config, action: str, data: dict[str, str], timeout: 
             service = next((s for s in services if s.name == action), None)
             if service is None:
                 raise BridgeError(f"The device has no `{action}` API action. Include esphome/device_control.yaml.")
+            unsubscribe = None
+            if log_seconds:
+                import aioesphomeapi
+
+                def on_log(message) -> None:
+                    text = message.message
+                    text = text.decode("utf-8", "replace") if isinstance(text, (bytes, bytearray)) else str(text)
+                    captured.append(ANSI.sub("", text).rstrip())
+
+                level = getattr(getattr(aioesphomeapi, "LogLevel", None), "LOG_LEVEL_DEBUG", None)
+                unsubscribe = client.subscribe_logs(on_log, log_level=level)
             stage[0] = f"running `{action}`"
             result = client.execute_service(service, data)
             if inspect.isawaitable(result):
                 await result
+            if log_seconds:
+                stage[0] = f"capturing {log_seconds}s of device log"
+                await asyncio.sleep(log_seconds)
+                if callable(unsubscribe):
+                    unsubscribe()
         finally:
             await client.disconnect()
 
     try:
-        asyncio.run(asyncio.wait_for(go(), timeout))
+        asyncio.run(asyncio.wait_for(go(), timeout + log_seconds))
     except BridgeError:
         raise
     except asyncio.TimeoutError as error:
@@ -406,6 +434,7 @@ def call_device_action(cfg: Config, action: str, data: dict[str, str], timeout: 
                           f"(stuck while {stage[0]}).") from error
     except Exception as error:  # noqa: BLE001 - connection/auth problems are reported, not fatal
         raise BridgeError(f"Device API call failed while {stage[0]}: {type(error).__name__}: {error}") from error
+    return "\n".join(captured)
 
 
 # ── screenshots (papp_loader diagnostic stream, TCP port 3232) ──────────────
@@ -650,11 +679,14 @@ class Runner:
             if req.action == "launch" and req.url and req.url.startswith(PROXIED_PREFIXES) and not self.dry_run:
                 data["url"] = proxy_url(self.cfg, req.url)
                 served = f" (served from this machine as {data['url']})"
+            log = ""
             if not self.dry_run:
-                call_device_action(self.cfg, DEVICE_API_ACTIONS[req.action], data)
+                log = call_device_action(self.cfg, DEVICE_API_ACTIONS[req.action], data,
+                                         log_seconds=req.seconds if req.seconds_given else 0)
             what = f"`{req.action}`" + (f" `{req.url.rsplit('/', 1)[-1]}`" if req.url else "")
-            return JobResult(True, f"✅ {what} sent to {self.cfg.api_host}{served}{' (dry run)' if self.dry_run else ''}.", "",
-                             time.monotonic() - start)
+            logged = f" Device log for {req.seconds}s attached." if req.seconds_given and not self.dry_run else ""
+            return JobResult(True, f"✅ {what} sent to {self.cfg.api_host}{served}{' (dry run)' if self.dry_run else ''}.{logged}",
+                             log, time.monotonic() - start)
         assert base is not None and req.yaml is not None
         where = "local config"
         if req.source == "repo":

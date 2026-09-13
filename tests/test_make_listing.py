@@ -91,9 +91,12 @@ class ListingTests(unittest.TestCase):
         self.assertEqual(listing["icon"]["width"], 64)
         self.assertEqual(base64.b64decode(listing["icon"]["base64"]), png(64, 64))
         self.assertNotIn("url", listing)
-        (self.folder / "azip-1.2.png").write_bytes(png(512, 64))
-        with self.assertRaises(ValueError):
-            ml.build_listing(papp, self.store, "", False, False)
+        (self.folder / "azip-1.2.png").write_bytes(png(512, 64))  # launcher art, too big: skipped
+        self.assertNotIn("icon", ml.build_listing(papp, self.store, "", False, False)[0])
+        icons = self.folder / "icons"
+        icons.mkdir()
+        (icons / "azip.png").write_bytes(png(32, 32))
+        self.assertEqual(ml.build_listing(papp, self.store, "", False, False, icons=icons)[0]["icon"]["width"], 32)
 
     def test_hand_edits_survive_a_rerun_unless_forced(self):
         papp = self.folder / "azip.papp"

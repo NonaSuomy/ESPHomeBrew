@@ -925,6 +925,17 @@ class ViewEditTests(unittest.TestCase):
         self.assertNotIn("hunter2-long", text)
         self.assertIsNone(eb.request_words(text, "esp-bridge"))
 
+    def test_long_view_attaches_the_whole_masked_file(self):
+        self.office.write_text("wifi:\n  password: plain-secret-1\n" + "# filler line\n" * 2000 + "last: line\n")
+        result = self.runner.execute(self.req("view office.yaml source=local"))
+        self.assertIn("attached", result.summary)
+        [(name, content, kind)] = result.files
+        self.assertEqual((name, kind), ("office.yaml.txt", "text/plain"))
+        self.assertTrue(content.rstrip().endswith(b"last: line"))
+        self.assertNotIn(b"plain-secret-1", content)
+        self.office.write_text("esphome:\n  name: office\n")
+        self.assertEqual(self.runner.execute(self.req("view office.yaml source=local")).files, [])
+
     def test_edit_is_limited(self):
         cases = [self.req("edit", "someone", yaml="office.yaml", source="local", find="a", replace="b"),
                  self.req("edit", yaml="esphome/device.yaml", source="repo", find="a", replace="b"),

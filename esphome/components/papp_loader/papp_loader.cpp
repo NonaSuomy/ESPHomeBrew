@@ -1332,6 +1332,13 @@ void PappLoader::screen_stream_task_() {
     ESP_LOGI(TAG, "Diagnostic screen recorder connected");
     bool connected = true;
     while (connected) {
+      // A recorder that has gone away is only noticed when a send fails, and
+      // with no app running nothing is sent: the next screenshot or file would
+      // go to the dead socket while the new client waits. Check for its close.
+      char probe;
+      const int peeked = recv(client_fd, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+      if (peeked == 0 || (peeked < 0 && errno != EWOULDBLOCK && errno != EAGAIN))
+        break;
       if (this->screenshot_requested_) {
         this->screenshot_requested_ = false;
         if (!this->send_screenshot_(client_fd))
@@ -1379,7 +1386,8 @@ void PappLoader::screen_stream_task_() {
       vTaskDelay(pdMS_TO_TICKS(SCREEN_STREAM_INTERVAL_MS));
     }
     this->stream_client_connected_ = false;
-    this->stream_enabled_ = false;
+    // A request that arrived for a client that had already gone waits for the next one.
+    this->stream_enabled_ = this->screenshot_requested_ || this->file_requested_;
     close(client_fd);
     ESP_LOGI(TAG, "Diagnostic screen recorder disconnected");
   }

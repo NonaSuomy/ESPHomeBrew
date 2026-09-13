@@ -76,6 +76,7 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 | `@esp-bridge screenshot` | Post an 800×480 PNG of the running PAPP in the thread |
 | `@esp-bridge readfile path=/sd/roms/redalert/DESYNCLOG.TXT` | Post a text file from the device's SD card; `path=/sd/roms/` lists a directory |
 | `@esp-bridge writefile path=/sd/roms/redalert/redalert.ini` + a code block | Replace a small text file on the SD card with the code block (`edit_requesters` only; not while an app runs) |
+| `@esp-bridge deletefile path=/sd/roms/redalert/sync001.txt` | Remove one text or leftover (`.bak`, `.log`) file from the SD card (`edit_requesters` only; not while an app runs) |
 | `@esp-bridge view device.yaml source=local` | Post the YAML with secret values hidden |
 | `@esp-bridge edit device.yaml source=local "find=refresh: 1d" "replace=refresh: 0s"` | Change one exact piece of a local YAML, then validate it (see below) |
 
@@ -147,6 +148,14 @@ The bridge reads the old file, calls `papp_write_file(path, data)`, then reads t
 - **Backups.** The loader keeps the previous file as `<name>.bak`, and restores it if the write fails.
 - **Who may write:** the same `[actions].edit_requesters` as `edit`. Lines with a hidden value (`***`) are refused, so a masked secret copied from a reply can't overwrite the real one.
 - It needs a loader and `device_control.yaml` with `papp_write_file`, and `writefile` in `[actions].enabled`.
+
+## Deleting a file from the SD card
+
+`deletefile path=/sd/…` removes one file, for example a game's old debug reports. The bridge looks the file up in its folder's listing, calls `papp_delete_file(path)`, then lists the folder again to confirm the file is gone.
+
+- **Only text and leftover files:** the `writefile` types plus `.bak` and `.log`. Game data (`.mix`, …), apps (`.papp`) and folders can't be removed this way, so a typo can't wipe a game.
+- **Not while an app runs**, the same people as `writefile` (`[actions].edit_requesters`), and only under `/sd/` without `..`.
+- It needs a loader and `device_control.yaml` with `papp_delete_file`, and `deletefile` in `[actions].enabled`.
 
 ## Viewing and editing your local YAML
 

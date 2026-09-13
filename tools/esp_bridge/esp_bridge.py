@@ -70,17 +70,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ACTIONS = ("status", "config", "compile", "upload", "logs", "run", "launch", "close", "catalog", "screenshot",
-           "readfile", "writefile", "view", "edit")
+           "readfile", "writefile", "deletefile", "view", "edit")
 # Bridge action -> ESPHome API action (esphome/device_control.yaml).
 DEVICE_API_ACTIONS = {"launch": "papp_launch", "close": "papp_close", "catalog": "papp_refresh_catalog",
                       "screenshot": "papp_screenshot", "readfile": "papp_read_file",
-                      "writefile": "papp_write_file"}
+                      "writefile": "papp_write_file", "deletefile": "papp_delete_file"}
 NEEDS_YAML = {"config", "compile", "upload", "logs", "run", "view", "edit"}
 EDIT_TEXT_MAX = 4000  # characters in `find` / `replace`
 # writefile: small text files only (a written .papp or firmware image would be
 # code); the loader checks the same list.
 WRITEFILE_MAX_BYTES = 16 * 1024
 WRITEFILE_EXTENSIONS = (".ini", ".cfg", ".conf", ".txt", ".json", ".yaml", ".yml", ".csv")
+# deletefile also takes leftovers, but never game data (.mix) or apps (.papp).
+DELETEFILE_EXTENSIONS = (*WRITEFILE_EXTENSIONS, ".bak", ".log")
 CODE_FENCE = re.compile(r"```[^\n`]*\n(.*?)```", re.S)
 MASKED_VALUE = re.compile(r"(?m)[:=]\s*\*\*\*\s*$")
 # Values of keys like these are hidden when a YAML is shown (`!secret` names stay visible).
@@ -297,6 +299,18 @@ def validate_writefile(req: Request, cfg: Config) -> None:
         raise BridgeError("The content has a hidden value (`***`); write the real value, or leave that line out.")
 
 
+def validate_deletefile(req: Request, cfg: Config) -> None:
+    """deletefile: one text or leftover file under /sd/, from someone allowed to change the device."""
+    if req.requester not in cfg.edit_requesters:
+        raise BridgeError(f"@{req.requester} may not delete device files on this bridge (see [actions].edit_requesters).")
+    path = req.path or ""
+    if (not path.startswith("/sd/") or ".." in path or path.endswith("/") or len(path) >= READFILE_PATH_MAX
+            or any(c.isspace() or not c.isprintable() for c in path)):
+        raise BridgeError("`deletefile` needs `path=/sd/…` naming one file.")
+    if not path.lower().endswith(DELETEFILE_EXTENSIONS):
+        raise BridgeError(f"`deletefile` only removes text and leftover files ({', '.join(DELETEFILE_EXTENSIONS)}).")
+
+
 def _inside(base: Path, rel: str) -> Path:
     if not rel or rel.startswith(("/", "\\", "~")) or re.match(r"^[A-Za-z]:", rel):
         raise BridgeError("YAML paths must be relative.")
@@ -339,6 +353,8 @@ def validate(req: Request, cfg: Config) -> Path | None:
                 raise BridgeError("`readfile` needs `path=/sd/…` (a file, or a directory ending in `/`).")
         if req.action == "writefile":
             validate_writefile(req, cfg)
+        if req.action == "deletefile":
+            validate_deletefile(req, cfg)
         return None
     if (req.action in {"logs", "run"} or req.seconds_given) and not 5 <= req.seconds <= cfg.max_log_seconds:
         raise BridgeError(f"`seconds` must be between 5 and {cfg.max_log_seconds}.")
@@ -1070,6 +1086,34 @@ class Runner:
         return JobResult(True, f"✏️ Wrote `{req.path}` ({len(req.content.encode('utf-8'))} bytes) on {self.cfg.api_host}; "
                                f"read back and verified.{kept}\n{shown}", "", took)
 
+    def delete_device_file(self, req: Request, start: float) -> JobResult:
+        """Remove one file from the SD card, then check that it is gone."""
+        assert req.path is not None
+        if self.dry_run:
+            return JobResult(True, f"🗑️ `{req.path}` would be deleted on {self.cfg.api_host} (dry run).", "", 0.0)
+        folder, name = req.path.rsplit("/", 1)
+        folder += "/"
+
+        def listed_size() -> str | None:
+            """The file's size from its folder's listing (name<TAB>size lines), or None if absent."""
+            for line in capture_file(self.cfg, folder).decode("utf-8", errors="replace").splitlines():
+                entry, _, size = line.partition("\t")
+                if entry.lower() == name.lower():  # FAT names ignore case
+                    return size
+            return None
+
+        size = listed_size()
+        if size is None:
+            return JobResult(False, f"❌ Nothing deleted: `{req.path}` is not on the card.", "", time.monotonic() - start)
+        call_device_action(self.cfg, DEVICE_API_ACTIONS["deletefile"], {"path": req.path})
+        gone = listed_size() is None
+        took = time.monotonic() - start
+        if not gone:
+            return JobResult(False, f"❌ `{req.path}` is still there. The loader refuses while an app is running (close it "
+                                    "first), and only removes text and leftover files under /sd/.", "", took)
+        return JobResult(True, f"🗑️ Deleted `{req.path}` ({size} bytes) on {self.cfg.api_host}; its folder no longer lists it.",
+                         "", took)
+
     def execute(self, req: Request) -> JobResult:
         start = time.monotonic()
         if req.action == "status":
@@ -1114,6 +1158,8 @@ class Runner:
             return JobResult(content is not None, summary, log, time.monotonic() - start)
         if req.action == "writefile":
             return self.write_device_file(req, start)
+        if req.action == "deletefile":
+            return self.delete_device_file(req, start)
         if req.action in DEVICE_API_ACTIONS:
             data = {"url": req.url or ""} if req.action == "launch" else {}
             served = ""

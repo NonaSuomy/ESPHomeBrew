@@ -101,6 +101,9 @@ class PappLoader : public Component {
   // Replaces a small text file under /sd/ (bridge `writefile`), keeping the old
   // one as <path>.bak. Refused while an app runs, since the app may rewrite it.
   void write_file(const std::string &path, const std::string &data);
+  // Removes one text or leftover file (.bak, .log) under /sd/ (bridge
+  // `deletefile`). Never game data or apps; refused while an app runs.
+  void delete_file(const std::string &path);
   void set_autostart(bool autostart) { this->autostart_ = autostart; }
   void set_display(display::Display *display) { this->display_ = display; }
   void set_touchscreen(touchscreen::Touchscreen *touchscreen) { this->touchscreen_ = touchscreen; }

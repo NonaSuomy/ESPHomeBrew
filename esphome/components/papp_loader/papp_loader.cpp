@@ -1444,8 +1444,9 @@ void PappLoader::request_file(const std::string &path) {
 
 static constexpr size_t WRITE_FILE_MAX_BYTES = 16 * 1024;
 
-// Text files only: a written .papp or firmware image would be code.
-static bool writable_extension(const std::string &path) {
+// Text files only: a written .papp or firmware image would be code. Deleting
+// also takes leftovers (.bak, .log), but never game data or apps.
+static bool writable_extension(const std::string &path, bool deleting = false) {
   static const char *const allowed[] = {".ini", ".cfg", ".conf", ".txt", ".json", ".yaml", ".yml", ".csv"};
   const size_t dot = path.rfind('.');
   if (dot == std::string::npos || path.find('/', dot) != std::string::npos)
@@ -1457,7 +1458,34 @@ static bool writable_extension(const std::string &path) {
     if (ext == candidate)
       return true;
   }
-  return false;
+  return deleting && (ext == ".bak" || ext == ".log");
+}
+
+void PappLoader::delete_file(const std::string &path) {
+  if (path.rfind("/sd/", 0) != 0 || path.find("..") != std::string::npos || path.back() == '/' ||
+      path.size() >= sizeof(this->file_request_path_) || !writable_extension(path, true)) {
+    ESP_LOGW(TAG, "deletefile refused: %s is not a text or leftover file under /sd/", path.c_str());
+    return;
+  }
+  if (this->launched_) {
+    ESP_LOGW(TAG, "deletefile refused while an app is running (it may still use %s)", path.c_str());
+    return;
+  }
+  const std::string local = runtime_path(path.c_str());
+  struct stat info {};
+  if (stat(local.c_str(), &info) != 0) {
+    ESP_LOGW(TAG, "deletefile: %s does not exist", path.c_str());
+    return;
+  }
+  if (!S_ISREG(info.st_mode)) {
+    ESP_LOGW(TAG, "deletefile refused: %s is not a regular file", path.c_str());
+    return;
+  }
+  if (unlink(local.c_str()) != 0) {
+    ESP_LOGW(TAG, "deletefile: removing %s failed (errno %d)", path.c_str(), errno);
+    return;
+  }
+  ESP_LOGI(TAG, "deletefile: removed %s (%u bytes)", path.c_str(), static_cast<unsigned>(info.st_size));
 }
 
 void PappLoader::write_file(const std::string &path, const std::string &data) {

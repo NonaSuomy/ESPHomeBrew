@@ -40,6 +40,7 @@
 #define MICROPY_READER_VFS                  (1)
 #define MICROPY_VFS                         (1)
 #define MICROPY_VFS_LFS2                    (1)
+#define FFCONF_H                            "lib/oofatfs/ffconf.h"  // extmod/modvfs.c includes vfs_fat.h
 #define MICROPY_HELPER_REPL                 (1)
 #define MICROPY_REPL_AUTO_INDENT            (1)
 #define MICROPY_REPL_EMACS_KEYS             (1)

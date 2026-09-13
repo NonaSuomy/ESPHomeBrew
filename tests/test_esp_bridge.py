@@ -780,6 +780,68 @@ class ReadFileTests(unittest.TestCase):
         self.assertEqual(uploaded, [])
 
 
+class WriteFileTests(unittest.TestCase):
+    INI = "[Network]\nProtocol=tcp\nHost=10.20.30.158\n"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = make_api_config(Path(self.tmp.name))
+        self.cfg.enabled = [*self.cfg.enabled, "writefile"]
+        self.cfg.edit_requesters = ["nona", "claude"]
+        self.runner = eb.Runner(self.cfg)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def req(self, path="/sd/roms/redalert/redalert.ini", content=None, requester="nona"):
+        body = self.INI if content is None else content
+        req = eb.parse_request(f"@esp-bridge writefile path={path}\n```ini\n{body}```\n", None, "esp-bridge")
+        req.requester = requester
+        return req
+
+    def test_content_comes_from_the_code_block(self):
+        self.assertEqual(self.req().content, self.INI)
+        data = eb.parse_request("", {"esp_bridge": {"action": "writefile", "path": "/sd/a.ini", "content": "x=1\n"}},
+                                "esp-bridge")
+        self.assertEqual(data.content, "x=1\n")
+
+    def test_writefile_is_limited(self):
+        eb.validate(self.req(), self.cfg)
+        refused = [self.req(requester="someone"), self.req(path="/sd/app.papp"), self.req(path="/sd/roms/"),
+                   self.req(path="/sd/../boot.ini"), self.req(path="/etc/x.ini"),
+                   self.req(content="Password=***\n"), self.req(content="x" * (eb.WRITEFILE_MAX_BYTES + 1))]
+        for req in refused:
+            with self.subTest(path=req.path, requester=req.requester), self.assertRaises(eb.BridgeError):
+                eb.validate(req, self.cfg)
+        no_block = eb.parse_request("@esp-bridge writefile path=/sd/a.ini", None, "esp-bridge")
+        no_block.requester = "nona"
+        with self.assertRaises(eb.BridgeError):
+            eb.validate(no_block, self.cfg)
+
+    def run_write(self, reads):
+        req = self.req()
+        eb.validate(req, self.cfg)
+        with mock.patch.object(eb, "capture_file", side_effect=reads) as capture, \
+                mock.patch.object(eb, "call_device_action") as action:
+            result = self.runner.execute(req)
+        return result, capture, action
+
+    def test_write_is_verified_by_reading_back(self):
+        result, capture, action = self.run_write([b"[Network]\nProtocol=udp\n", self.INI.encode()])
+        self.assertTrue(result.ok)
+        action.assert_called_once_with(self.cfg, "papp_write_file",
+                                       {"path": "/sd/roms/redalert/redalert.ini", "data": self.INI})
+        self.assertEqual(capture.call_count, 2)
+        self.assertIn("+Protocol=tcp", result.summary)
+        self.assertIn(".bak", result.summary)
+
+    def test_refused_write_is_reported(self):
+        old = b"[Network]\nProtocol=udp\n"
+        result, _, _ = self.run_write([old, old])
+        self.assertFalse(result.ok)
+        self.assertIn("app is running", result.summary)
+
+
 class ViewEditTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

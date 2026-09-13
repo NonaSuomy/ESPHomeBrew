@@ -238,6 +238,7 @@ __attribute__((section(".text.entry"), used)) int app_entry(const app_services_t
     papp_free_raw(s_heap);
     s_heap = NULL;
     papp_free_all_memory();
+    papp_syscalls_deinit();
     svc->log_printf("TULIP: bye\n");
     return s_quit_code;
 }

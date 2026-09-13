@@ -45,6 +45,7 @@ void papp_free_raw(void *ptr);
 
 // Heap and files the app still holds, released when it quits.
 void papp_syscalls_init(void);
+void papp_syscalls_deinit(void);
 void papp_free_all_memory(void);
 void papp_close_all_files(void);
 

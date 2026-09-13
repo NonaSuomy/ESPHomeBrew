@@ -546,3 +546,18 @@ void papp_syscalls_init(void)
 {
     locks_init();
 }
+
+// Called last by app_entry, once no other task of the app runs.
+void papp_syscalls_deinit(void)
+{
+    papp_lock_t **locks[] = {&s_heap_lock, &s_atomic_lock, &s_amy_lock, &s_file_lock};
+    for (size_t i = 0; i < sizeof(locks) / sizeof(locks[0]); i++) {
+        papp_lock_t *lock = *locks[i];
+        const int is_static = lock >= &s_static_locks[0] &&
+                              lock < &s_static_locks[sizeof(s_static_locks) / sizeof(s_static_locks[0])];
+        if (lock != NULL && !is_static) {
+            papp_svc->mem_free(lock);
+        }
+        *locks[i] = NULL;
+    }
+}

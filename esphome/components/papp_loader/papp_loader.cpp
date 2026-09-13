@@ -13,7 +13,10 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/select.h>
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -2086,17 +2089,52 @@ int PappLoader::svc_input_keyboard_read(papp_keyboard_event_t *event) {
 }
 int PappLoader::svc_touch_read(int *x, int *y) { return active_ != nullptr ? active_->read_touch_(x, y) : 0; }
 
-// ── UDP for apps (LAN multiplayer) ──────────────────────────────────────────
+// ── UDP and TCP for apps (multiplayer) ──────────────────────────────────────
 // Sockets are plain lwIP descriptors. The loader remembers them so a crashing
-// or careless app cannot leak them past its exit.
-static constexpr int APP_SOCKET_MAX = 8;
-static int s_app_sockets[APP_SOCKET_MAX] = {-1, -1, -1, -1, -1, -1, -1, -1};
+// or careless app cannot leak them past its exit. 16: an 8-player TCP game
+// needs a listener, up to 7 peers and a UDP discovery socket.
+static constexpr int APP_SOCKET_MAX = 16;
+static int s_app_sockets[APP_SOCKET_MAX] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+
+static bool app_socket_slot_free() {
+  for (int fd : s_app_sockets) {
+    if (fd < 0)
+      return true;
+  }
+  return false;
+}
+
+static void remember_app_socket(int fd) {
+  for (int &slot : s_app_sockets) {
+    if (slot < 0) {
+      slot = fd;
+      return;
+    }
+  }
+}
+
+static bool is_app_socket(int handle) {
+  if (handle < 0)
+    return false;
+  for (int fd : s_app_sockets) {
+    if (fd == handle)
+      return true;
+  }
+  return false;
+}
+
+static bool set_nonblocking(int fd) {
+  const int flags = ::fcntl(fd, F_GETFL, 0);
+  return flags >= 0 && ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
+static void set_tcp_nodelay(int fd) {
+  const int yes = 1;
+  ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+}
 
 int PappLoader::svc_net_udp_open(uint16_t port, int broadcast) {
-  int slot = 0;
-  while (slot < APP_SOCKET_MAX && s_app_sockets[slot] >= 0)
-    slot++;
-  if (slot == APP_SOCKET_MAX)
+  if (!app_socket_slot_free())
     return -1;
   const int fd = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (fd < 0)
@@ -2116,9 +2154,133 @@ int PappLoader::svc_net_udp_open(uint16_t port, int broadcast) {
     ::close(fd);
     return -1;
   }
-  s_app_sockets[slot] = fd;
+  remember_app_socket(fd);
   ESP_LOGI(TAG, "PAPP UDP: port %u open%s", port, broadcast ? " (broadcast)" : "");
   return fd;
+}
+
+int PappLoader::svc_net_tcp_connect(uint32_t ip, uint16_t port) {
+  if (!app_socket_slot_free())
+    return -1;
+  const int fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (fd < 0)
+    return -1;
+  set_tcp_nodelay(fd);
+  sockaddr_in to{};
+  to.sin_family = AF_INET;
+  to.sin_port = htons(port);
+  to.sin_addr.s_addr = htonl(ip);
+  if (!set_nonblocking(fd) ||
+      (::connect(fd, reinterpret_cast<sockaddr *>(&to), sizeof(to)) != 0 && errno != EINPROGRESS)) {
+    ESP_LOGW(TAG, "PAPP TCP: connect to %s:%u failed (errno %d)", inet_ntoa(to.sin_addr), port, errno);
+    ::close(fd);
+    return -1;
+  }
+  remember_app_socket(fd);
+  ESP_LOGI(TAG, "PAPP TCP: connecting to %s:%u", inet_ntoa(to.sin_addr), port);
+  return fd;
+}
+
+int PappLoader::svc_net_tcp_listen(uint16_t port) {
+  if (!app_socket_slot_free())
+    return -1;
+  const int fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (fd < 0)
+    return -1;
+  const int yes = 1;
+  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  if (::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0 || ::listen(fd, 8) != 0 ||
+      !set_nonblocking(fd)) {
+    ESP_LOGW(TAG, "PAPP TCP: cannot listen on port %u (errno %d)", port, errno);
+    ::close(fd);
+    return -1;
+  }
+  remember_app_socket(fd);
+  ESP_LOGI(TAG, "PAPP TCP: listening on port %u", port);
+  return fd;
+}
+
+int PappLoader::svc_net_tcp_accept(int handle, uint32_t *ip, uint16_t *port) {
+  if (!is_app_socket(handle))
+    return -1;
+  sockaddr_in from{};
+  socklen_t from_len = sizeof(from);
+  const int fd = ::accept(handle, reinterpret_cast<sockaddr *>(&from), &from_len);
+  if (fd < 0)
+    return (errno == EWOULDBLOCK || errno == EAGAIN) ? -2 : -1;
+  if (!app_socket_slot_free() || !set_nonblocking(fd)) {
+    ::close(fd);
+    return -1;
+  }
+  set_tcp_nodelay(fd);
+  remember_app_socket(fd);
+  if (ip != nullptr)
+    *ip = ntohl(from.sin_addr.s_addr);
+  if (port != nullptr)
+    *port = ntohs(from.sin_port);
+  ESP_LOGI(TAG, "PAPP TCP: accepted %s:%u", inet_ntoa(from.sin_addr), ntohs(from.sin_port));
+  return fd;
+}
+
+int PappLoader::svc_net_tcp_send(int handle, const void *buf, int len) {
+  if (!is_app_socket(handle) || buf == nullptr || len < 0)
+    return -1;
+  const int sent = ::send(handle, buf, len, 0);
+  if (sent < 0)
+    return (errno == EWOULDBLOCK || errno == EAGAIN || errno == ENOMEM) ? 0 : -1;
+  return sent;
+}
+
+int PappLoader::svc_net_tcp_recv(int handle, void *buf, int len) {
+  if (!is_app_socket(handle) || buf == nullptr || len <= 0)
+    return -1;
+  const int got = ::recv(handle, buf, len, 0);
+  if (got < 0)
+    return (errno == EWOULDBLOCK || errno == EAGAIN) ? -2 : -1;
+  return got;
+}
+
+int PappLoader::svc_net_poll(int handle) {
+  if (!is_app_socket(handle))
+    return -1;
+  fd_set readable, writable, failed;
+  FD_ZERO(&readable);
+  FD_ZERO(&writable);
+  FD_ZERO(&failed);
+  FD_SET(handle, &readable);
+  FD_SET(handle, &writable);
+  FD_SET(handle, &failed);
+  timeval now{0, 0};
+  if (::select(handle + 1, &readable, &writable, &failed, &now) < 0)
+    return -1;
+  int error = 0;
+  socklen_t error_len = sizeof(error);
+  ::getsockopt(handle, SOL_SOCKET, SO_ERROR, &error, &error_len);
+  return (FD_ISSET(handle, &readable) ? 1 : 0) | (FD_ISSET(handle, &writable) ? 2 : 0) |
+         (FD_ISSET(handle, &failed) || error != 0 ? 4 : 0);
+}
+
+int PappLoader::svc_net_resolve(const char *host, uint32_t *ip) {
+  if (host == nullptr || *host == '\0' || ip == nullptr)
+    return 0;
+  in_addr parsed{};
+  if (inet_aton(host, &parsed) != 0) {
+    *ip = ntohl(parsed.s_addr);
+    return 1;
+  }
+  addrinfo hints{};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  addrinfo *found = nullptr;
+  if (getaddrinfo(host, nullptr, &hints, &found) != 0 || found == nullptr)
+    return 0;
+  *ip = ntohl(reinterpret_cast<sockaddr_in *>(found->ai_addr)->sin_addr.s_addr);
+  freeaddrinfo(found);
+  return 1;
 }
 
 int PappLoader::svc_net_udp_send(int handle, const void *buf, int len, uint32_t ip, uint16_t port) {
@@ -2382,6 +2544,13 @@ void PappLoader::populate_services(app_services_t *services) {
   services->net_udp_recv = &PappLoader::svc_net_udp_recv;
   services->net_udp_close = &PappLoader::svc_net_udp_close;
   services->net_ipv4 = &PappLoader::svc_net_ipv4;
+  services->net_tcp_connect = &PappLoader::svc_net_tcp_connect;
+  services->net_tcp_listen = &PappLoader::svc_net_tcp_listen;
+  services->net_tcp_accept = &PappLoader::svc_net_tcp_accept;
+  services->net_tcp_send = &PappLoader::svc_net_tcp_send;
+  services->net_tcp_recv = &PappLoader::svc_net_tcp_recv;
+  services->net_poll = &PappLoader::svc_net_poll;
+  services->net_resolve = &PappLoader::svc_net_resolve;
 }
 
 esp_err_t psram_app_load(const char *path, psram_app_handle_t *out_handle) {

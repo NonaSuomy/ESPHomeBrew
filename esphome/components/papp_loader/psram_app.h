@@ -229,6 +229,38 @@ typedef struct {
     void (*net_udp_close)(int handle);
     int  (*net_ipv4)(uint32_t *ip, uint32_t *netmask);
 
+    /* ── TCP networking (lwIP) ───────────────────────────────────────── */
+    /* Same byte-order rules as UDP. TCP handles share the UDP handle table;
+     * close them with net_udp_close. Nothing here blocks except net_resolve.
+     *   net_tcp_connect  Start connecting to ip:port. Returns a handle >= 0
+     *                    (net_poll reports it writable once connected, or
+     *                    failed), or -1.
+     *   net_tcp_listen   Accept connections on `port` on every interface.
+     *                    Returns a handle >= 0, or -1.
+     *   net_tcp_accept   Take one waiting connection from a listening handle.
+     *                    Returns its handle, -2 when none is waiting, -1 on
+     *                    error; `ip`/`port` (may be NULL) receive the peer.
+     *   net_tcp_send     Send up to `len` bytes. Returns the bytes taken,
+     *                    0 when the stack would block, -1 on a failed link.
+     *   net_tcp_recv     Read up to `len` bytes. Returns the bytes read, 0 when
+     *                    the peer closed, -2 when nothing is waiting, -1 on
+     *                    error.
+     *   net_poll         Readiness of any handle: bit 0 readable (data, a
+     *                    waiting connection or a close), bit 1 writable (e.g.
+     *                    a finished connect), bit 2 failed (e.g. refused).
+     *                    Returns 0 when nothing is ready, -1 for a bad handle.
+     *   net_resolve      IPv4 address of `host` (a name or a dotted quad),
+     *                    in host byte order. May block while DNS answers.
+     *                    Returns 1 and sets *ip, or 0.
+     * Appended after net_ipv4 — null-check before calling. */
+    int  (*net_tcp_connect)(uint32_t ip, uint16_t port);
+    int  (*net_tcp_listen)(uint16_t port);
+    int  (*net_tcp_accept)(int handle, uint32_t *ip, uint16_t *port);
+    int  (*net_tcp_send)(int handle, const void *buf, int len);
+    int  (*net_tcp_recv)(int handle, void *buf, int len);
+    int  (*net_poll)(int handle);
+    int  (*net_resolve)(const char *host, uint32_t *ip);
+
 } app_services_t;
 
 /* ── Entry Point Signature ───────────────────────────────────────────── */

@@ -362,12 +362,16 @@ typedef struct {
     void *fp;
     uint32_t block_size;
     uint32_t block_count;
+    char path[128];
 } sd_bdev_obj_t;
 
 static mp_obj_t sd_bdev_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *args)
 {
     mp_arg_check_num(n_args, n_kw, 3, 3, false);
     const char *path = mp_obj_str_get_str(args[0]);
+    if (strlen(path) >= sizeof(((sd_bdev_obj_t *)0)->path)) {
+        mp_raise_ValueError(MP_ERROR_TEXT("path too long"));
+    }
     const uint32_t block_size = (uint32_t)mp_obj_get_int(args[1]);
     const uint32_t block_count = (uint32_t)mp_obj_get_int(args[2]);
     if (block_size < 128 || (block_size & (block_size - 1)) != 0 || block_count < 8) {
@@ -411,6 +415,7 @@ static mp_obj_t sd_bdev_make_new(const mp_obj_type_t *type, size_t n_args, size_
     self->fp = fp;
     self->block_size = block_size;
     self->block_count = block_count;
+    strcpy(self->path, path);
     return MP_OBJ_FROM_PTR(self);
 }
 
@@ -463,8 +468,15 @@ static mp_obj_t sd_bdev_ioctl(mp_obj_t self_in, mp_obj_t op_in, mp_obj_t arg_in)
             return MP_OBJ_NEW_SMALL_INT(0);
         case MP_BLOCKDEV_IOCTL_DEINIT:
         case MP_BLOCKDEV_IOCTL_SYNC:
+            // The loader has no fsync: closing the file is the only way to get
+            // its stdio and FAT buffers onto the card, so littlefs's commits
+            // survive a power cut. Then open it again.
             if (self->fp != NULL) {
-                papp_svc->file_seek(self->fp, 0, SEEK_CUR);  // writes out the loader's stdio buffer
+                papp_file_close(self->fp);
+                self->fp = papp_file_open(self->path, "r+b");
+                if (self->fp == NULL) {
+                    return MP_OBJ_NEW_SMALL_INT(-MP_EIO);
+                }
             }
             return MP_OBJ_NEW_SMALL_INT(0);
         case MP_BLOCKDEV_IOCTL_BLOCK_COUNT:

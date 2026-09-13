@@ -40,13 +40,18 @@ class _RAMBlockDev:
         return 0
 
 
+# Bigger reads and writes than littlefs's defaults (32 bytes): every block
+# access is a seek and a read or write through the loader.
+_LFS = dict(readsize=512, progsize=512, lookahead=64)
+
+
 def _mount_lfs(bdev):
     try:
-        vfs.mount(vfs.VfsLfs2(bdev), '/')
+        vfs.mount(vfs.VfsLfs2(bdev, **_LFS), '/')
     except OSError:
         print('Making a new Tulip filesystem...')
-        vfs.VfsLfs2.mkfs(bdev)
-        vfs.mount(vfs.VfsLfs2(bdev), '/')
+        vfs.VfsLfs2.mkfs(bdev, **_LFS)
+        vfs.mount(vfs.VfsLfs2(bdev, **_LFS), '/')
 
 
 def _mount_filesystems():

@@ -98,6 +98,9 @@ class PappLoader : public Component {
   // listing), sent to the diagnostic stream as a PAPPFL01 packet. Only paths
   // under /sd/ are served (bridge `readfile`).
   void request_file(const std::string &path);
+  // Replaces a small text file under /sd/ (bridge `writefile`), keeping the old
+  // one as <path>.bak. Refused while an app runs, since the app may rewrite it.
+  void write_file(const std::string &path, const std::string &data);
   void set_autostart(bool autostart) { this->autostart_ = autostart; }
   void set_display(display::Display *display) { this->display_ = display; }
   void set_touchscreen(touchscreen::Touchscreen *touchscreen) { this->touchscreen_ = touchscreen; }

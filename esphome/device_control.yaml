@@ -9,6 +9,10 @@
 #                          diagnostic stream on TCP port 3233 (bridge `screenshot`)
 #   papp_read_file(path)   send one SD card file under /sd/ (or a listing, for a
 #                          path ending in /) to the same stream (bridge `readfile`)
+#   papp_write_file(path, data)
+#                          replace a small text file under /sd/ (.ini, .cfg, .txt,
+#                          .json, ...), keeping the old one as .bak; refused while
+#                          an app runs (bridge `writefile`)
 #
 # Include it from the device YAML (the device must already have `api:`; this
 # package only adds actions to it). The long form with refresh: 0s picks up new
@@ -47,3 +51,9 @@ api:
         path: string
       then:
         - lambda: id(${papp_loader_id})->request_file(path);
+    - action: papp_write_file
+      variables:
+        path: string
+        data: string
+      then:
+        - lambda: id(${papp_loader_id})->write_file(path, data);

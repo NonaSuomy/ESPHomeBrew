@@ -75,6 +75,7 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 | `@esp-bridge catalog` | Reload the store list on the device |
 | `@esp-bridge screenshot` | Post an 800×480 PNG of the running PAPP in the thread |
 | `@esp-bridge readfile path=/sd/roms/redalert/DESYNCLOG.TXT` | Post a text file from the device's SD card; `path=/sd/roms/` lists a directory |
+| `@esp-bridge writefile path=/sd/roms/redalert/redalert.ini` + a code block | Replace a small text file on the SD card with the code block (`edit_requesters` only; not while an app runs) |
 | `@esp-bridge view device.yaml source=local` | Post the YAML with secret values hidden |
 | `@esp-bridge edit device.yaml source=local "find=refresh: 1d" "replace=refresh: 0s"` | Change one exact piece of a local YAML, then validate it (see below) |
 
@@ -123,6 +124,29 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 - Only paths under `/sd/` are served, without `..`, up to 1 MiB for a file and 64 KiB for a listing.
 - Text is posted inline, up to 15,000 characters, with mentions defused so a file line can't address anyone or become a bridge request. Binary files are reported by size and SHA-256 only, so game data never leaves the device through the chat.
 - It needs a loader and `device_control.yaml` with `papp_read_file`, and `readfile` in the bridge's `[actions].enabled`.
+
+## Writing a config file on the SD card
+
+`writefile` replaces a small text file on the card, such as a game's settings, without taking the card out. The new content is the code block in the same message:
+
+````
+@esp-bridge writefile path=/sd/roms/redalert/redalert.ini
+```ini
+[Network]
+Protocol=tcp
+Port=1234
+Host=10.20.30.158
+```
+````
+
+The bridge reads the old file, calls `papp_write_file(path, data)`, then reads the file back and compares. The reply shows the change as a diff, or says the write didn't happen. Agents can send the same thing as message data: `{"esp_bridge": {"action": "writefile", "path": "/sd/…", "content": "…"}}`.
+
+- **Whole files.** The code block becomes the entire file, so start from a `readfile` of it and change what you need.
+- **Text only:** `.ini`, `.cfg`, `.conf`, `.txt`, `.json`, `.yaml`, `.yml`, `.csv`, under `/sd/`, without `..`, up to 16 KiB. The loader enforces the same rules. A `.papp` or firmware image would be code, so neither side will write one.
+- **Not while an app runs.** The loader refuses, because a running app may rewrite the file when it exits (Red Alert saves `redalert.ini`). Close the app first.
+- **Backups.** The loader keeps the previous file as `<name>.bak`, and restores it if the write fails.
+- **Who may write:** the same `[actions].edit_requesters` as `edit`. Lines with a hidden value (`***`) are refused, so a masked secret copied from a reply can't overwrite the real one.
+- It needs a loader and `device_control.yaml` with `papp_write_file`, and `writefile` in `[actions].enabled`.
 
 ## Viewing and editing your local YAML
 

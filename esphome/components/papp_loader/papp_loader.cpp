@@ -1442,6 +1442,71 @@ void PappLoader::request_file(const std::string &path) {
   ESP_LOGI(TAG, "File requested remotely: %s", this->file_request_path_);
 }
 
+static constexpr size_t WRITE_FILE_MAX_BYTES = 16 * 1024;
+
+// Text files only: a written .papp or firmware image would be code.
+static bool writable_extension(const std::string &path) {
+  static const char *const allowed[] = {".ini", ".cfg", ".conf", ".txt", ".json", ".yaml", ".yml", ".csv"};
+  const size_t dot = path.rfind('.');
+  if (dot == std::string::npos || path.find('/', dot) != std::string::npos)
+    return false;
+  std::string ext = path.substr(dot);
+  for (char &c : ext)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  for (const char *candidate : allowed) {
+    if (ext == candidate)
+      return true;
+  }
+  return false;
+}
+
+void PappLoader::write_file(const std::string &path, const std::string &data) {
+  if (path.rfind("/sd/", 0) != 0 || path.find("..") != std::string::npos || path.back() == '/' ||
+      path.size() >= sizeof(this->file_request_path_) || !writable_extension(path)) {
+    ESP_LOGW(TAG, "writefile refused: %s is not a text file under /sd/", path.c_str());
+    return;
+  }
+  if (data.size() > WRITE_FILE_MAX_BYTES || data.find('\0') != std::string::npos) {
+    ESP_LOGW(TAG, "writefile refused: %u bytes (up to %u bytes of text)", static_cast<unsigned>(data.size()),
+             static_cast<unsigned>(WRITE_FILE_MAX_BYTES));
+    return;
+  }
+  if (this->launched_) {
+    ESP_LOGW(TAG, "writefile refused while an app is running (it may rewrite %s on exit)", path.c_str());
+    return;
+  }
+  const std::string local = runtime_path(path.c_str());
+  const std::string backup = local + ".bak";
+  struct stat info {};
+  const bool existed = stat(local.c_str(), &info) == 0;
+  if (existed) {
+    if (!S_ISREG(info.st_mode)) {
+      ESP_LOGW(TAG, "writefile refused: %s is not a regular file", path.c_str());
+      return;
+    }
+    unlink(backup.c_str());
+    if (rename(local.c_str(), backup.c_str()) != 0) {
+      ESP_LOGW(TAG, "writefile: could not keep the old %s (errno %d)", path.c_str(), errno);
+      return;
+    }
+  }
+  FILE *file = std::fopen(local.c_str(), "wb");
+  bool ok = file != nullptr;
+  if (ok) {
+    ok = std::fwrite(data.data(), 1, data.size(), file) == data.size();
+    ok = std::fclose(file) == 0 && ok;
+  }
+  if (!ok) {
+    ESP_LOGW(TAG, "writefile: writing %s failed (errno %d)", path.c_str(), errno);
+    unlink(local.c_str());
+    if (existed)
+      rename(backup.c_str(), local.c_str());
+    return;
+  }
+  ESP_LOGI(TAG, "writefile: wrote %u bytes to %s%s", static_cast<unsigned>(data.size()), path.c_str(),
+           existed ? " (old copy kept as .bak)" : "");
+}
+
 // Sends one PAPPFL01 packet for the requested /sd/ path: the file's bytes, or
 // a listing when the path ends in '/'. Anything else gets a status and no data.
 bool PappLoader::send_file_(int client_fd) {

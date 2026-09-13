@@ -122,7 +122,7 @@ static void render(const Snapshot& f, uint16_t* fb)
     }
 }
 
-// Every 5 s: frames shown and offered per second, and where the time goes.
+// Every 60 s: frames shown and offered per second, and where the time goes.
 static void log_rate(long long convert_us, long long flush_us)
 {
     static long long window = 0, total_convert = 0, total_flush = 0;
@@ -138,7 +138,7 @@ static void log_rate(long long convert_us, long long flush_us)
     shown++;
     total_convert += convert_us;
     total_flush += flush_us;
-    if (now - window >= 5000000) {
+    if (now - window >= 60000000) {
         const long long elapsed = now - window;
         const int offered = s_offered - offered_at_start;
         const long long copy = s_copy_us - copy_at_start;

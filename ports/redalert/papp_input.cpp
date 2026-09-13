@@ -18,6 +18,7 @@ extern float papp_mouse_x;
 extern float papp_mouse_y;
 void Move_Video_Mouse(float xrel, float yrel);
 void papp_video_mode_size(int* w, int* h);
+void Process_Network(); // common/wsproto.cpp
 
 // Loader key numbers for keys that are not printable ASCII (papp_loader.cpp).
 enum
@@ -149,6 +150,11 @@ public:
 private:
     void Fill_Buffer_From_System() override
     {
+#ifdef NETWORKING
+        // The SDL keyboards pump the UDP socket here; without it network
+        // games queue packets that are never sent or read.
+        Process_Network();
+#endif
         papp_input_poll();
     }
 

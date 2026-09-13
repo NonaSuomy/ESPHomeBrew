@@ -1198,8 +1198,12 @@ class Runner:
         if req.action == "view":
             text = "" if self.dry_run else yaml_path.read_bytes().decode("utf-8", errors="replace")
             shown = mask(hide_inline_secrets(text), self.secrets)
-            return JobResult(True, f"📄 `{req.yaml}` from {where}, secret values hidden:\n{code_block(shown)}", "",
-                             time.monotonic() - start)
+            # Chat shows the start; a longer file also comes whole as an attachment.
+            files = ([(f"{Path(req.yaml).name}.txt", shown.encode(), "text/plain")]
+                     if len(shown) > READFILE_INLINE_CHARS else [])
+            attached = " The whole file is attached." if files else ""
+            return JobResult(True, f"📄 `{req.yaml}` from {where}, secret values hidden.{attached}\n{code_block(shown)}", "",
+                             time.monotonic() - start, files)
         if req.action == "edit":
             return self.edit_yaml(req, yaml_path, where, start)
         steps: list[tuple[str, list[str], int, int | None]] = []

@@ -421,7 +421,6 @@ void PappLoader::free_icons_() {
     release_icon_(&icon);
   this->tile_icons_.clear();
 }
-}
 
 // ── Grid ────────────────────────────────────────────────────────────────────
 

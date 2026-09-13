@@ -328,6 +328,15 @@ class PappLoader : public Component {
   volatile bool stream_client_connected_{false};
   volatile bool stream_enabled_{false};
   volatile bool screenshot_requested_{false};
+  // With no app running, a screenshot is the LVGL menu: the main loop (the
+  // LVGL thread) snapshots the active screen into this RGB565 buffer and the
+  // stream task sends it. Needs LV_USE_SNAPSHOT (e.g. -DLV_USE_SNAPSHOT=1).
+  uint16_t *menu_shot_{nullptr};
+  uint16_t menu_shot_w_{0};
+  uint16_t menu_shot_h_{0};
+  volatile bool menu_shot_wanted_{false};  // set by the stream task, taken by loop()
+  volatile bool menu_shot_ready_{false};
+  void take_menu_shot_();
   volatile bool file_requested_{false};
   char file_request_path_[128]{};
   uint32_t stream_frame_sequence_{0};

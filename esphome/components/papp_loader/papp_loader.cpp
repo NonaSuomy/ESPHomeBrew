@@ -415,7 +415,39 @@ void PappLoader::setup() {
   }
 }
 
+// Runs on the LVGL thread (the main loop). Copies the snapshot into a plain
+// PSRAM buffer, dropping any row padding, and frees LVGL's buffer here so the
+// stream task never touches LVGL memory.
+void PappLoader::take_menu_shot_() {
+#if defined(PAPP_LOADER_USE_LVGL) && defined(LV_USE_SNAPSHOT) && LV_USE_SNAPSHOT
+  if (this->menu_shot_ready_ || this->lvgl_ == nullptr || !this->lvgl_->is_loop_started())
+    return;
+  lv_draw_buf_t *shot = lv_snapshot_take(lv_screen_active(), LV_COLOR_FORMAT_RGB565);
+  if (shot == nullptr) {
+    ESP_LOGW(TAG, "Menu screenshot: snapshot failed (out of memory?)");
+    this->menu_shot_ready_ = true;  // send an empty frame rather than hang
+    return;
+  }
+  const uint32_t w = shot->header.w, h = shot->header.h, stride = shot->header.stride;
+  auto *pixels = static_cast<uint16_t *>(heap_caps_malloc(w * h * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (pixels != nullptr) {
+    for (uint32_t y = 0; y < h; y++)
+      std::memcpy(pixels + y * w, shot->data + y * stride, w * sizeof(uint16_t));
+  }
+  lv_draw_buf_destroy(shot);
+  this->menu_shot_ = pixels;
+  this->menu_shot_w_ = pixels != nullptr ? static_cast<uint16_t>(w) : 0;
+  this->menu_shot_h_ = pixels != nullptr ? static_cast<uint16_t>(h) : 0;
+  this->menu_shot_ready_ = true;
+#endif
+}
+
 void PappLoader::loop() {
+  if (this->menu_shot_wanted_) {
+    this->menu_shot_wanted_ = false;
+    if (!this->launched_)
+      this->take_menu_shot_();
+  }
   this->update_progress_ui_();
   if (this->catalog_loading_ && this->catalog_done_) {
     if (this->papp_catalog_task_handle_ != nullptr) {
@@ -1537,18 +1569,41 @@ bool PappLoader::send_screenshot_(int client_fd) {
     if (locked)
       xSemaphoreGiveRecursive(this->display_mutex_);
   }
-  const uint16_t width = copy != nullptr ? VIRTUAL_WIDTH : 0;
-  const uint16_t height = copy != nullptr ? VIRTUAL_HEIGHT : 0;
-  ScreenStreamHeader header{{'P','A','P','P','S','S','0','1'}, width, height,
-                            static_cast<uint32_t>(copy != nullptr ? frame_bytes : 0), ++screenshot_sequence};
+  uint16_t width = copy != nullptr ? VIRTUAL_WIDTH : 0;
+  uint16_t height = copy != nullptr ? VIRTUAL_HEIGHT : 0;
+  size_t bytes = copy != nullptr ? frame_bytes : 0;
+#if defined(PAPP_LOADER_USE_LVGL) && defined(LV_USE_SNAPSHOT) && LV_USE_SNAPSHOT
+  if (copy == nullptr && !this->launched_) {
+    // No app: the main loop snapshots the menu; wait for it briefly. A shot
+    // that arrived after an earlier request gave up is stale: drop it first.
+    if (this->menu_shot_ready_) {
+      heap_caps_free(this->menu_shot_);
+      this->menu_shot_ = nullptr;
+      this->menu_shot_ready_ = false;
+    }
+    this->menu_shot_wanted_ = true;
+    for (int waited = 0; !this->menu_shot_ready_ && waited < 1500; waited += 20)
+      vTaskDelay(pdMS_TO_TICKS(20));
+    if (this->menu_shot_ready_) {
+      copy = this->menu_shot_;
+      width = this->menu_shot_w_;
+      height = this->menu_shot_h_;
+      bytes = static_cast<size_t>(width) * height * sizeof(uint16_t);
+      this->menu_shot_ = nullptr;
+      this->menu_shot_ready_ = false;
+    }
+  }
+#endif
+  ScreenStreamHeader header{{'P','A','P','P','S','S','0','1'}, width, height, static_cast<uint32_t>(bytes),
+                            ++screenshot_sequence};
   bool ok = send_screen_stream_bytes(client_fd, &header, sizeof(header));
   if (ok && copy != nullptr)
-    ok = send_screen_stream_bytes(client_fd, copy, frame_bytes);
+    ok = send_screen_stream_bytes(client_fd, copy, bytes);
   if (copy != nullptr) {
     ESP_LOGI(TAG, "Screenshot sent: %ux%u", static_cast<unsigned>(width), static_cast<unsigned>(height));
     heap_caps_free(copy);
   } else {
-    ESP_LOGI(TAG, "Screenshot requested, but no PAPP is running");
+    ESP_LOGI(TAG, "Screenshot requested, but no PAPP is running (menu screenshots need LV_USE_SNAPSHOT)");
   }
   return ok;
 }

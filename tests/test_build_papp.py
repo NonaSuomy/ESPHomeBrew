@@ -46,9 +46,12 @@ class ManifestTests(unittest.TestCase):
             (folder / "icon.png").write_bytes(png(96, 96))
             (folder / "shot.png").write_bytes(png(1024, 600))
             info = bp.store_info("psram_x", {"author": " giltal ", "controls": ["A: fire"], "icon": "icon.png",
-                                             "license": "MIT", "screenshots": ["shot.png"]}, folder)
+                                             "license": "MIT", "screenshots": ["shot.png"],
+                                             "upstream": {"project": "PrBoom", "version": "2.5.0",
+                                                          "url": "https://example.com/prboom"}}, folder)
             self.assertEqual((info["license"], info["screenshots"][0]["width"]), ("MIT", 1024))
             self.assertEqual((info["author"], info["controls"]), ("giltal", ["A: fire"]))
+            self.assertEqual(info["upstream"], {"project": "PrBoom", "version": "2.5.0", "url": "https://example.com/prboom"})
             self.assertEqual((info["icon"]["width"], info["icon"]["height"], info["icon"]["type"]), (96, 96, "image/png"))
             self.assertEqual(bp.store_info("psram_x", {}, folder), {})
             (folder / "big.png").write_bytes(png(512, 64))
@@ -60,7 +63,8 @@ class ManifestTests(unittest.TestCase):
                    {"icon": "missing.png"}, {"author": ""}, {"about": "x" * 2001}, {"controls": []},
                    {"controls": ["x" * 61]}, {"controls": "A: fire"},
                    {"screenshots": ["wide.png"]}, {"screenshots": []}, {"screenshots": ["shot.png"] * 4},
-                   {"changelog": "x" * 4001}]
+                   {"changelog": "x" * 4001}, {"upstream": "PrBoom"}, {"upstream": {"version": "1"}},
+                   {"upstream": {"project": "Q", "url": "http://x"}}, {"upstream": {"project": "Q", "tag": "v1"}}]
             for manifest in bad:
                 with self.subTest(manifest=str(manifest)[:40]), self.assertRaises(ValueError):
                     bp.store_info("psram_x", manifest, folder)

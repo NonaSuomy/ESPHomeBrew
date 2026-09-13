@@ -7,6 +7,10 @@
   "category": "Tool",
   "license": "Unspecified (upstream has no licence file)",
   "about": "Draws a coloured marker in each corner and a crosshair wherever you touch, to check the touch panel's calibration and orientation.",
+  "controls": [
+    "Touch: draws a crosshair under the finger",
+    "X: back to the launcher"
+  ],
   "icon": "icon.png",
   "build": "plain",
   "source": {

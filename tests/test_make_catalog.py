@@ -123,7 +123,7 @@ class DataTests(unittest.TestCase):
         icon = mc_png(48, 48)
         rich = app("psram_lvgl", data=False)
         rich.update({"author": "giltal", "category": "Demo", "about": "Longer text.", "controls": ["Touch: everything"],
-                     "license": "MIT", "changelog": "0.1.0: first release",
+                     "license": "MIT", "changelog": "0.1.0: first release", "upstream": {"project": "LVGL", "version": "9.2"},
                      "screenshots": [{"type": "image/png", "width": 800, "height": 480, "base64": base64.b64encode(mc_png(800, 480)).decode()}],
                      "icon": {"type": "image/png", "width": 48, "height": 48,
                               "base64": base64.b64encode(icon).decode()}})
@@ -144,6 +144,7 @@ class DataTests(unittest.TestCase):
         self.assertEqual(entry["info_url"], "https://nonasuomy.github.io/papp-conversions/psram_lvgl-0.1.0.json")
         self.assertEqual((self.out / "psram_lvgl-0.1.0.png").read_bytes(), icon)
         self.assertEqual((entry["license"], entry["changelog"]), ("MIT", "0.1.0: first release"))
+        self.assertEqual(entry["upstream"], {"project": "LVGL", "version": "9.2"})
         self.assertEqual(entry["screenshots"], [{"width": 800, "height": 480,
                                                  "url": "https://nonasuomy.github.io/papp-conversions/psram_lvgl-0.1.0-screen1.png"}])
         self.assertEqual((self.out / "psram_lvgl-0.1.0-screen1.png").read_bytes(), mc_png(800, 480))

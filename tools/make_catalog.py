@@ -146,7 +146,7 @@ def screenshot_name(app: dict, index: int) -> str:
     return f"{app['name']}-{app['version']}-screen{index + 1}.png"
 
 
-LISTING_FIELDS = ("author", "category", "license", "about", "changelog", "controls")
+LISTING_FIELDS = ("author", "category", "license", "about", "changelog", "controls", "upstream")
 
 
 def store_entry(repo: str, a: dict) -> dict:

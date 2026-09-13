@@ -310,9 +310,29 @@ def listing_png(name: str, app_dir: Path, rel: object, what: str, max_bytes: int
     return {"type": "image/png", "width": width, "height": height, "base64": base64.b64encode(png).decode("ascii")}
 
 
+UPSTREAM_LIMITS = {"project": 60, "version": 30, "url": 200}
+
+
+def upstream_info(name: str, upstream: object) -> dict:
+    """The original project an app is ported from: {"project", "version", "url"},
+    only "project" required."""
+    if not isinstance(upstream, dict) or "project" not in upstream or set(upstream) - set(UPSTREAM_LIMITS):
+        raise ValueError(f"{name}: upstream must be an object with project and optional version and url")
+    info = {}
+    for key, limit in UPSTREAM_LIMITS.items():
+        if key in upstream:
+            value = upstream[key]
+            if not isinstance(value, str) or not value.strip() or len(value) > limit:
+                raise ValueError(f"{name}: upstream {key} must be text of 1 to {limit} characters")
+            info[key] = value.strip()
+    if "url" in info and not info["url"].startswith("https://"):
+        raise ValueError(f"{name}: upstream url must start with https://")
+    return info
+
+
 def store_info(name: str, manifest: dict, app_dir: Path) -> dict:
     """The store listing extras from papp.json: author, category, license, about,
-    changelog, controls, icon and screenshots.
+    changelog, controls, upstream, icon and screenshots.
 
     All optional. Images are PNGs in the app's folder: an icon of at most
     256x256 and 64 KB, and up to three screenshots of at most 1024x600 and
@@ -331,6 +351,8 @@ def store_info(name: str, manifest: dict, app_dir: Path) -> dict:
                 or not all(isinstance(c, str) and 0 < len(c.strip()) <= 60 for c in controls)):
             raise ValueError(f"{name}: controls must be 1 to 20 lines of up to 60 characters")
         info["controls"] = [c.strip() for c in controls]
+    if "upstream" in manifest:
+        info["upstream"] = upstream_info(name, manifest["upstream"])
     if "icon" in manifest:
         info["icon"] = listing_png(name, app_dir, manifest["icon"], "icon", MAX_ICON_BYTES, MAX_ICON_SIDE, MAX_ICON_SIDE)
     if "screenshots" in manifest:

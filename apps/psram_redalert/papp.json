@@ -7,6 +7,21 @@
   "category": "Game",
   "license": "GPL-3.0 (Vanilla Conquer)",
   "about": "Command & Conquer: Red Alert on Vanilla Conquer, with movies, music, touch, USB keyboard and mouse. Plays network games against PCs running Vanilla Conquer, on the LAN or over TCP across networks. Needs REDALERT.MIX and MAIN.MIX from the freeware release or your own discs in /sd/roms/redalert/.",
+  "controls": [
+    "Touch: move the cursor; tap = click, drag = select",
+    "USB mouse and keyboard: as on a PC",
+    "A: left click at the cursor",
+    "B: right click at the cursor",
+    "Up/Down: menus; scroll the sidebar",
+    "Start: Enter (confirm, skip movies)",
+    "Select: Esc (options menu, skip movies)",
+    "Menu + X: quit to launcher"
+  ],
+  "upstream": {
+    "project": "Vanilla Conquer",
+    "version": "ce83b59",
+    "url": "https://github.com/TheAssemblyArmada/Vanilla-Conquer"
+  },
   "icon": "icon.png",
   "dev_build": false,
   "build": "custom",

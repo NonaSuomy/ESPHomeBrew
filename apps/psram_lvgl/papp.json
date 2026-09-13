@@ -7,6 +7,18 @@
   "category": "Demo",
   "license": "MIT (LVGL)",
   "about": "A small LVGL v9 app with touch widgets, drawn on a 400x240 canvas and scaled 2x. A quick way to check that the display, touch and the PAPP loader work.",
+  "controls": [
+    "Touch: tap and drag the widgets",
+    "Slider: sets the bar and dial",
+    "Switch: pause / resume the live graph",
+    "Paddle wheel: drives the gauge and graph",
+    "X: back to the launcher"
+  ],
+  "upstream": {
+    "project": "LVGL",
+    "version": "9.2.3-dev",
+    "url": "https://github.com/lvgl/lvgl"
+  },
   "icon": "icon.png",
   "build": "lvgl",
   "source": {

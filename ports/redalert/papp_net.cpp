@@ -11,6 +11,7 @@
 #include <ifaddrs.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -391,6 +392,15 @@ int select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds, struc
         }
     }
     return ready;
+}
+
+// The device has no signals, and the ESP newlib has no signal(). wsptcp.cpp
+// only asks to ignore SIGPIPE, which the loader's sockets never raise.
+void (*signal(int sig, void (*handler)(int)))(int)
+{
+    (void)sig;
+    (void)handler;
+    return SIG_DFL;
 }
 
 // papp_syscalls.c routes close() of a socket descriptor here.

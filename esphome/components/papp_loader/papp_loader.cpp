@@ -3091,6 +3091,23 @@ esp_err_t psram_app_load_url(const char *url, psram_app_handle_t *out_handle) {
   return ESP_OK;
 }
 
+// The PAPP writes its .data and .bss through exec_ptr, so the data cache can
+// still hold dirty lines for that alias when the app returns. esp_mmu_unmap()
+// removes the MMU entries without writing them back. A later eviction then
+// targets an address with no mapping, and the PSRAM controller aborts the
+// system ("MSPI PSRAM error"); Red Alert's large globals hit this on every
+// close. Write the alias back and drop its lines before unmapping.
+static void unmap_exec_alias(psram_app_handle_t handle) {
+  const esp_err_t err = esp_cache_msync(handle->exec_ptr, handle->code_alloc,
+                                        ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA |
+                                            ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+  if (err != ESP_OK)
+    ESP_LOGE(TAG, "PAPP cache writeback before unmap failed: %s", esp_err_to_name(err));
+  esp_mmu_unmap(handle->exec_ptr);
+  handle->exec_ptr = nullptr;
+  handle->mapped = false;
+}
+
 int psram_app_run(psram_app_handle_t handle) {
   if (handle == nullptr || handle->code_buf == nullptr || PappLoader::active() == nullptr)
     return -1;
@@ -3117,9 +3134,7 @@ int psram_app_run(psram_app_handle_t handle) {
   ESP_LOGI(TAG, "Calling PAPP entry point at %p", reinterpret_cast<void *>(entry));
   const int result = entry(&services);
 
-  esp_mmu_unmap(handle->exec_ptr);
-  handle->exec_ptr = nullptr;
-  handle->mapped = false;
+  unmap_exec_alias(handle);
   return result;
 }
 
@@ -3127,7 +3142,7 @@ void psram_app_unload(psram_app_handle_t handle) {
   if (handle == nullptr)
     return;
   if (handle->mapped && handle->exec_ptr != nullptr)
-    esp_mmu_unmap(handle->exec_ptr);
+    unmap_exec_alias(handle);
   if (handle->code_buf != nullptr)
     heap_caps_free(handle->code_buf);
   std::free(handle);

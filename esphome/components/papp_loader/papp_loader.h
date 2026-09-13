@@ -417,6 +417,13 @@ class PappLoader : public Component {
   bool catalog_ui_pending_{false};
   lv_obj_t *progress_fill_{nullptr};
   lv_obj_t *progress_label_{nullptr};
+  // The loader's own progress panel on the top layer, used when the page on
+  // screen has no progress widgets (e.g. a store source picked from another page).
+  lv_obj_t *overlay_panel_{nullptr};
+  lv_obj_t *overlay_fill_{nullptr};
+  lv_obj_t *overlay_label_{nullptr};
+  lv_obj_t *progress_ui_screen_{nullptr};
+  void ensure_progress_overlay_();
   uint16_t catalog_selection_{0};
   // 1 when the list starts with the catalog switcher row, else 0.
   uint8_t catalog_header_rows_{0};

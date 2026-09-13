@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cmath>
 #include <limits>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -97,6 +98,18 @@ struct __attribute__((packed)) ScreenStreamAudioHeader {
   uint32_t audio_bytes;
   uint32_t sequence;
 };
+
+// PAPPFL01: a status (StreamFileStatus), then `size` bytes of the file or of a
+// directory listing ("name<TAB>size" lines, directories end in '/').
+struct __attribute__((packed)) StreamFileHeader {
+  char magic[8];
+  uint32_t status;
+  uint32_t size;
+  uint32_t sequence;
+};
+enum StreamFileStatus : uint32_t { FILE_OK = 0, FILE_NOT_FOUND = 1, FILE_TOO_LARGE = 2, FILE_BAD_PATH = 3, FILE_READ_ERROR = 4 };
+static constexpr size_t STREAM_FILE_MAX_BYTES = 1024 * 1024;
+static constexpr size_t STREAM_LISTING_MAX_BYTES = 64 * 1024;
 
 static bool send_screen_stream_bytes(int socket_fd, const void *data, size_t length) {
   const auto *bytes = static_cast<const uint8_t *>(data);
@@ -1322,6 +1335,11 @@ void PappLoader::screen_stream_task_() {
         if (!this->send_screenshot_(client_fd))
           break;
       }
+      if (this->file_requested_) {
+        this->file_requested_ = false;
+        if (!this->send_file_(client_fd))
+          break;
+      }
       if (this->stream_mutex_ == nullptr || xSemaphoreTake(this->stream_mutex_, pdMS_TO_TICKS(250)) != pdTRUE)
         continue;
       const bool ready = this->stream_frame_ready_;
@@ -1397,6 +1415,94 @@ bool PappLoader::send_screenshot_(int client_fd) {
   } else {
     ESP_LOGI(TAG, "Screenshot requested, but no PAPP is running");
   }
+  return ok;
+}
+
+void PappLoader::request_file(const std::string &path) {
+  if (path.size() >= sizeof(this->file_request_path_)) {
+    ESP_LOGW(TAG, "File request path is too long");
+    return;
+  }
+  std::memcpy(this->file_request_path_, path.c_str(), path.size() + 1);
+  this->file_requested_ = true;
+  this->stream_enabled_ = true;
+  ESP_LOGI(TAG, "File requested remotely: %s", this->file_request_path_);
+}
+
+// Sends one PAPPFL01 packet for the requested /sd/ path: the file's bytes, or
+// a listing when the path ends in '/'. Anything else gets a status and no data.
+bool PappLoader::send_file_(int client_fd) {
+  static uint32_t file_sequence = 0;
+  char requested[sizeof(this->file_request_path_)];
+  std::memcpy(requested, this->file_request_path_, sizeof(requested));
+  requested[sizeof(requested) - 1] = '\0';
+  const std::string path(requested);
+  const std::string local = runtime_path(requested);
+
+  uint32_t status = FILE_OK;
+  uint8_t *content = nullptr;
+  size_t size = 0;
+  std::string listing;
+  if (path.rfind("/sd/", 0) != 0 || path.find("..") != std::string::npos) {
+    status = FILE_BAD_PATH;
+  } else if (path.back() == '/') {
+    DIR *dir = opendir(local.c_str());
+    if (dir == nullptr) {
+      status = FILE_NOT_FOUND;
+    } else {
+      while (dirent *entry = readdir(dir)) {
+        struct stat info {};
+        const bool known = stat((local + entry->d_name).c_str(), &info) == 0;
+        listing += entry->d_name;
+        if (known && S_ISDIR(info.st_mode))
+          listing += '/';
+        listing += '\t';
+        listing += std::to_string(known ? static_cast<long long>(info.st_size) : 0LL);
+        listing += '\n';
+        if (listing.size() > STREAM_LISTING_MAX_BYTES) {
+          status = FILE_TOO_LARGE;
+          break;
+        }
+      }
+      closedir(dir);
+      if (status == FILE_OK) {
+        content = reinterpret_cast<uint8_t *>(listing.data());
+        size = listing.size();
+      }
+    }
+  } else {
+    FILE *file = std::fopen(local.c_str(), "rb");
+    if (file == nullptr) {
+      status = FILE_NOT_FOUND;
+    } else {
+      struct stat info {};
+      if (fstat(fileno(file), &info) != 0 || info.st_size < 0) {
+        status = FILE_READ_ERROR;
+      } else if (static_cast<size_t>(info.st_size) > STREAM_FILE_MAX_BYTES) {
+        status = FILE_TOO_LARGE;
+      } else {
+        size = static_cast<size_t>(info.st_size);
+        content = static_cast<uint8_t *>(heap_caps_malloc(std::max<size_t>(size, 1), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (content == nullptr || std::fread(content, 1, size, file) != size) {
+          status = FILE_READ_ERROR;
+          heap_caps_free(content);
+          content = nullptr;
+        }
+      }
+      std::fclose(file);
+    }
+    if (status != FILE_OK)
+      size = 0;
+  }
+
+  StreamFileHeader header{{'P','A','P','P','F','L','0','1'}, status, static_cast<uint32_t>(size), ++file_sequence};
+  bool ok = send_screen_stream_bytes(client_fd, &header, sizeof(header));
+  if (ok && size != 0)
+    ok = send_screen_stream_bytes(client_fd, content, size);
+  ESP_LOGI(TAG, "File %s: status %u, %u bytes", path.c_str(), static_cast<unsigned>(status),
+           static_cast<unsigned>(size));
+  if (content != nullptr && content != reinterpret_cast<uint8_t *>(listing.data()))
+    heap_caps_free(content);
   return ok;
 }
 

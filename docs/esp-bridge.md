@@ -74,6 +74,7 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 | `@esp-bridge close` | Close the running PAPP |
 | `@esp-bridge catalog` | Reload the store list on the device |
 | `@esp-bridge screenshot` | Post an 800×480 PNG of the running PAPP in the thread |
+| `@esp-bridge readfile path=/sd/roms/redalert/DESYNCLOG.TXT` | Post a text file from the device's SD card; `path=/sd/roms/` lists a directory |
 
 - **Where the code comes from.** `source=repo` (the default) builds from a clean checkout of this repository at `ref=`. `extra_files` (e.g. your `secrets.yaml`) are copied in first and never committed. `source=local` builds a file in your `[local].dir` as it is.
 - **Agents** can send the same fields as message data: `post_message { text: "@esp-bridge compile", data: { esp_bridge: { action: "compile", yaml: "esphome/device.yaml", ref: "main" } } }`.
@@ -87,9 +88,9 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 
 ## Launching and closing PAPPs on demand
 
-`launch`, `close`, `catalog` and `screenshot` go straight to the running device over the ESPHome native API. They don't rebuild anything. They need two things:
+`launch`, `close`, `catalog`, `screenshot` and `readfile` go straight to the running device over the ESPHome native API. They don't rebuild anything. They need two things:
 
-1. **The device** includes the control package, which adds the API actions `papp_launch(url)`, `papp_close`, `papp_refresh_catalog` and `papp_screenshot` (`esphome/device_control.yaml`). Use the long form with `refresh: 0s`: the short `github://…` form is only re-downloaded once a day, so a new action can be missing for a day.
+1. **The device** includes the control package, which adds the API actions `papp_launch(url)`, `papp_close`, `papp_refresh_catalog`, `papp_screenshot` and `papp_read_file(path)` (`esphome/device_control.yaml`). Use the long form with `refresh: 0s`: the short `github://…` form is only re-downloaded once a day, so a new action can be missing for a day.
    ```yaml
    packages:
      papp_control:
@@ -113,9 +114,17 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 - It needs a loader and `device_control.yaml` from after this was added, so rebuild the device once. The port only accepts a connection after an API request, and closes again when the bridge disconnects.
 - A typical porting loop: `launch`, `screenshot`, `logs … seconds=30`, `close`, then change the app and repeat.
 
+## Reading files from the SD card
+
+`@esp-bridge readfile path=/sd/…` fetches a file an app wrote, such as a game's crash or desync report, without taking the card out. The bridge calls `papp_read_file(path)`, and the loader sends the file over the same diagnostic stream (a `PAPPFL01` packet). A path ending in `/` returns a listing instead, one `name<TAB>size` line per entry, with directories ending in `/`.
+
+- Only paths under `/sd/` are served, without `..`, up to 1 MiB for a file and 64 KiB for a listing.
+- Text is posted inline, up to 15,000 characters, with mentions defused so a file line can't address anyone or become a bridge request. Binary files are reported by size and SHA-256 only, so game data never leaves the device through the chat.
+- It needs a loader and `device_control.yaml` with `papp_read_file`, and `readfile` in the bridge's `[actions].enabled`.
+
 ## What it will and won't do
 
-- **Only the listed actions**, each a fixed `esphome` command (`config`, `compile`, `upload`, `run --no-logs` followed by `logs`, `logs`) or one of the three device API actions. There's no shell and no free-form flags. Anything else is refused with a reason.
+- **Only the listed actions**, each a fixed `esphome` command (`config`, `compile`, `upload`, `run --no-logs` followed by `logs`, `logs`) or one of the device API actions. There's no shell and no free-form flags. Anything else is refused with a reason.
 - **Only listed requesters, YAML patterns, devices and refs.** Paths must stay inside the checkout or the local directory. Log capture is capped (`max_log_seconds`, `max_log_bytes`).
 - **Secrets are masked.** Every value in the configured `secrets.yaml` files is replaced with `***` before anything is posted.
 - **Trust model: read this.** Building an ESPHome config runs code on this machine: external components' Python, PlatformIO scripts and anything else that config pulls in. So the bridge is exactly as trustworthy as whoever can push the refs you allow. Keep `allowed_refs` to branches in this repository (people with write access). **Never allow `pull/*`**, because anyone on GitHub can open a pull request. For extra isolation, run the bridge as a separate user with access to only the serial port and its checkout.

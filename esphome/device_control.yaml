@@ -1,12 +1,14 @@
 # Remote control for the PAPP loader over the ESPHome native API.
 #
-# Adds four API actions that the ESP bridge (tools/esp_bridge) or Home
+# Adds five API actions that the ESP bridge (tools/esp_bridge) or Home
 # Assistant can call:
 #   papp_launch(url)       stream and start a .papp from a URL
 #   papp_close()           close the running PAPP
 #   papp_refresh_catalog() reload the store catalog
 #   papp_screenshot()      send one 800x480 capture of the running PAPP to the
 #                          diagnostic stream on TCP port 3232 (bridge `screenshot`)
+#   papp_read_file(path)   send one SD card file under /sd/ (or a listing, for a
+#                          path ending in /) to the same stream (bridge `readfile`)
 #
 # Include it from the device YAML (the device must already have `api:`; this
 # package only adds actions to it). The long form with refresh: 0s picks up new
@@ -40,3 +42,8 @@ api:
     - action: papp_screenshot
       then:
         - lambda: id(${papp_loader_id})->request_screenshot();
+    - action: papp_read_file
+      variables:
+        path: string
+      then:
+        - lambda: id(${papp_loader_id})->request_file(path);

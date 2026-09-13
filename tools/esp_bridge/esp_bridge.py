@@ -64,10 +64,11 @@ import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ACTIONS = ("status", "config", "compile", "upload", "logs", "run", "launch", "close", "catalog", "screenshot")
+ACTIONS = ("status", "config", "compile", "upload", "logs", "run", "launch", "close", "catalog", "screenshot",
+           "readfile")
 # Bridge action -> ESPHome API action (esphome/device_control.yaml).
 DEVICE_API_ACTIONS = {"launch": "papp_launch", "close": "papp_close", "catalog": "papp_refresh_catalog",
-                      "screenshot": "papp_screenshot"}
+                      "screenshot": "papp_screenshot", "readfile": "papp_read_file"}
 NEEDS_YAML = {"config", "compile", "upload", "logs", "run"}
 NEEDS_DEVICE = {"upload", "logs", "run"}
 REF_RE = re.compile(r"^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,120}$")
@@ -185,6 +186,7 @@ class Request:
     url: str | None = None
     seconds_given: bool = False  # launch/close only capture device logs when asked
     serial: str | None = None  # also read this serial port during launch/close
+    path: str | None = None  # readfile: a file or directory (ending in /) on the SD card
 
 
 def request_words(text: str, handle: str) -> list[str] | None:
@@ -248,7 +250,8 @@ def parse_request(text: str, data: dict | None, handle: str) -> Request | None:
         raise BridgeError("`seconds` must be a whole number.")
     return Request(action=action, yaml=fields.get("yaml"), ref=fields.get("ref", "main"),
                    source=fields.get("source", "repo").lower(), device=fields.get("device"), seconds=seconds,
-                   url=fields.get("url"), seconds_given="seconds" in fields, serial=fields.get("serial"))
+                   url=fields.get("url"), seconds_given="seconds" in fields, serial=fields.get("serial"),
+                   path=fields.get("path"))
 
 
 def _inside(base: Path, rel: str) -> Path:
@@ -286,6 +289,11 @@ def validate(req: Request, cfg: Config) -> Path | None:
                 raise BridgeError(f"That URL is not in the allowed prefixes ({', '.join(cfg.allowed_url_prefixes)}).")
             if not req.url.lower().endswith(".papp") or ".." in req.url or any(c.isspace() for c in req.url):
                 raise BridgeError("`url` must point at a .papp file.")
+        if req.action == "readfile":
+            path = req.path or ""
+            if (not path.startswith("/sd/") or ".." in path or len(path) >= READFILE_PATH_MAX
+                    or any(c.isspace() or not c.isprintable() for c in path)):
+                raise BridgeError("`readfile` needs `path=/sd/…` (a file, or a directory ending in `/`).")
         return None
     if (req.action in {"logs", "run"} or req.seconds_given) and not 5 <= req.seconds <= cfg.max_log_seconds:
         raise BridgeError(f"`seconds` must be between 5 and {cfg.max_log_seconds}.")
@@ -649,6 +657,11 @@ def decode_crash(cfg: Config, text: str, url: str | None = None, opener=urllib.r
 
 STREAM_HEADER = struct.Struct("<8sHHII")         # PAPPFB01 thumbnail / PAPPSS01 screenshot
 STREAM_AUDIO_HEADER = struct.Struct("<8sIHHII")  # PAPPAU01
+STREAM_FILE_HEADER = struct.Struct("<8sIII")      # PAPPFL01: status, size, sequence
+READFILE_PATH_MAX = 128   # the loader's request buffer, including the terminator
+READFILE_INLINE_CHARS = 15000
+FILE_STATUS = {1: "not found", 2: "larger than the loader sends (1 MiB)", 3: "not an allowed path",
+               4: "could not be read"}
 
 
 def rgb565_to_png(raw: bytes, width: int, height: int) -> bytes:
@@ -702,6 +715,72 @@ def read_screenshot(sock: socket.socket) -> tuple[int, int, bytes]:
             exact(header[4])
         else:
             raise BridgeError(f"Unexpected data on the screen stream ({magic!r}). Is the device's loader up to date?")
+
+
+def read_stream_file(sock: socket.socket) -> bytes:
+    """Read stream packets until the PAPPFL01 file packet; other packets are skipped."""
+    def exact(size: int) -> bytes:
+        data = bytearray()
+        while len(data) < size:
+            part = sock.recv(min(65536, size - len(data)))
+            if not part:
+                raise BridgeError("The device closed the stream before the file arrived.")
+            data += part
+        return bytes(data)
+
+    while True:
+        magic = exact(8)
+        if magic == b"PAPPFL01":
+            _, status, size, _seq = STREAM_FILE_HEADER.unpack(magic + exact(STREAM_FILE_HEADER.size - 8))
+            if size > 1024 * 1024:
+                raise BridgeError("The device sent a malformed file header.")
+            payload = exact(size)
+            if status:
+                raise BridgeError(f"The file {FILE_STATUS.get(status, f'failed (status {status})')}.")
+            return payload
+        if magic in (b"PAPPFB01", b"PAPPSS01"):
+            _, width, height, size, _seq = STREAM_HEADER.unpack(magic + exact(STREAM_HEADER.size - 8))
+            if size > 4 * 1024 * 1024:
+                raise BridgeError("The device sent a malformed screen stream header.")
+            exact(size)
+        elif magic == b"PAPPAU01":
+            header = STREAM_AUDIO_HEADER.unpack(magic + exact(STREAM_AUDIO_HEADER.size - 8))
+            exact(header[4])
+        else:
+            raise BridgeError(f"Unexpected data on the stream ({magic!r}). Does the device's loader have `readfile`?")
+
+
+def capture_file(cfg: Config, path: str, timeout: float = 20.0) -> bytes:
+    """Ask the device for one SD card file (or directory listing) and read it from the stream."""
+    call_device_action(cfg, DEVICE_API_ACTIONS["readfile"], {"path": path})
+    address = resolve_host(cfg.api_host, cfg.screen_port)
+    try:
+        with socket.create_connection((address, cfg.screen_port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            return read_stream_file(sock)
+    except (socket.timeout, TimeoutError) as error:
+        raise BridgeError(f"No file arrived from {cfg.api_host}:{cfg.screen_port} within {timeout:.0f}s.") from error
+    except OSError as error:
+        raise BridgeError(f"Could not open the stream on {cfg.api_host}:{cfg.screen_port}: {error}.") from error
+
+
+def describe_file(path: str, content: bytes) -> str:
+    """Chat text for a read file. Text is shown inline; other files only by size and hash,
+    so game data never leaves the device through the chat."""
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        text = None
+    if text is None or "\0" in text:
+        digest = hashlib.sha256(content).hexdigest()
+        return f"📄 `{path}`: binary, {len(content)} bytes, sha256 `{digest[:16]}…` (not shown)."
+    # Neutralise mentions and fences so file lines cannot address people, become
+    # bridge requests or end the code block early.
+    shown = text[:READFILE_INLINE_CHARS].replace("@", "@\u200b").replace("```", "``\u200b`")
+    more = (f"\n(first {READFILE_INLINE_CHARS} of {len(text)} characters)"
+            if len(text) > READFILE_INLINE_CHARS else "")
+    kind = "directory listing" if path.endswith("/") else f"{len(content)} bytes"
+    return f"📄 `{path}` ({kind}):\n```\n{shown}\n```{more}"
 
 
 def capture_screenshot(cfg: Config, timeout: float = 20.0) -> tuple[int, int, bytes]:
@@ -881,6 +960,11 @@ class Runner:
             name = time.strftime("screenshot-%Y%m%d-%H%M%S.png")
             return JobResult(True, f"📸 Screenshot of the running PAPP ({width}×{height}) from {self.cfg.api_host}.", "",
                              time.monotonic() - start, [(name, png, "image/png")])
+        if req.action == "readfile":
+            if self.dry_run:
+                return JobResult(True, f"📄 `{req.path}` would be read from {self.cfg.api_host} (dry run).", "", 0.0)
+            content = capture_file(self.cfg, req.path)
+            return JobResult(True, mask(describe_file(req.path, content), self.secrets), "", time.monotonic() - start)
         if req.action in DEVICE_API_ACTIONS:
             data = {"url": req.url or ""} if req.action == "launch" else {}
             served = ""

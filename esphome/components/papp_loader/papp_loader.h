@@ -94,6 +94,10 @@ class PappLoader : public Component {
     this->stream_enabled_ = true;
     ESP_LOGI("papp_loader", "Screenshot requested remotely");
   }
+  // One file from the SD card (or, for a path ending in '/', a directory
+  // listing), sent to the diagnostic stream as a PAPPFL01 packet. Only paths
+  // under /sd/ are served (bridge `readfile`).
+  void request_file(const std::string &path);
   void set_autostart(bool autostart) { this->autostart_ = autostart; }
   void set_display(display::Display *display) { this->display_ = display; }
   void set_touchscreen(touchscreen::Touchscreen *touchscreen) { this->touchscreen_ = touchscreen; }
@@ -243,6 +247,7 @@ class PappLoader : public Component {
   static void screen_stream_task_entry_(void *arg);
   void screen_stream_task_();
   bool send_screenshot_(int client_fd);
+  bool send_file_(int client_fd);
 
   static PappLoader *active_;
 
@@ -293,6 +298,8 @@ class PappLoader : public Component {
   volatile bool stream_client_connected_{false};
   volatile bool stream_enabled_{false};
   volatile bool screenshot_requested_{false};
+  volatile bool file_requested_{false};
+  char file_request_path_[128]{};
   uint32_t stream_frame_sequence_{0};
   TaskHandle_t stream_task_handle_{nullptr};
   float scale_x_{1.0f};

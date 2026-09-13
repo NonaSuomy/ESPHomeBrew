@@ -44,17 +44,23 @@ class ManifestTests(unittest.TestCase):
                 return b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", w, h) + b"\x00" * (5 + pad)
 
             (folder / "icon.png").write_bytes(png(96, 96))
-            info = bp.store_info("psram_x", {"author": " giltal ", "controls": ["A: fire"], "icon": "icon.png"}, folder)
+            (folder / "shot.png").write_bytes(png(1024, 600))
+            info = bp.store_info("psram_x", {"author": " giltal ", "controls": ["A: fire"], "icon": "icon.png",
+                                             "license": "MIT", "screenshots": ["shot.png"]}, folder)
+            self.assertEqual((info["license"], info["screenshots"][0]["width"]), ("MIT", 1024))
             self.assertEqual((info["author"], info["controls"]), ("giltal", ["A: fire"]))
             self.assertEqual((info["icon"]["width"], info["icon"]["height"], info["icon"]["type"]), (96, 96, "image/png"))
             self.assertEqual(bp.store_info("psram_x", {}, folder), {})
-            (folder / "big.png").write_bytes(png(256, 64))
+            (folder / "big.png").write_bytes(png(512, 64))
+            (folder / "wide.png").write_bytes(png(1280, 600))
             (folder / "heavy.png").write_bytes(png(64, 64, pad=bp.MAX_ICON_BYTES))
             (folder / "fake.png").write_bytes(b"GIF89a" + b"\x00" * 30)
             (Path(tmp) / "outside.png").write_bytes(png(8, 8))
             bad = [{"icon": "big.png"}, {"icon": "heavy.png"}, {"icon": "fake.png"}, {"icon": "../outside.png"},
                    {"icon": "missing.png"}, {"author": ""}, {"about": "x" * 2001}, {"controls": []},
-                   {"controls": ["x" * 61]}, {"controls": "A: fire"}]
+                   {"controls": ["x" * 61]}, {"controls": "A: fire"},
+                   {"screenshots": ["wide.png"]}, {"screenshots": []}, {"screenshots": ["shot.png"] * 4},
+                   {"changelog": "x" * 4001}]
             for manifest in bad:
                 with self.subTest(manifest=str(manifest)[:40]), self.assertRaises(ValueError):
                     bp.store_info("psram_x", manifest, folder)

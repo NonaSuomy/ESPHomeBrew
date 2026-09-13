@@ -287,17 +287,36 @@ def custom_units(manifest: dict, src_root: Path, build_dir: Path) -> tuple[list[
     return units, ldflags
 
 
-MAX_ICON_BYTES = 32 * 1024
-MAX_ICON_SIDE = 128
-STORE_TEXT_LIMITS = {"author": 60, "category": 30, "about": 2000}
+MAX_ICON_BYTES = 64 * 1024
+MAX_ICON_SIDE = 256
+MAX_SCREENSHOTS = 3
+MAX_SCREENSHOT_BYTES = 300 * 1024
+MAX_SCREENSHOT_SIZE = (1024, 600)
+STORE_TEXT_LIMITS = {"author": 60, "category": 30, "license": 60, "about": 2000, "changelog": 4000}
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
-def store_info(name: str, manifest: dict, app_dir: Path) -> dict:
-    """The store listing extras from papp.json: author, category, about, controls and icon.
+def listing_png(name: str, app_dir: Path, rel: object, what: str, max_bytes: int, max_w: int, max_h: int) -> dict:
+    """A PNG from the app's folder, checked for size and dimensions, as base64."""
+    path = (app_dir / str(rel)).resolve()
+    if app_dir.resolve() not in path.parents or not path.is_file():
+        raise ValueError(f"{name}: {what} must be a file inside apps/{name}/")
+    png = path.read_bytes()
+    if len(png) > max_bytes or png[:8] != PNG_SIGNATURE or png[12:16] != b"IHDR":
+        raise ValueError(f"{name}: {what} must be a PNG of at most {max_bytes // 1024} KB")
+    width, height = struct.unpack(">II", png[16:24])
+    if not (0 < width <= max_w and 0 < height <= max_h):
+        raise ValueError(f"{name}: {what} is {width}x{height}; at most {max_w}x{max_h}")
+    return {"type": "image/png", "width": width, "height": height, "base64": base64.b64encode(png).decode("ascii")}
 
-    All optional. The icon is a PNG in the app's folder, at most 128x128 and
-    32 KB, carried as base64 so a catalog or sidecar needs no second request.
+
+def store_info(name: str, manifest: dict, app_dir: Path) -> dict:
+    """The store listing extras from papp.json: author, category, license, about,
+    changelog, controls, icon and screenshots.
+
+    All optional. Images are PNGs in the app's folder: an icon of at most
+    256x256 and 64 KB, and up to three screenshots of at most 1024x600 and
+    300 KB, carried as base64 until make_catalog publishes them.
     """
     info: dict = {}
     for key, limit in STORE_TEXT_LIMITS.items():
@@ -313,17 +332,13 @@ def store_info(name: str, manifest: dict, app_dir: Path) -> dict:
             raise ValueError(f"{name}: controls must be 1 to 20 lines of up to 60 characters")
         info["controls"] = [c.strip() for c in controls]
     if "icon" in manifest:
-        path = (app_dir / str(manifest["icon"])).resolve()
-        if app_dir.resolve() not in path.parents or not path.is_file():
-            raise ValueError(f"{name}: icon must be a file inside apps/{name}/")
-        png = path.read_bytes()
-        if len(png) > MAX_ICON_BYTES or png[:8] != PNG_SIGNATURE or png[12:16] != b"IHDR":
-            raise ValueError(f"{name}: icon must be a PNG of at most {MAX_ICON_BYTES // 1024} KB")
-        width, height = struct.unpack(">II", png[16:24])
-        if not (0 < width <= MAX_ICON_SIDE and 0 < height <= MAX_ICON_SIDE):
-            raise ValueError(f"{name}: icon is {width}x{height}; at most {MAX_ICON_SIDE}x{MAX_ICON_SIDE}")
-        info["icon"] = {"type": "image/png", "width": width, "height": height,
-                        "base64": base64.b64encode(png).decode("ascii")}
+        info["icon"] = listing_png(name, app_dir, manifest["icon"], "icon", MAX_ICON_BYTES, MAX_ICON_SIDE, MAX_ICON_SIDE)
+    if "screenshots" in manifest:
+        shots = manifest["screenshots"]
+        if not isinstance(shots, list) or not 1 <= len(shots) <= MAX_SCREENSHOTS:
+            raise ValueError(f"{name}: screenshots must list 1 to {MAX_SCREENSHOTS} PNG files")
+        info["screenshots"] = [listing_png(name, app_dir, shot, "screenshot", MAX_SCREENSHOT_BYTES, *MAX_SCREENSHOT_SIZE)
+                               for shot in shots]
     return info
 
 

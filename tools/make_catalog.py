@@ -142,7 +142,11 @@ def icon_name(app: dict) -> str:
     return f"{app['name']}-{app['version']}.png"
 
 
-LISTING_FIELDS = ("author", "category", "about", "controls")
+def screenshot_name(app: dict, index: int) -> str:
+    return f"{app['name']}-{app['version']}-screen{index + 1}.png"
+
+
+LISTING_FIELDS = ("author", "category", "license", "about", "changelog", "controls")
 
 
 def store_entry(repo: str, a: dict) -> dict:
@@ -154,6 +158,9 @@ def store_entry(repo: str, a: dict) -> dict:
         "description": a.get("description", ""),
         **{key: a[key] for key in LISTING_FIELDS if key in a},
         **({"icon": {**a["icon"], "url": pages_base(repo) + icon_name(a)}} if a.get("icon") else {}),
+        # Screenshots are big, so only their URLs; the icon stays inline.
+        **({"screenshots": [{"width": s["width"], "height": s["height"], "url": pages_base(repo) + screenshot_name(a, i)}
+                            for i, s in enumerate(a["screenshots"])]} if a.get("screenshots") else {}),
         "file": asset_name(a),
         "url": pages_url(repo, a),
         "info_url": pages_base(repo) + sidecar_name(a),
@@ -225,6 +232,8 @@ def main() -> int:
         (args.out / sidecar_name(a)).write_text(json.dumps(entry, indent=2) + "\n")
         if a.get("icon"):
             (args.out / icon_name(a)).write_bytes(base64.b64decode(a["icon"]["base64"]))
+        for i, shot in enumerate(a.get("screenshots", [])):
+            (args.out / screenshot_name(a, i)).write_bytes(base64.b64decode(shot["base64"]))
         if a.get("data"):
             (args.out / data_list_name(a)).write_text(publish_data(args.repo, a, args.out, args.data_cache))
             print(f"data: {a['name']}: {len(a['data']['files'])} file(s), {data_size(a):,} bytes")

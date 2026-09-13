@@ -114,6 +114,102 @@ def fetch(repo: str, ref: str, dest: Path, sparse: list[str] | None = None) -> P
     return dest
 
 
+SHA = re.compile(r"[0-9a-f]{40}")
+SUBMODULE_PATH = re.compile(r"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$")
+
+
+def manifest_paths(manifest: dict) -> list[str]:
+    """Every source-tree path a recipe names: groups, includes and extra "paths"."""
+    paths = list(manifest.get("paths", [])) + list(manifest.get("includes", []))
+    for group in manifest.get("groups", []):
+        paths += [group["dir"], *group.get("includes", [])]
+    return [p for p in paths if not p.startswith(LOCAL_PREFIX) and p not in ("", ".")]
+
+
+def check_submodules(name: str, manifest: dict) -> list[dict]:
+    """Validate "submodules": extra repositories checked out inside the source tree.
+
+    Upstream projects keep dependencies as git submodules, which a plain fetch
+    does not bring along. Each entry pins one of them by full commit SHA:
+    {"path": "micropython", "repo": "https://github.com/...", "ref": "<SHA>"}.
+    """
+    subs = manifest.get("submodules", [])
+    if not isinstance(subs, list):
+        raise ValueError(f"{name}: submodules must be a list")
+    seen: set[str] = set()
+    for sub in subs:
+        path = sub.get("path", "")
+        if not SUBMODULE_PATH.match(path) or any(part in (".", "..") for part in path.split("/")):
+            raise ValueError(f"{name}: bad submodule path '{path}'")
+        if any(path == other or path.startswith(other + "/") or other.startswith(path + "/") for other in seen):
+            raise ValueError(f"{name}: submodule '{path}' overlaps another one")
+        seen.add(path)
+        if not SHA.fullmatch(sub.get("ref", "")):
+            raise ValueError(f"{name}: submodule '{path}' needs a full commit SHA as ref")
+        if not sub.get("repo", "").startswith(("https://", "file://")):
+            raise ValueError(f"{name}: submodule '{path}' needs an https:// repo")
+    return subs
+
+
+def split_sparse(paths: list[str], subs: list[dict]) -> tuple[list[str], dict[str, list[str] | None]]:
+    """Share the recipe's paths out between the main checkout and its submodules.
+
+    A path inside a submodule becomes an anchored sparse pattern of that
+    submodule. The submodule's own root (typically an include directory)
+    adds nothing; a submodule with no paths inside it is checked out whole (None).
+    """
+    main: list[str] = []
+    per_sub: dict[str, list[str]] = {sub["path"]: [] for sub in subs}
+    for p in paths:
+        owner = next((s["path"] for s in subs if p == s["path"] or p.startswith(s["path"] + "/")), None)
+        if owner is None:
+            main.append(p)
+        elif p != owner:
+            per_sub[owner].append("/" + p[len(owner) + 1:])
+    return main, {k: (v or None) for k, v in per_sub.items()}
+
+
+def fetch_submodules(src_root: Path, subs: list[dict], sparse: dict[str, list[str] | None]) -> None:
+    """Check out each submodule at its pinned commit inside the source tree.
+
+    When the upstream tree records the submodule (a gitlink), the manifest's
+    ref must be that same commit, so a port always builds what upstream pins.
+    """
+    for sub in subs:
+        listed = run(["git", "ls-tree", "HEAD", "--", sub["path"]], cwd=src_root, capture_output=True).stdout.split()
+        if len(listed) >= 3 and listed[1] == "commit" and listed[2] != sub["ref"]:
+            raise ValueError(f"submodule {sub['path']}: upstream pins {listed[2]}, manifest says {sub['ref']}")
+        fetch(sub["repo"], sub["ref"], source_file(src_root, sub["path"]), sparse.get(sub["path"]))
+
+
+def reset_checkout(root: Path) -> None:
+    """Back to the pinned files; keeps fetch()'s cache stamp (and nested submodule checkouts)."""
+    run(["git", "checkout", "-q", "--", "."], cwd=root)
+    run(["git", "clean", "-q", "-fd", "-e", ".papp-ref"], cwd=root)
+
+
+# Generated sources (a "prebuild" step's output) live in this folder of the
+# source checkout, so recipes can compile them like any other upstream file.
+GEN_DIR = ".papp-gen"
+
+
+def prebuild_args(args: list[str], values: dict[str, str]) -> list[str]:
+    """Fill {src}, {repo}, {gen}, {units}, {python} and {jobs} into a prebuild command."""
+    out = []
+    for arg in args:
+        for key, value in values.items():
+            arg = arg.replace("{" + key + "}", value)
+        out.append(arg)
+    return out
+
+
+def write_units(units: list["Unit"], path: Path) -> None:
+    """The compile units as JSON for prebuild steps (sources, compiler, flags)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps([{"src": str(u.src), "obj": u.obj.name, "compiler": u.compiler, "flags": u.flags}
+                                for u in units], indent=1))
+
+
 DATA_TARGET = re.compile(r"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$")
 
 
@@ -212,12 +308,16 @@ def source_file(root: Path, rel: str) -> Path:
 
 
 def group_files(src_root: Path, group: dict) -> list[str]:
-    """A group's file names; "*.cpp"-style entries expand in its dir, minus "exclude"."""
+    """A group's file names; "*.cpp"-style entries expand in its dir, minus "exclude".
+
+    "**/*.c" also finds files in subfolders; they are named by their path
+    relative to the group's dir ("core/lv_obj.c").
+    """
     names: list[str] = []
     for entry in group["files"]:
         if any(c in entry for c in "*?["):
             base = source_file(src_root, group["dir"])
-            names += sorted(p.name for p in base.glob(entry) if p.is_file())
+            names += sorted(p.relative_to(base).as_posix() for p in base.glob(entry) if p.is_file())
         else:
             names.append(entry)
     excluded = set(group.get("exclude", []))
@@ -227,10 +327,15 @@ def group_files(src_root: Path, group: dict) -> list[str]:
     return [n for n in dict.fromkeys(names) if n not in excluded]
 
 
-def apply_patches(src_root: Path, patches: list[str]) -> list[str]:
-    """Reset the cached checkout, then apply the port's patches in order."""
-    run(["git", "checkout", "-q", "--", "."], cwd=src_root)
-    run(["git", "clean", "-q", "-fd"], cwd=src_root)
+def apply_patches(src_root: Path, patches: list[str], submodules: list[str] = ()) -> list[str]:
+    """Reset the cached checkout (and its submodules), then apply the port's patches in order.
+
+    Patch paths are relative to the source root, so one patch can also change
+    files inside a submodule (micropython/py/...).
+    """
+    reset_checkout(src_root)
+    for sub in submodules:
+        reset_checkout(source_file(src_root, sub))
     applied: list[str] = []
     for pattern in patches:
         prefix = LOCAL_PREFIX if pattern.startswith(LOCAL_PREFIX) else ""
@@ -271,7 +376,9 @@ def custom_units(manifest: dict, src_root: Path, build_dir: Path) -> tuple[list[
         archive = f"lib{group.get('prefix', 'group').strip('_')}.a" if group.get("archive") else None
         for name in group_files(src_root, group):
             src = source_file(src_root, f"{group['dir']}/{name}")
-            obj = build_dir / (group.get("prefix", "") + Path(name).stem + ".o")
+            # A file in a subfolder keeps its folder in the object name (core/lv_obj.c -> core_lv_obj.o).
+            stem = str(Path(name).with_suffix("")).replace("\\", "/").replace("/", "_")
+            obj = build_dir / (group.get("prefix", "") + stem + ".o")
             if src.suffix in (".cpp", ".cc", ".cxx"):
                 units.append(Unit(src, obj, cxxflags + extra, CXX, archive))
             elif src.suffix == ".c":
@@ -285,6 +392,33 @@ def custom_units(manifest: dict, src_root: Path, build_dir: Path) -> tuple[list[
     if manifest.get("newlib"):
         ldflags += [f"-Wl,--wrap={sym}" for sym in NEWLIB_WRAPS] + NEWLIB_LIBS
     return units, ldflags
+
+
+def run_prebuild(manifest: dict, src_root: Path, build_dir: Path, cache: Path, env: dict, jobs: int = 0) -> None:
+    """Run a recipe's "prebuild" commands: code generators that must run before compiling.
+
+    Each command is a list of arguments run in the source checkout, with
+    {src} (the checkout), {repo} (this repository), {gen} (the generated-files
+    folder, emptied first), {units} (a JSON list of every compile unit with its
+    compiler and flags, for generators that preprocess the sources, such as
+    MicroPython's qstr extraction), {python} and {jobs} filled in. Generated
+    sources are then compiled from "<GEN_DIR>/..." like upstream ones.
+    """
+    gen = src_root / GEN_DIR
+    if gen.exists():
+        shutil.rmtree(gen)
+    gen.mkdir(parents=True)
+    units_json = gen / "units.json"
+    units, _ = custom_units(manifest, src_root, build_dir)
+    write_units(units, units_json)
+    values = {"src": str(src_root), "repo": str(ROOT), "gen": str(gen), "units": str(units_json),
+              "python": sys.executable, "jobs": str(jobs or os.cpu_count() or 2)}
+    for command in manifest["prebuild"]:
+        if not isinstance(command, list) or not command or not all(isinstance(a, str) for a in command):
+            raise ValueError("prebuild commands must be non-empty lists of strings")
+        args = prebuild_args(command, values)
+        print(f"  prebuild: {' '.join(args).replace(str(cache), '<cache>')}", flush=True)
+        run(args, cwd=src_root, env=env)
 
 
 MAX_ICON_BYTES = 64 * 1024
@@ -375,17 +509,20 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
 
     source = manifest["source"]
     build = manifest["build"]
+    submodules = check_submodules(name, manifest)
     sparse = [source["path"], *SDK_PATHS]
     if build == "custom":
-        sparse += [g["dir"] for g in manifest["groups"]] + manifest.get("includes", [])
-        for group in manifest["groups"]:
-            sparse += group.get("includes", [])
-    # Only upstream directories are checked out; "." as an include root and
-    # this repository's own (local:) files need nothing fetched.
-    sparse = [p for p in sparse if not p.startswith(LOCAL_PREFIX) and p not in ("", ".")]
+        sparse += manifest_paths(manifest)
+    # Only upstream directories are checked out; "." as an include root,
+    # generated files and this repository's own (local:) files need nothing fetched.
+    sparse = [p for p in sparse if not p.startswith(LOCAL_PREFIX) and p not in ("", ".")
+              and p.split("/")[0] != GEN_DIR]
+    sparse, sub_sparse = split_sparse(sparse, submodules)
     sdk = src_root = fetch(source["repo"], source["ref"], cache / f"src-{name}-{source['ref'][:12]}", sparse)
+    fetch_submodules(src_root, submodules, sub_sparse)
     app_dir = src_root / source["path"]
-    patches = apply_patches(src_root, manifest["patches"]) if manifest.get("patches") else []
+    sub_paths = [s["path"] for s in submodules]
+    patches = apply_patches(src_root, manifest["patches"], sub_paths) if manifest.get("patches") else []
     linker_script = (source_file(src_root, manifest["linker_script"]) if manifest.get("linker_script")
                      else sdk / "tools/psram_app.ld")
 
@@ -397,6 +534,9 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
     ldflags = list(LDFLAGS)
     linker = CC
 
+    env, epoch = reproducible_env(src_root)
+    if build == "custom" and manifest.get("prebuild"):
+        run_prebuild(manifest, src_root, build_dir, cache, env, jobs)
     if build == "custom":
         units, link_tail = custom_units(manifest, src_root, build_dir)
         # newlib is linked, so -nostdlib goes; libraries follow the objects.
@@ -427,7 +567,6 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
             units.append(Unit(c, build_dir / (c.stem + ".o"), cflags))
     # Same bytes on every machine and run: pinned timestamps, and the local
     # checkout path (which __FILE__ would embed) mapped to a fixed name.
-    env, epoch = reproducible_env(src_root)
     for unit in units:
         unit.flags = unit.flags + [f"-ffile-prefix-map={cache}=/papp-src"]
     print(f"  compiling {len(units)} files (SOURCE_DATE_EPOCH={epoch})", flush=True)
@@ -495,6 +634,8 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
         "source": {"repo": source["repo"], "ref": source["ref"], "path": source["path"]},
         "sdk": {"repo": source["repo"], "ref": source["ref"]},
     }
+    if submodules:
+        info["submodules"] = [{"path": s["path"], "repo": s["repo"], "ref": s["ref"]} for s in submodules]
     if patches:
         info["patches"] = patches
     if manifest.get("linker_script"):

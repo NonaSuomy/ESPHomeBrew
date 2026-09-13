@@ -87,7 +87,7 @@ class PappLoader : public Component {
     ESP_LOGI("papp_loader", "Screen stream enabled remotely");
   }
   // One full 800x480 capture of the running PAPP's canvas, sent to the next
-  // (or current) client of the diagnostic stream on TCP port 3232 as a
+  // (or current) client of the diagnostic stream on TCP port 3233 as a
   // PAPPSS01 packet. With no app running the packet is empty (0x0).
   void request_screenshot() {
     this->screenshot_requested_ = true;
@@ -283,7 +283,7 @@ class PappLoader : public Component {
   uint16_t *ppa_framebuffer_{nullptr};
   uint16_t *emu_buffer_{nullptr};
   // Optional diagnostic framebuffer published to the host over TCP. The
-  // stream is inactive unless a recorder connects to port 3232.
+  // stream is inactive unless a recorder connects to port 3233.
   uint16_t *stream_framebuffer_{nullptr};
   // Network writes can block. These snapshots keep stream_mutex_ confined to
   // the short producer/consumer copy instead of the TCP transfer.

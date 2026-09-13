@@ -106,7 +106,7 @@ class Config:
     api_host: str | None = None
     api_port: int = 6053
     api_key: str | None = None
-    screen_port: int = 3232
+    screen_port: int = 3233
     proxy_port: int = 8765
     allowed_url_prefixes: list[str] = field(default_factory=list)
     token_env: str = "EHGI_BRIDGE_TOKEN"
@@ -157,7 +157,7 @@ class Config:
         api = raw.get("device_api", {})
         cfg.api_host = api.get("host")
         cfg.api_port = int(api.get("port", 6053))
-        cfg.screen_port = int(api.get("screen_port", 3232))
+        cfg.screen_port = int(api.get("screen_port", 3233))
         cfg.proxy_port = int(api.get("proxy_port", 8765))
         cfg.show_requests = bool(raw.get("console", {}).get("show_requests", True))
         elf = api.get("firmware_elf", [])
@@ -656,7 +656,7 @@ def decode_crash(cfg: Config, text: str, url: str | None = None, opener=urllib.r
     return "\n".join(out)
 
 
-# ── screenshots (papp_loader diagnostic stream, TCP port 3232) ──────────────
+# ── screenshots (papp_loader diagnostic stream, TCP port 3233) ──────────────
 
 STREAM_HEADER = struct.Struct("<8sHHII")         # PAPPFB01 thumbnail / PAPPSS01 screenshot
 STREAM_AUDIO_HEADER = struct.Struct("<8sIHHII")  # PAPPAU01

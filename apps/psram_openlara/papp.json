@@ -1,0 +1,117 @@
+{
+  "name": "psram_openlara",
+  "title": "OpenLara",
+  "version": "0.1.0",
+  "description": "OpenLara, the open Tomb Raider 1 engine, as a PAPP: software renderer at 320x240 (shown 2x), sound, gamepad and USB keyboard. Work in progress. Needs your own Tomb Raider 1 PC data (the DATA folder with the .PHD levels) in /sd/roms/openlara/.",
+  "author": "XProger (OpenLara); ESP32-P4 port by alexkid77",
+  "category": "Game",
+  "license": "BSD-2-Clause (OpenLara); P4 port has no licence yet",
+  "about": "OpenLara, the open-source Tomb Raider 1 engine, with the software renderer from alexkid77's ESP32-P4 port (320x240 RGB565, scaled 2x), 44.1 kHz sound, the loader's gamepad and USB keyboard. Copy the DATA folder of your own Tomb Raider 1 PC game (GYM.PHD, LEVEL1.PHD, ..., TITLE.PHD and the .PCX pictures) to /sd/roms/openlara/; optional FMV/ movies and music tracks go next to it. Settings and saves are written to the same folder.",
+  "controls": [
+    "D-pad: move / turn; choose items in the inventory",
+    "A: action (grab, pick up, use); select in menus",
+    "B: jump; back in menus",
+    "X (hold): walk; walk + left/right: side step",
+    "Y (hold): look around",
+    "L: draw / holster weapons",
+    "R: roll",
+    "Start: inventory (passport: save, load, exit)",
+    "Menu (hold 3 s) or the on-screen X: quit",
+    "Keyboard: arrows/WASD move, Space/Enter/Z = A",
+    "Keyboard: X = B, C = X, V/Tab = Y, Q = L, E = R",
+    "Keyboard: Esc inventory, Ctrl action, Alt jump",
+    "Keyboard: 5 quick save, 9 quick load, F12 FPS"
+  ],
+  "upstream": {
+    "project": "OpenLara",
+    "url": "https://github.com/XProger/OpenLara"
+  },
+  "publish": false,
+  "build": "custom",
+  "source": {
+    "repo": "https://github.com/alexkid77/openlara_esp32p4",
+    "ref": "da3d43138f3a9eae6778c96adbdd7a6579e42979",
+    "path": "components/openlara"
+  },
+  "patches": [
+    "local:ports/openlara/patches/*.patch"
+  ],
+  "linker_script": "local:ports/redalert/papp_cpp.ld",
+  "includes": [
+    "components/openlara/src",
+    "local:ports/openlara",
+    "local:"
+  ],
+  "cflags": [
+    "-std=gnu11",
+    "-O2",
+    "-fno-strict-aliasing",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-DPAPP_APP_SIDE=1",
+    "-Wno-unused-variable",
+    "-Wno-unused-function",
+    "-Wno-unused-but-set-variable",
+    "-Wno-maybe-uninitialized",
+    "-Wno-sign-compare"
+  ],
+  "cxxflags": [
+    "-std=gnu++11",
+    "-O2",
+    "-fno-strict-aliasing",
+    "-fno-exceptions",
+    "-fno-rtti",
+    "-fno-threadsafe-statics",
+    "-fno-use-cxa-atexit",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-DPAPP_APP_SIDE=1",
+    "-D__SDL12__",
+    "-D__PAPP__",
+    "-Wno-unused-variable",
+    "-Wno-unused-function",
+    "-Wno-unused-but-set-variable",
+    "-Wno-maybe-uninitialized",
+    "-Wno-sign-compare",
+    "-Wno-format",
+    "-Wno-misleading-indentation",
+    "-Wno-class-memaccess",
+    "-Wno-unused-value",
+    "-Wno-nonnull-compare",
+    "-Wno-calloc-transposed-args",
+    "-Wno-narrowing",
+    "-Wno-write-strings"
+  ],
+  "groups": [
+    {
+      "dir": "components/openlara/src/libs/tinf",
+      "prefix": "tinf_",
+      "files": ["tinflate.c"]
+    },
+    {
+      "dir": "components/openlara/src/libs/minimp3",
+      "prefix": "mp3_",
+      "files": ["minimp3.cpp"]
+    },
+    {
+      "dir": "components/openlara/src/libs/stb_vorbis",
+      "prefix": "vorbis_",
+      "files": ["stb_vorbis.c"]
+    },
+    {
+      "dir": "local:ports/openlara",
+      "prefix": "papp_",
+      "files": [
+        "papp_main.cpp",
+        "papp_openlara.cpp",
+        "papp_video.cpp",
+        "papp_audio.cpp",
+        "papp_syscalls.c"
+      ]
+    }
+  ],
+  "ldflags": [
+    "-Wl,--wrap=exit"
+  ],
+  "newlib": true
+}

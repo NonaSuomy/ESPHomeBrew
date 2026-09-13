@@ -94,7 +94,10 @@ extern "C" __attribute__((section(".text.entry"), used)) int app_entry(const app
     // through rooms and portals; the original port used a 64 KiB stack. The
     // loader puts stacks this big in PSRAM. Core 0 like the loader's own
     // worker; core 1 runs ESPHome's loop and the presenter/audio tasks.
-    if (svc->task_create(game_task, "openlara", 256 * 1024, nullptr, 5, &handle, 0) != 0) {
+    // Priority 4, one below the loader's screen-stream task on this core: with
+    // a fast present the game hardly ever blocks, and at equal priority it kept
+    // the stream (remote view, bridge screenshots) from ever sending a frame.
+    if (svc->task_create(game_task, "openlara", 256 * 1024, nullptr, 4, &handle, 0) != 0) {
         svc->log_printf("OL: could not create the game task\n");
         return -1;
     }

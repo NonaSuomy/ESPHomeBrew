@@ -42,6 +42,7 @@
     "tulip/shared/py",
     "micropython/tools",
     "micropython/mpy-cross",
+    "micropython/lib/oofatfs",
     "micropython/lib/re1.5",
     "micropython/lib/uzlib",
     "micropython/lib/crypto-algorithms",

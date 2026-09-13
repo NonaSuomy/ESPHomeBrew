@@ -103,12 +103,13 @@ def wants_qstr(src: Path, gen: Path) -> bool:
     return bool(QSTR_HINT.search(src.read_bytes()))
 
 
-def preprocess(unit: dict) -> bytes:
+def preprocess(unit: dict) -> tuple[bytes, str]:
     result = subprocess.run([unit["compiler"], "-E", "-DNO_QSTR", *unit["flags"], unit["src"]],
                             capture_output=True)
     if result.returncode != 0:
-        raise SystemExit(f"gen_tulip: preprocessing {unit['src']} failed:\n{result.stderr.decode(errors='replace')}")
-    return result.stdout
+        errors = [line for line in result.stderr.decode(errors="replace").splitlines() if "error" in line]
+        return b"", unit["src"] + ":\n    " + "\n    ".join(errors[:6])
+    return result.stdout, ""
 
 
 def gen_qstr(units: list[dict], mp: Path, gen: Path, jobs: int) -> None:
@@ -116,9 +117,15 @@ def gen_qstr(units: list[dict], mp: Path, gen: Path, jobs: int) -> None:
     todo = [u for u in units if wants_qstr(Path(u["src"]), gen)]
     log(f"qstr: preprocessing {len(todo)} of {len(units)} units")
     last = hdr / "qstr.i.last"
+    failures = []
     with open(last, "wb") as out, ThreadPoolExecutor(max_workers=jobs) as pool:
-        for text in pool.map(preprocess, todo):  # in unit order: same output every build
+        for text, failure in pool.map(preprocess, todo):  # in unit order: same output every build
             out.write(text)
+            if failure:
+                failures.append(failure)
+    if failures:
+        # All of them at once: a port fixes include paths in batches.
+        raise SystemExit("gen_tulip: preprocessing failed for\n" + "\n".join(failures[:40]))
     tool = str(mp / "py/makeqstrdefs.py")
     for mode, collected in (("qstr", "qstrdefs.collected.h"), ("module", "moduledefs.collected"),
                             ("root_pointer", "root_pointers.collected")):

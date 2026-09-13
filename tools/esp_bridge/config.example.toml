@@ -42,7 +42,7 @@ max_log_bytes = 1000000
 # ESPHome venv's python (it provides aioesphomeapi).
 host = "10.13.37.60"                         # the P4's IP or hostname
 port = 6053
-screen_port = 3232                           # papp_loader diagnostic stream (screenshots)
+screen_port = 3232                           # papp_loader diagnostic stream (screenshots, readfile)
 encryption_key_secret = "encryption_key016"  # name of the api key in secrets.yaml
 # encryption_key_env = "ESP_API_KEY"         # or read it from an env var
 allowed_url_prefixes = [
@@ -63,4 +63,4 @@ show_requests = true
 
 [actions]
 # Start read-only; add "upload", "run", "logs" when you're happy with it.
-enabled = ["status", "config", "compile", "upload", "logs", "run", "launch", "close", "catalog", "screenshot"]
+enabled = ["status", "config", "compile", "upload", "logs", "run", "launch", "close", "catalog", "screenshot", "readfile"]

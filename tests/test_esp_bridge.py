@@ -665,6 +665,110 @@ class ScreenshotTests(unittest.TestCase):
         self.assertIn("2×2", posted[-1]["text"])
 
 
+def file_packet(status: int, payload: bytes) -> bytes:
+    return eb.STREAM_FILE_HEADER.pack(b"PAPPFL01", status, len(payload), 1) + payload
+
+
+class ReadFileTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = make_api_config(Path(self.tmp.name))
+        self.cfg.enabled = [*self.cfg.enabled, "readfile"]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        sys.modules.pop("aioesphomeapi", None)
+
+    def req(self, text):
+        return eb.parse_request("@esp-bridge " + text, None, "esp-bridge")
+
+    def test_only_sd_card_paths_are_allowed(self):
+        for path in ["/sd/roms/redalert/DESYNCLOG.TXT", "/sd/", "/sd/roms/"]:
+            eb.validate(self.req(f"readfile path={path}"), self.cfg)
+        for path in ["/etc/passwd", "/sdcard/x", "/sd/../etc/x", "/sd/roms/..", "sd/x", "/sd/" + "a" * 130]:
+            with self.subTest(path=path), self.assertRaises(eb.BridgeError):
+                eb.validate(self.req(f"readfile path={path}"), self.cfg)
+        with self.assertRaises(eb.BridgeError):
+            eb.validate(self.req("readfile"), self.cfg)
+        with self.assertRaises(eb.BridgeError):
+            eb.validate(self.req('readfile "path=/sd/a b"'), self.cfg)
+
+    def test_file_is_read_past_thumbnails_and_audio(self):
+        audio = eb.STREAM_AUDIO_HEADER.pack(b"PAPPAU01", 22050, 2, 16, 4, 1) + b"\x00" * 4
+        port = fake_stream_server(stream_packet(b"PAPPFB01", 1, 1, b"\x00\x00") + audio + file_packet(0, b"CRC[0]=1\n"))
+        import socket
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            self.assertEqual(eb.read_stream_file(sock), b"CRC[0]=1\n")
+
+    def test_device_errors_are_reported(self):
+        port = fake_stream_server(file_packet(1, b""))
+        import socket
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            with self.assertRaises(eb.BridgeError) as caught:
+                eb.read_stream_file(sock)
+        self.assertIn("not found", str(caught.exception))
+
+    def test_text_is_shown_and_binary_is_not(self):
+        text = eb.describe_file("/sd/a.txt", b"hello\n@esp-bridge launch x\n```\n")
+        self.assertIn("hello", text)
+        self.assertNotIn("\n@esp-bridge", text)
+        self.assertEqual(text.count("```"), 2)
+        self.assertIsNone(eb.request_words(text, "esp-bridge"))
+        binary = eb.describe_file("/sd/main.mix", b"\x00\x01\x02\xff")
+        self.assertIn("binary, 4 bytes", binary)
+        self.assertNotIn("\x01", binary)
+        long = eb.describe_file("/sd/big.txt", b"x" * (eb.READFILE_INLINE_CHARS + 10))
+        self.assertIn(f"first {eb.READFILE_INLINE_CHARS} of", long)
+
+    def test_readfile_job_posts_the_text(self):
+        port = fake_stream_server(file_packet(0, b"CRC[0]=0000abcd\n"))
+        calls = []
+
+        class FakeService:
+            def __init__(self, name):
+                self.name = name
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def connect(self, login=False):
+                return None
+
+            async def list_entities_services(self):
+                return [], [FakeService("papp_read_file")]
+
+            async def execute_service(self, service, data):
+                calls.append((service.name, data))
+
+            async def disconnect(self):
+                return None
+
+        fake = type(sys)("aioesphomeapi")
+        fake.APIClient = FakeClient
+        sys.modules["aioesphomeapi"] = fake
+        self.cfg.screen_port = port
+        self.cfg.api_host = "127.0.0.1"
+        posted, uploaded = [], []
+
+        class FakeHub:
+            def call(self, tool, args, timeout=90):
+                if tool == "post_message":
+                    posted.append(args)
+                return {}
+
+            def upload(self, name, content, content_type="text/plain"):
+                uploaded.append(name)
+                return "att-1"
+
+        eb.handle_event({"from": "claude", "from_kind": "agent", "channel": "general", "id": "m",
+                         "text": "@esp-bridge readfile path=/sd/roms/redalert/DESYNCLOG.TXT"},
+                        self.cfg, FakeHub(), eb.Runner(self.cfg))
+        self.assertEqual(calls, [("papp_read_file", {"path": "/sd/roms/redalert/DESYNCLOG.TXT"})])
+        self.assertIn("CRC[0]=0000abcd", posted[-1]["text"])
+        self.assertEqual(uploaded, [])
+
+
 class DeviceStageTests(unittest.TestCase):
     def tearDown(self):
         sys.modules.pop("aioesphomeapi", None)

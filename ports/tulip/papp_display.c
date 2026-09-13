@@ -223,6 +223,13 @@ static void poll_gamepad(int64_t now)
 
     for (int d = 0; d < DIR_COUNT; d++) {
         if (!pad.values[s_dir_input[d]]) {
+            // A tap shorter than the decision time: an arrow, unless typed.
+            if (s_dir_down_at[d] != 0 && s_dir_state[d] == 0) {
+                const int64_t since_letter = s_dir_down_at[d] - s_letter_at[d];
+                if (s_letter_at[d] == 0 || since_letter >= ARROW_LETTER_US || since_letter <= -ARROW_LETTER_US) {
+                    send_key(s_dir_key[d]);
+                }
+            }
             s_dir_down_at[d] = 0;
             continue;
         }

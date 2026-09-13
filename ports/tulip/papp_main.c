@@ -88,9 +88,15 @@ void papp_mp_wait(void)
 
 // ── GC ──────────────────────────────────────────────────────────────────────
 
+// The app's .data and .bss (papp_cpp.ld) are scanned too: Tulip's C code
+// keeps Python callbacks in plain globals (frame, touch, keyboard, sequencer).
+extern char _data_start[];
+extern char _bss_end[];
+
 void gc_collect(void)
 {
     gc_collect_start();
+    gc_collect_root((void **)_data_start, ((uintptr_t)_bss_end - (uintptr_t)_data_start) / sizeof(void *));
     gc_helper_collect_regs_and_stack();
     gc_collect_end();
 }
@@ -110,16 +116,28 @@ void __assert_func(const char *file, int line, const char *func, const char *exp
 // ── Heap ────────────────────────────────────────────────────────────────────
 // As big a GC heap as PSRAM allows, from 16 MiB down: MicroPython objects,
 // LVGL (LV_STDLIB_MICROPYTHON allocates from it) and Tulip's Python code.
+// C code keeps allocating after this (AMY samples and patches, PNG decoding,
+// sprites), so a size is only taken if RESERVE bytes are still free next to it.
+
+#define HEAP_RESERVE (4u << 20)
 
 static void alloc_heap(void)
 {
     static const size_t sizes[] = {16u << 20, 12u << 20, 8u << 20, 6u << 20, 4u << 20, 2u << 20};
     for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
         s_heap = (char *)papp_alloc_raw(sizes[i], 0);
-        if (s_heap != NULL) {
+        if (s_heap == NULL) {
+            continue;
+        }
+        void *probe = papp_alloc_raw(HEAP_RESERVE, 0);
+        const int last = i + 1 == sizeof(sizes) / sizeof(sizes[0]);
+        if (probe != NULL || last) {
+            papp_free_raw(probe);
             s_heap_size = sizes[i];
             return;
         }
+        papp_free_raw(s_heap);
+        s_heap = NULL;
     }
 }
 

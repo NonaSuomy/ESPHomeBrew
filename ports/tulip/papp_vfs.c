@@ -11,12 +11,15 @@
 //                          Tulip's own filesystem (/user, /sys, ...): a real
 //                          filesystem, like Tulip's flash partitions.
 //   _papp.quit()           leave Tulip (back to the loader's menu).
+//   _papp.sys_tar(), _papp.sys_version()
+//                          Tulip's /sys files built into the binary.
 #include "papp_port.h"
 
 #include <stdio.h>
 #include <string.h>
 
 #include "py/mperrno.h"
+#include "py/objarray.h"
 #include "py/objstr.h"
 #include "py/runtime.h"
 #include "py/stream.h"
@@ -379,10 +382,18 @@ static mp_obj_t sd_bdev_make_new(const mp_obj_type_t *type, size_t n_args, size_
     }
     const long want = (long)block_size * (long)block_count;
     if (papp_file_size(fp) < want) {
-        // Grow the file to its full size once, so littlefs never extends it.
+        // Grow the file to its full size once, so littlefs never extends it:
+        // a write at the last byte (FAT allocates the clusters in between),
+        // or zeros all the way if the card's filesystem will not do that.
+        mp_printf(&mp_plat_print, "Creating the Tulip filesystem image %s (%u KiB)...\n", path,
+                  (unsigned)(want / 1024));
         static const uint8_t zero[512];
+        if (papp_svc->file_seek(fp, want - 1, SEEK_SET) == 0) {
+            papp_svc->file_write(zero, 1, 1, fp);
+        }
         long size = papp_file_size(fp);
         papp_svc->file_seek(fp, size, SEEK_SET);
+        unsigned chunks = 0;
         while (size < want) {
             long n = want - size < (long)sizeof(zero) ? want - size : (long)sizeof(zero);
             if (papp_svc->file_write(zero, 1, (size_t)n, fp) != (size_t)n) {
@@ -390,8 +401,8 @@ static mp_obj_t sd_bdev_make_new(const mp_obj_type_t *type, size_t n_args, size_
                 mp_raise_OSError(MP_ENOSPC);
             }
             size += n;
-            if ((size & 0xFFFFF) == 0) {
-                papp_mp_poll();  // a few seconds for 16 MiB: let the idle task in
+            if (++chunks % 1024 == 0) {
+                papp_mp_poll();  // seconds for 16 MiB: let the idle task in
             }
         }
         papp_svc->file_seek(fp, 0, SEEK_SET);
@@ -506,11 +517,31 @@ static mp_obj_t papp_mod_quit(void)
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(papp_mod_quit_obj, papp_mod_quit);
 
+// Tulip's /sys files as a tar built into the binary (.papp-gen/sys_tar.c,
+// from tulip/fs/tulip); _boot.py unpacks it into /sys.
+extern const unsigned char papp_sys_tar[];
+extern const size_t papp_sys_tar_len;
+extern const char papp_sys_version[];
+
+static mp_obj_t papp_mod_sys_tar(void)
+{
+    return mp_obj_new_memoryview('B', papp_sys_tar_len, (void *)papp_sys_tar);  // read-only, no copy
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(papp_mod_sys_tar_obj, papp_mod_sys_tar);
+
+static mp_obj_t papp_mod_sys_version(void)
+{
+    return mp_obj_new_str(papp_sys_version, strlen(papp_sys_version));
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(papp_mod_sys_version_obj, papp_mod_sys_version);
+
 static const mp_rom_map_elem_t papp_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR__papp) },
     { MP_ROM_QSTR(MP_QSTR_VfsSd), MP_ROM_PTR(&vfs_sd_type) },
     { MP_ROM_QSTR(MP_QSTR_BlockDev), MP_ROM_PTR(&sd_bdev_type) },
     { MP_ROM_QSTR(MP_QSTR_quit), MP_ROM_PTR(&papp_mod_quit_obj) },
+    { MP_ROM_QSTR(MP_QSTR_sys_tar), MP_ROM_PTR(&papp_mod_sys_tar_obj) },
+    { MP_ROM_QSTR(MP_QSTR_sys_version), MP_ROM_PTR(&papp_mod_sys_version_obj) },
 };
 static MP_DEFINE_CONST_DICT(papp_module_globals, papp_module_globals_table);
 

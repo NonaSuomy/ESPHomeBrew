@@ -17,6 +17,8 @@ script does the same generation from the list of compile units it is given:
                              tools/makemanifest.py: as bytecode when mpy-cross
                              can be built with a host compiler, else as source
                              (compiled on import).
+  sys_tar.c                  Tulip's /sys files (tulip/fs/tulip: examples,
+                             images) as a tar that _boot.py unpacks.
 
     gen_tulip.py --src <checkout> --gen <out dir> --units <units.json> --jobs N
 """
@@ -192,6 +194,51 @@ def gen_frozen(src: Path, mp: Path, gen: Path, jobs: int) -> None:
         f"frozen_content.c {(gen / 'frozen_content.c').stat().st_size // 1024} KiB")
 
 
+# Tulip's /sys: what tulip/fs_create.py puts in the "system" flash partition
+# of a hardware Tulip (examples, images, editable copies of the built-in apps).
+SYS_FOLDERS = ("app", "ex", "im")
+SYS_EXTS = (".txt", ".png", ".py", ".json", ".obj", ".wav", ".mid")
+SYS_APP_COPIES = ("drums", "juno6", "voices", "worldui")
+
+
+def gen_sys(src: Path, gen: Path) -> None:
+    """sys_tar.c: Tulip's system files as a tar in the binary; _boot.py
+    unpacks it into /sys when it is missing or from another build."""
+    import hashlib
+    import io
+    import tarfile
+
+    home = src / "tulip/fs/tulip"
+    files: dict[str, bytes] = {}
+    for folder in SYS_FOLDERS:
+        for path in sorted((home / folder).rglob("*")):
+            if path.is_file() and path.suffix.lower() in SYS_EXTS:
+                files[path.relative_to(home).as_posix()] = path.read_bytes()
+    for app in SYS_APP_COPIES:
+        files[f"ex/my_{app}.py"] = (src / f"tulip/shared/py/{app}.py").read_bytes()
+    epoch = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+        for name in sorted(files):
+            info = tarfile.TarInfo(name)
+            info.size = len(files[name])
+            info.mtime = epoch
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(files[name]))
+    data = buf.getvalue()
+    version = hashlib.sha256(data).hexdigest()[:16]
+    with open(gen / "sys_tar.c", "w") as out:
+        out.write("// Tulip's /sys files (tulip/fs/tulip), made by ports/tulip/gen_tulip.py.\n")
+        out.write("#include <stddef.h>\n")
+        out.write(f'const char papp_sys_version[] = "{version}";\n')
+        out.write(f"const size_t papp_sys_tar_len = {len(data)};\n")
+        out.write("const unsigned char papp_sys_tar[] = {\n")
+        for i in range(0, len(data), 32):
+            out.write(",".join(str(b) for b in data[i:i + 32]) + ",\n")
+        out.write("};\n")
+    log(f"sys: {len(files)} files, {len(data) // 1024} KiB tar, version {version}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--src", type=Path, required=True)
@@ -211,7 +258,8 @@ def main() -> int:
     for name, step in (("version", lambda: gen_version(mp, gen, mp_ref)),
                        ("lvgl binding", lambda: gen_lvgl(units, lvb, gen)),
                        ("qstr", lambda: gen_qstr(units, mp, gen, args.jobs)),
-                       ("frozen", lambda: gen_frozen(src, mp, gen, args.jobs))):
+                       ("frozen", lambda: gen_frozen(src, mp, gen, args.jobs)),
+                       ("sys files", lambda: gen_sys(src, gen))):
         start = time.monotonic()
         step()
         log(f"{name}: {time.monotonic() - start:.1f} s")

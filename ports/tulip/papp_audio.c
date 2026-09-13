@@ -29,8 +29,16 @@ static void audio_task(void *arg)
     (void)arg;
     int64_t anchor_us = 0;   // when the current run of audio started
     int64_t frames_out = 0;  // frames submitted since anchor_us
+    int64_t slept_us = papp_time_us();
     while (!s_stop) {
         const int64_t now = papp_time_us();
+        // If rendering cannot keep up, this task never waits: still give the
+        // other tasks on this core (ESPHome's loop, idle) a tick now and then.
+        if (now - slept_us > 100000) {
+            papp_svc->delay_ms(TICK_MS);
+            slept_us = papp_time_us();
+            continue;
+        }
         const int64_t played_us = frames_out * 1000000LL / AMY_SAMPLE_RATE;
         if (frames_out == 0 || now - anchor_us > played_us + 250000) {
             anchor_us = now;  // a new run, or we fell far behind: start over
@@ -40,6 +48,7 @@ static void audio_task(void *arg)
             if (ahead > LEAD_US) {
                 const int ms = (int)((ahead - LEAD_US) / 1000) + 1;
                 papp_svc->delay_ms(ms < TICK_MS ? TICK_MS : ms);
+                slept_us = papp_time_us();
                 continue;
             }
         }
@@ -78,7 +87,9 @@ void run_amy(void)
     s_stop = 0;
     s_stopped = 0;
     // Core 1, above the display task: a late block is an audible click.
-    if (papp_svc->task_create(audio_task, "tulip_amy", 16 * 1024, NULL, 6, &s_task, 1) != 0) {
+    // AMY's own render tasks use 12-16 KiB; 48 KiB puts the stack in PSRAM
+    // (loader: anything over 32 KiB) and leaves internal RAM to the loader.
+    if (papp_svc->task_create(audio_task, "tulip_amy", 48 * 1024, NULL, 6, &s_task, 1) != 0) {
         s_task = NULL;
         s_stopped = 1;
         papp_svc->log_printf("TULIP: could not start the audio task\n");

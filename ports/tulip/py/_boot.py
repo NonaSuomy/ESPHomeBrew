@@ -68,12 +68,58 @@ def _mount_filesystems():
     return None
 
 
-_image = _mount_filesystems()
-for _d in ('/user', '/sys', '/user/lib'):
+def _makedirs(path):
+    here = ''
+    for part in path.strip('/').split('/'):
+        here += '/' + part
+        try:
+            os.mkdir(here)
+        except OSError:
+            pass
+
+
+def _install_sys():
+    # Tulip's system files (examples, images: tulip/fs/tulip) are built into
+    # this app as a tar; unpack them into /sys once per build.
+    version = _papp.sys_version()
     try:
-        os.mkdir(_d)
+        with open('/sys/.papp_version') as f:
+            if f.read() == version:
+                return
     except OSError:
         pass
+    print('Installing Tulip system files in /sys...')
+    tar = _papp.sys_tar()
+    pos, count = 0, 0
+    while pos + 512 <= len(tar):
+        header = bytes(tar[pos:pos + 512])
+        name = header[0:100].split(b'\0', 1)[0].decode()
+        if not name:
+            break
+        size = int(header[124:136].split(b'\0', 1)[0].strip().decode() or '0', 8)
+        prefix = header[345:500].split(b'\0', 1)[0].decode()
+        if prefix:
+            name = prefix + '/' + name
+        pos += 512
+        if header[156] in (0, 48):  # a regular file
+            path = '/sys/' + name
+            _makedirs(path.rsplit('/', 1)[0])
+            with open(path, 'wb') as f:
+                f.write(tar[pos:pos + size])
+            count += 1
+        pos += (size + 511) // 512 * 512
+    with open('/sys/.papp_version', 'w') as f:
+        f.write(version)
+    print(count, 'files')
+
+
+_image = _mount_filesystems()
+for _d in ('/user', '/sys', '/user/lib'):
+    _makedirs(_d)
+try:
+    _install_sys()
+except Exception as e:
+    print('papp: /sys not installed:', e)
 os.chdir('/user')
 sys.path.append('/user/lib')
 sys.path.append('/sys/ex')

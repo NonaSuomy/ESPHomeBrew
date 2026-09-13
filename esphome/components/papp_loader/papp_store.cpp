@@ -396,10 +396,10 @@ bool PappLoader::decode_icon_(const std::vector<uint8_t> &png_bytes, uint16_t si
 }
 
 void PappLoader::release_icon_(AppIcon *icon) {
-  if (icon->pixels != nullptr) {
-    lv_image_cache_drop(&icon->dsc);
+  // Raw RGB565 is drawn straight from these pixels (nothing decoded into
+  // LVGL's image cache), so they can simply be freed once no object shows them.
+  if (icon->pixels != nullptr)
     heap_caps_free(icon->pixels);
-  }
   *icon = AppIcon{};
 }
 

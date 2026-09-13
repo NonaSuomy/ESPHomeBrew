@@ -283,9 +283,13 @@ static void draw_bars(uint16_t *fb)
 
 // ── Game data ───────────────────────────────────────────────────────────────
 
+// The TR1 files in any of the layouts the engine reads: the PC CD's DATA
+// folder, the bare .PHD files, or OpenLara's own level/1/ tree.
 static bool data_present()
 {
-    static const char *const probes[] = {"DATA/GYM.PHD", "GYM.PHD", "DATA/TITLE.PHD", "TITLE.PHD"};
+    static const char *const probes[] = {"DATA/GYM.PHD",     "GYM.PHD",       "level/1/GYM.PHD",
+                                         "DATA/TITLE.PHD",   "TITLE.PHD",     "level/1/TITLE.PHD",
+                                         "DATA/LEVEL1.PHD",  "LEVEL1.PHD",    "level/1/LEVEL1.PHD"};
     for (const char *name : probes) {
         if (Stream::existsContent(name)) {
             return true;
@@ -294,12 +298,28 @@ static bool data_present()
     return false;
 }
 
+// Where the data may be: our folder first, then the places alexkid77's
+// ESP32-P4 build looked (its /sdcard is the loader's /sd).
+static const char *find_data_dir()
+{
+    static const char *const dirs[] = {PAPP_OL_DATA_DIR, "/sd/OpenLara/", "/sd/DATA/", "/sd/data/", "/sd/"};
+    for (const char *dir : dirs) {
+        strcpy(contentDir, dir);
+        if (data_present()) {
+            return dir;
+        }
+    }
+    strcpy(contentDir, PAPP_OL_DATA_DIR);
+    return nullptr;
+}
+
 // No TR1 data: a blue checkerboard until a button is pressed (or 30 s).
 static void show_missing_data()
 {
-    papp_svc->log_printf("OL: no Tomb Raider 1 data in %s: copy the game's DATA folder (GYM.PHD, "
-                         "LEVEL1.PHD, ..., TITLE.PHD, *.PCX) there, optionally FMV/ and music\n",
-                         PAPP_OL_DATA_DIR);
+    papp_svc->log_printf("OL: no Tomb Raider 1 data (GYM.PHD, TITLE.PHD or LEVEL1.PHD, bare, in DATA/ or in "
+                         "level/1/) in %s, /sd/OpenLara/, /sd/DATA/, /sd/data/ or /sd/. Copy the game's DATA "
+                         "folder to %s, optionally FMV/ and music\n",
+                         PAPP_OL_DATA_DIR, PAPP_OL_DATA_DIR);
     for (int frame = 0; frame < 2; frame++) {
         uint16_t *fb = papp_video_back();
         for (int y = 0; y < PAPP_OL_HEIGHT; y++) {
@@ -348,20 +368,20 @@ extern "C" int papp_openlara_run(void)
         return -1;
     }
 
-    strcpy(contentDir, PAPP_OL_DATA_DIR);
-    strcpy(cacheDir, PAPP_OL_DATA_DIR);  // "settings"
-    strcpy(saveDir, PAPP_OL_DATA_DIR);   // "savegame.dat"
-    if (!data_present()) {
+    const char *data_dir = find_data_dir();  // sets contentDir
+    if (data_dir == nullptr) {
         show_missing_data();
         return -1;
     }
+    strcpy(cacheDir, data_dir);  // "settings"
+    strcpy(saveDir, data_dir);   // "savegame.dat"
 
     Core::width = PAPP_OL_WIDTH;
     Core::height = PAPP_OL_HEIGHT;
     GAPI::swColor = papp_video_back();
     GAPI::resize();
 
-    papp_svc->log_printf("OL: starting the engine, data in %s\n", PAPP_OL_DATA_DIR);
+    papp_svc->log_printf("OL: starting the engine, data in %s\n", contentDir);
     Game::init((const char *)NULL);
     if (Core::isQuit) {
         papp_svc->log_printf("OL: the engine could not load its first level\n");

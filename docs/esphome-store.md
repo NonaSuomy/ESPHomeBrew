@@ -60,7 +60,25 @@ With `library_style: grid` the library becomes an app store, like the Switch Hom
 - **Grid.** Each app is a tile with its icon, title, version and download size (the PAPP plus its data). A green tick marks an installed app; an amber arrow marks one with a newer version in the store. Apps without a listing get a coloured tile with their initials.
 - **Detail page.** Tap a tile, or press **A**, to open it: a large icon, the author, version, category and licence, the PAPP size and data size, the about text, the controls, the original project the port is based on (e.g. PrBoom 2.5.0), and the repo and commit it is built from.
 - **Buttons.** **Stream** runs the app straight from the network, as the list does. **Install** downloads the `.papp` (checked against its sha256) and its data into `install_dir` and saves its listing next to it, so the app appears in a folder source such as `SD / USB` and runs offline. An installed app shows **Launch**, plus **Update to vX** when the store has a newer version. **Back** closes the page.
-- **Controls.** The d-pad moves between tiles and buttons, **A** opens or presses, **B** goes back, and **L/R** switch sources. Touch works on everything.
+- **Controls.** The d-pad moves between tiles and buttons, **A** opens or presses, **B** goes back, **L/R** switch sources and **Select** opens the side menu. Touch works on everything.
+- **Side menu.** A tab on the right edge of the library page slides out a menu for the source on screen: its name, where it reads from, how many apps it has, **Refresh**, and any buttons you give that source:
+
+  ```yaml
+  catalogs:
+    - name: Storage
+      url: /sd/roms/papp/
+      actions:
+        - label: Mount SD
+          then:
+            - script.execute: sd_mount
+        - label: Eject SD
+          then:
+            - script.execute: sd_eject
+    - name: GitHub
+      url: https://nonasuomy.github.io/papp-conversions/
+  ```
+
+  Up to six buttons per source, each running any ESPHome actions. The menu starts parked, so the grid can use the whole page width: give the list (`set_catalog_container`) the full width and leave the right edge free for the tab (34 px).
 - **Listings** come from the `.json` file next to each `.papp` (`psram_doom-0.1.1.json`; see [building.md](building.md#store-listing-optional)). The GitHub store publishes them. For a LAN server or an SD folder, copy the `.json` next to the `.papp`. They load in the background after the list: tiles appear at once and their icons fill in.
 - The icons are drawn as plain LVGL objects, so no extra LVGL widgets are needed. Larger title text and smaller detail text are used when the config has those Montserrat sizes (e.g. `montserrat_28` and `montserrat_16`); otherwise everything uses the default font.
 

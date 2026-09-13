@@ -507,6 +507,8 @@ void PappLoader::store_tile_event_cb_(lv_event_t *event) {
   if (context == nullptr)
     return;
   if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+    // A tap moves the d-pad selection too, so only one tile is ever highlighted.
+    context->loader->set_catalog_selection_(static_cast<uint16_t>(context->index));
     context->loader->open_detail_(context->index);
   } else if (lv_event_get_code(event) == LV_EVENT_DELETE) {
     delete context;
@@ -551,6 +553,7 @@ void PappLoader::build_store_grid_() {
     lv_obj_set_style_border_width(tile, 3, LV_STATE_FOCUSED);
     lv_obj_set_style_bg_color(tile, lv_color_hex(0x172544), LV_STATE_PRESSED);
     lv_obj_add_flag(tile, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(tile, LV_OBJ_FLAG_CLICK_FOCUSABLE);  // focus follows the selection only
     lv_obj_add_event_cb(tile, store_tile_event_cb_, LV_EVENT_ALL, new TileContext{this, static_cast<int>(i)});  // NOLINT
 
     lv_obj_t *icon = plain_box(tile);
@@ -689,6 +692,7 @@ void PappLoader::open_detail_(int index) {
     lv_obj_set_style_border_width(button, 3, LV_STATE_FOCUSED);
     lv_obj_set_style_bg_color(button, lv_color_hex(primary ? 0x0284C7 : 0x334155), LV_STATE_PRESSED);
     lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(button, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_t *label = text_label(button, buttons[i].second, 0xFFFFFF);
     lv_obj_center(label);
     lv_obj_add_event_cb(button, store_button_event_cb_, LV_EVENT_ALL, new DetailButtonContext{this, buttons[i].first});  // NOLINT
@@ -833,7 +837,7 @@ void PappLoader::run_detail_action_(uint8_t action) {
 
 // Returns true when the store view handled the input.
 bool PappLoader::handle_store_controls_(uint8_t newly_pressed, bool a_pressed, bool b_pressed, bool l_pressed,
-                                        bool r_pressed) {
+                                        bool r_pressed, bool select_pressed) {
   const bool up = newly_pressed & (1U << 0), right = newly_pressed & (1U << 1), down = newly_pressed & (1U << 2),
              left = newly_pressed & (1U << 3);
   if (this->detail_panel_ != nullptr) {
@@ -849,6 +853,21 @@ bool PappLoader::handle_store_controls_(uint8_t newly_pressed, bool a_pressed, b
   }
   if (!this->store_ui_)
     return false;
+  if (select_pressed) {
+    this->toggle_side_menu();
+    return true;
+  }
+  if (this->side_menu_open_ && this->drawer_ != nullptr && !l_pressed && !r_pressed) {
+    if (up && this->drawer_focus_ > 0)
+      this->focus_drawer_button_(this->drawer_focus_ - 1);
+    else if (down)
+      this->focus_drawer_button_(this->drawer_focus_ + 1);
+    if (a_pressed && this->drawer_focus_ < this->drawer_actions_.size())
+      this->run_drawer_action_(this->drawer_actions_[this->drawer_focus_]);
+    else if (b_pressed || right)
+      this->set_side_menu(false);
+    return true;
+  }
   if (l_pressed || r_pressed) {
     this->next_catalog(r_pressed ? 1 : -1);
     return true;
@@ -874,7 +893,197 @@ bool PappLoader::handle_store_controls_(uint8_t newly_pressed, bool a_pressed, b
   return true;
 }
 
+// ── Side menu ───────────────────────────────────────────────────────────────
+
+static constexpr int32_t DRAWER_W = 300;
+static constexpr int32_t DRAWER_TAB = 34;
+static constexpr int DRAWER_TOGGLE = -2;
+static constexpr int DRAWER_REFRESH = -1;
+
+struct DrawerContext {
+  PappLoader *loader;
+  int action;
+};
+
+// The drawer's x on its screen: parked with only the tab showing, or open.
+// It sits over the screen's padding so it reaches the edge.
+static int32_t drawer_x(lv_obj_t *drawer, bool open) {
+  lv_obj_t *screen = lv_obj_get_parent(drawer);
+  return lv_obj_get_content_width(screen) + lv_obj_get_style_pad_right(screen, LV_PART_MAIN) -
+         (open ? DRAWER_W : DRAWER_TAB);
+}
+
+static void slide_drawer(lv_obj_t *drawer, int32_t to) {
+  lv_anim_delete(drawer, nullptr);
+  lv_anim_t anim;
+  lv_anim_init(&anim);
+  lv_anim_set_var(&anim, drawer);
+  lv_anim_set_values(&anim, lv_obj_get_x(drawer), to);
+  lv_anim_set_duration(&anim, 200);
+  lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+  lv_anim_set_exec_cb(&anim, [](void *obj, int32_t x) { lv_obj_set_x(static_cast<lv_obj_t *>(obj), x); });
+  lv_anim_start(&anim);
+}
+
+void PappLoader::store_drawer_event_cb_(lv_event_t *event) {
+  auto *context = static_cast<DrawerContext *>(lv_event_get_user_data(event));
+  if (context == nullptr)
+    return;
+  if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+    if (context->action == DRAWER_TOGGLE)
+      context->loader->toggle_side_menu();
+    else
+      context->loader->run_drawer_action_(context->action);
+  } else if (lv_event_get_code(event) == LV_EVENT_DELETE) {
+    delete context;
+  }
+}
+
+void PappLoader::build_drawer_() {
+  if (this->drawer_ != nullptr) {
+    lv_obj_add_flag(this->drawer_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_delete_async(this->drawer_);
+    this->drawer_ = nullptr;
+  }
+  this->drawer_buttons_.clear();
+  this->drawer_actions_.clear();
+  if (!this->store_ui_ || this->catalog_container_ == nullptr)
+    return;
+  lv_obj_t *screen = lv_obj_get_screen(this->catalog_container_);
+  lv_obj_t *drawer = plain_box(screen);
+  lv_obj_add_flag(drawer, LV_OBJ_FLAG_FLOATING);  // not moved by scrolling or layouts
+  lv_obj_set_size(drawer, DRAWER_W, lv_obj_get_height(screen));
+  lv_obj_set_y(drawer, -lv_obj_get_style_pad_top(screen, LV_PART_MAIN));
+  lv_obj_set_style_bg_opa(drawer, LV_OPA_TRANSP, 0);
+  this->drawer_ = drawer;
+  lv_obj_set_x(drawer, drawer_x(drawer, this->side_menu_open_));
+
+  // The panel: the source's name and where it reads from, then its buttons.
+  const int32_t panel_w = DRAWER_W - DRAWER_TAB + 8;
+  lv_obj_t *panel = plain_box(drawer);
+  lv_obj_set_size(panel, panel_w, lv_pct(100));
+  lv_obj_set_x(panel, DRAWER_TAB - 8);
+  lv_obj_set_style_bg_color(panel, lv_color_hex(COLOR_TILE), 0);
+  lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(panel, 1, 0);
+  lv_obj_set_style_border_side(panel, LV_BORDER_SIDE_LEFT, 0);
+  lv_obj_set_style_border_color(panel, lv_color_hex(COLOR_TILE_BORDER), 0);
+  lv_obj_set_style_pad_all(panel, 20, 0);
+
+  const CatalogSource *source = this->catalogs_.empty() ? nullptr : &this->catalogs_[this->catalog_index_];
+  const int32_t inner = panel_w - 40;
+  lv_obj_t *title = text_label(panel, source != nullptr ? source->name : std::string("Library"), COLOR_ACCENT);
+  set_font(title, title_font());
+  one_line(title, inner);
+  char count[32];
+  std::snprintf(count, sizeof(count), "%u app(s)", static_cast<unsigned>(this->catalog_entries_.size()));
+  lv_obj_t *where = text_label(panel, (source != nullptr ? source->url : this->catalog_url_) + "\n" + count, COLOR_MUTED);
+  set_font(where, small_font());
+  lv_obj_set_width(where, inner);
+  lv_label_set_long_mode(where, LV_LABEL_LONG_WRAP);
+  lv_obj_align_to(where, title, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 6);
+  lv_obj_update_layout(panel);
+  int32_t y = lv_obj_get_y2(where) + 20;
+
+  std::vector<std::pair<int, std::string>> buttons;
+  buttons.emplace_back(DRAWER_REFRESH, LV_SYMBOL_REFRESH "  Refresh");
+  if (source != nullptr) {
+    for (size_t i = 0; i < source->actions.size(); i++)
+      buttons.emplace_back(static_cast<int>(i), source->actions[i].first);
+  }
+  for (const auto &item : buttons) {
+    lv_obj_t *button = plain_box(panel);
+    lv_obj_set_size(button, inner, 52);
+    lv_obj_set_pos(button, 0, y);
+    y += 62;
+    lv_obj_set_style_radius(button, 14, 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x0EA5E9), 0);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x0284C7), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(button, lv_color_hex(0xFFFFFF), LV_STATE_FOCUSED);
+    lv_obj_set_style_border_width(button, 3, LV_STATE_FOCUSED);
+    lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(button, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    lv_obj_t *label = text_label(button, item.second, 0xFFFFFF);
+    one_line(label, inner - 16);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(label);
+    lv_obj_add_event_cb(button, store_drawer_event_cb_, LV_EVENT_ALL, new DrawerContext{this, item.first});  // NOLINT
+    this->drawer_buttons_.push_back(button);
+    this->drawer_actions_.push_back(item.first);
+  }
+  lv_obj_t *hint = text_label(panel, "Select: open / close", COLOR_MUTED);
+  set_font(hint, small_font());
+  lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+
+  // The tab: a strip down the left edge, all that shows while parked. Created
+  // last so it is on top of the panel's edge.
+  lv_obj_t *strip = plain_box(drawer);
+  lv_obj_set_size(strip, DRAWER_TAB, lv_pct(100));
+  lv_obj_set_style_bg_opa(strip, LV_OPA_TRANSP, 0);
+  lv_obj_add_flag(strip, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_remove_flag(strip, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+  lv_obj_add_event_cb(strip, store_drawer_event_cb_, LV_EVENT_ALL, new DrawerContext{this, DRAWER_TOGGLE});  // NOLINT
+  lv_obj_t *pill = plain_box(strip);
+  lv_obj_set_size(pill, DRAWER_TAB, 96);
+  lv_obj_align(pill, LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_set_style_radius(pill, 12, 0);
+  lv_obj_set_style_bg_color(pill, lv_color_hex(0x1E293B), 0);
+  lv_obj_set_style_bg_opa(pill, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(pill, 1, 0);
+  lv_obj_set_style_border_color(pill, lv_color_hex(COLOR_ACCENT), 0);
+  lv_obj_remove_flag(pill, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_t *arrow = text_label(pill, this->side_menu_open_ ? LV_SYMBOL_RIGHT : LV_SYMBOL_LEFT, COLOR_ACCENT);
+  lv_obj_center(arrow);
+
+  if (this->side_menu_open_)
+    this->focus_drawer_button_(this->drawer_focus_);
+}
+
+void PappLoader::focus_drawer_button_(uint8_t index) {
+  if (this->drawer_buttons_.empty())
+    return;
+  index = std::min<uint8_t>(index, static_cast<uint8_t>(this->drawer_buttons_.size() - 1));
+  for (lv_obj_t *button : this->drawer_buttons_)
+    lv_obj_remove_state(button, LV_STATE_FOCUSED);
+  lv_obj_add_state(this->drawer_buttons_[index], LV_STATE_FOCUSED);
+  this->drawer_focus_ = index;
+}
+
+void PappLoader::run_drawer_action_(int action) {
+  if (action == DRAWER_REFRESH) {
+    this->refresh_catalog();
+    return;
+  }
+  if (this->catalogs_.empty())
+    return;
+  const auto &actions = this->catalogs_[this->catalog_index_].actions;
+  if (action >= 0 && static_cast<size_t>(action) < actions.size() && actions[action].second != nullptr)
+    actions[action].second->trigger();
+}
+
 #endif  // PAPP_LOADER_USE_LVGL
+
+void PappLoader::set_side_menu(bool open) {
+  this->side_menu_open_ = open;
+#ifdef PAPP_LOADER_USE_LVGL
+  if (this->drawer_ == nullptr)
+    return;
+  slide_drawer(this->drawer_, drawer_x(this->drawer_, open));
+  // The tab strip is the drawer's last child: strip -> pill -> arrow.
+  lv_obj_t *strip = lv_obj_get_child(this->drawer_, -1);
+  lv_obj_t *pill = strip != nullptr ? lv_obj_get_child(strip, 0) : nullptr;
+  lv_obj_t *arrow = pill != nullptr ? lv_obj_get_child(pill, 0) : nullptr;
+  if (arrow != nullptr)
+    lv_label_set_text(arrow, open ? LV_SYMBOL_RIGHT : LV_SYMBOL_LEFT);
+  if (open) {
+    this->focus_drawer_button_(0);
+  } else {
+    for (lv_obj_t *button : this->drawer_buttons_)
+      lv_obj_remove_state(button, LV_STATE_FOCUSED);
+  }
+#endif
+}
 
 }  // namespace papp_loader
 }  // namespace esphome

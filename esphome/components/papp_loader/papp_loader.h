@@ -27,6 +27,9 @@
 namespace esphome {
 namespace papp_loader {
 
+// A button in a library source's side menu (YAML catalogs: actions:).
+class CatalogActionTrigger : public Trigger<> {};
+
 class PappLoader : public Component {
  public:
   static constexpr uint8_t BUTTON_COUNT = PAPP_INPUT_MAX;
@@ -44,7 +47,6 @@ class PappLoader : public Component {
   void select_catalog_index(size_t index);
   // Step through the catalogs: +1 next, -1 previous (wraps around).
   void next_catalog(int step = 1);
-  // The catalog shown first (YAML `default_catalog`); set before setup().
   // ESPHOMEBREW store view (YAML `library_style: grid`): the library shows
   // icon tiles instead of a list, and tapping an app opens its detail page
   // (about, controls, sizes, Stream / Install / Launch / Update). App info
@@ -52,6 +54,15 @@ class PappLoader : public Component {
   void set_store_ui(bool enabled) { this->store_ui_ = enabled; }
   // Where Install puts apps (as <name>.papp plus its <name>.json).
   void set_install_dir(const std::string &dir) { this->install_dir_ = dir; }
+  // The store view's side menu, which slides out from the right edge: Refresh
+  // plus these buttons for the source on screen (YAML `actions:` of a catalog).
+  void add_catalog_action(size_t catalog, const std::string &label, Trigger<> *trigger) {
+    if (catalog < this->catalogs_.size())
+      this->catalogs_[catalog].actions.emplace_back(label, trigger);
+  }
+  void set_side_menu(bool open);
+  void toggle_side_menu() { this->set_side_menu(!this->side_menu_open_); }
+  // The catalog shown first (YAML `default_catalog`); set before setup().
   void set_initial_catalog(size_t index) {
     if (index < this->catalogs_.size()) {
       this->catalog_index_ = index;
@@ -436,7 +447,9 @@ class PappLoader : public Component {
   struct CatalogSource {
     std::string name;
     std::string url;
+    std::vector<std::pair<std::string, Trigger<> *>> actions;
   };
+  bool side_menu_open_{false};
   std::vector<CatalogSource> catalogs_;
   size_t catalog_index_{0};
   // The URL the running fetch is for: a switch mid-fetch refetches afterwards.
@@ -529,6 +542,16 @@ class PappLoader : public Component {
   uint8_t detail_focus_{0};
   int detail_index_{-1};
   std::string detail_url_;  // reopened after the grid is rebuilt, if still listed
+  // Side menu: a panel on the library page, parked off the right edge with its tab showing.
+  lv_obj_t *drawer_{nullptr};
+  std::vector<lv_obj_t *> drawer_buttons_;
+  std::vector<int> drawer_actions_;  // -1 = Refresh, else an index into the source's actions
+  uint8_t drawer_focus_{0};
+  bool launcher_select_state_{false};
+  void build_drawer_();
+  void focus_drawer_button_(uint8_t index);
+  void run_drawer_action_(int action);
+  static void store_drawer_event_cb_(lv_event_t *event);
   static void store_tile_event_cb_(lv_event_t *event);
   static void store_button_event_cb_(lv_event_t *event);
   static void release_icon_(AppIcon *icon);
@@ -539,7 +562,8 @@ class PappLoader : public Component {
   void close_detail_();
   void focus_detail_button_(uint8_t index);
   void run_detail_action_(uint8_t action);
-  bool handle_store_controls_(uint8_t newly_pressed, bool a_pressed, bool b_pressed, bool l_pressed, bool r_pressed);
+  bool handle_store_controls_(uint8_t newly_pressed, bool a_pressed, bool b_pressed, bool l_pressed, bool r_pressed,
+                              bool select_pressed);
 #endif
 };
 

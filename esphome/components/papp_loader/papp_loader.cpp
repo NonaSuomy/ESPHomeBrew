@@ -436,6 +436,41 @@ void PappLoader::take_menu_shot_() {
       std::memcpy(pixels + y * w, shot->data + y * stride, w * sizeof(uint16_t));
   }
   lv_draw_buf_destroy(shot);
+  // What the top layer shows (a store detail page, the progress panel) is not
+  // part of the screen: blend each visible child on top.
+  lv_obj_t *top = lv_layer_top();
+  for (uint32_t i = 0; pixels != nullptr && top != nullptr && i < lv_obj_get_child_count(top); i++) {
+    lv_obj_t *child = lv_obj_get_child(top, static_cast<int32_t>(i));
+    if (child == nullptr || lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN))
+      continue;
+    lv_draw_buf_t *layer = lv_snapshot_take(child, LV_COLOR_FORMAT_ARGB8888);
+    if (layer == nullptr)
+      continue;
+    lv_area_t area;
+    lv_obj_get_coords(child, &area);
+    // The snapshot is the object plus its extra draw area on every side.
+    const int32_t x0 = area.x1 - (static_cast<int32_t>(layer->header.w) - lv_area_get_width(&area)) / 2;
+    const int32_t y0 = area.y1 - (static_cast<int32_t>(layer->header.h) - lv_area_get_height(&area)) / 2;
+    for (int32_t y = 0; y < static_cast<int32_t>(layer->header.h); y++) {
+      const int32_t sy = y0 + y;
+      if (sy < 0 || sy >= static_cast<int32_t>(h))
+        continue;
+      const uint8_t *src = layer->data + y * layer->header.stride;
+      for (int32_t x = 0; x < static_cast<int32_t>(layer->header.w); x++) {
+        const int32_t sx = x0 + x;
+        const uint8_t *p = src + x * 4;  // B, G, R, A
+        const uint32_t a = p[3];
+        if (sx < 0 || sx >= static_cast<int32_t>(w) || a == 0)
+          continue;
+        uint16_t &d = pixels[sy * w + sx];
+        const uint32_t dr = (d >> 8) & 0xF8, dg = (d >> 3) & 0xFC, db = (d << 3) & 0xF8;
+        const uint32_t r = (p[2] * a + dr * (255 - a)) / 255, g = (p[1] * a + dg * (255 - a)) / 255,
+                       b = (p[0] * a + db * (255 - a)) / 255;
+        d = static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+      }
+    }
+    lv_draw_buf_destroy(layer);
+  }
   this->menu_shot_ = pixels;
   this->menu_shot_w_ = pixels != nullptr ? static_cast<uint16_t>(w) : 0;
   this->menu_shot_h_ = pixels != nullptr ? static_cast<uint16_t>(h) : 0;
@@ -1167,14 +1202,16 @@ void PappLoader::handle_launcher_controls_() {
   const bool b = pressed(PAPP_INPUT_B);
   const bool l = pressed(PAPP_INPUT_L);
   const bool r = pressed(PAPP_INPUT_R);
+  const bool select = pressed(PAPP_INPUT_SELECT);
   const bool touch = this->touch_button_ != nullptr && this->touch_button_->get_state();
-  const bool active = direction != 0 || a || b || l || r || touch;
+  const bool active = direction != 0 || a || b || l || r || select || touch;
   auto remember = [&]() {
     this->launcher_direction_state_ = direction;
     this->launcher_a_state_ = a;
     this->launcher_b_state_ = b;
     this->launcher_l_state_ = l;
     this->launcher_r_state_ = r;
+    this->launcher_select_state_ = select;
     this->launcher_touch_state_ = touch;
   };
 
@@ -1191,10 +1228,11 @@ void PappLoader::handle_launcher_controls_() {
 
   const uint8_t newly_pressed = direction & static_cast<uint8_t>(~this->launcher_direction_state_);
   if (this->store_ui_) {
-    // Grid and detail page: d-pad moves, A opens / presses, B goes back, L/R switch sources.
+    // Grid and detail page: d-pad moves, A opens / presses, B goes back, L/R switch
+    // sources, Select opens the side menu.
     this->handle_store_controls_(newly_pressed, (a && !this->launcher_a_state_) || (touch && !this->launcher_touch_state_),
                                  b && !this->launcher_b_state_, l && !this->launcher_l_state_,
-                                 r && !this->launcher_r_state_);
+                                 r && !this->launcher_r_state_, select && !this->launcher_select_state_);
     remember();
     return;
   }
@@ -1266,6 +1304,7 @@ void PappLoader::update_catalog_ui_() {
       lv_obj_set_style_text_color(header, lv_color_hex(0xE2E8F0), 0);
       lv_obj_set_style_border_color(header, lv_color_hex(0x1E2A44), 0);
     }
+    this->build_drawer_();  // this source's side menu, even when it lists nothing
   }
   if (this->catalog_entries_.empty()) {
     lv_list_add_text(this->catalog_container_, this->catalog_loading_ ? "Loading..." : "No .papp files found");

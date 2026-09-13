@@ -708,13 +708,23 @@ void PappLoader::open_detail_(int index) {
   lv_obj_set_pos(name, text_x, margin - 4);
   one_line(name, text_w);
 
-  std::string meta;
-  auto add = [&meta](const std::string &part) {
+  // Who made it, the facts, then the sizes, each under the one before.
+  lv_obj_t *last = name;
+  auto line_below = [&last, panel, text_w](const std::string &text, uint32_t color, int32_t gap) {
+    lv_obj_t *label = text_label(panel, text, color);
+    lv_obj_set_width(label, text_w);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_align_to(label, last, LV_ALIGN_OUT_BOTTOM_LEFT, 0, gap);
+    last = label;
+  };
+  if (info != nullptr && !info->author.empty())
+    line_below("by " + info->author, COLOR_MUTED, 8);
+  std::string facts;
+  auto add = [&facts](const std::string &part) {
     if (!part.empty())
-      meta += (meta.empty() ? "" : "   |   ") + part;
+      facts += (facts.empty() ? "" : "   |   ") + part;
   };
   if (info != nullptr) {
-    add(info->author.empty() ? "" : "by " + info->author);
     add(info->version.empty() ? "" : "v" + info->version);
     add(info->category);
     add(info->license);
@@ -722,46 +732,18 @@ void PappLoader::open_detail_(int index) {
   add(!have.empty() ? (info != nullptr && !info->version.empty() && have != info->version ? "installed v" + have
                                                                                           : "installed")
                     : "");
-  lv_obj_t *meta_label = text_label(panel, meta.empty() ? (remote ? "Streams from the network" : url) : meta, COLOR_MUTED);
-  lv_obj_set_width(meta_label, text_w);
-  lv_label_set_long_mode(meta_label, LV_LABEL_LONG_WRAP);
-  lv_obj_align_to(meta_label, name, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 8);
-  lv_obj_t *last = meta_label;
-
-  std::string sizes;
+  if (info == nullptr)
+    add(remote ? "Streams from the network" : url);
+  if (!facts.empty())
+    line_below(facts, COLOR_MUTED, 4);
   if (info != nullptr && info->size > 0) {
-    sizes = "PAPP " + size_text(info->size);
+    std::string sizes = "PAPP " + size_text(info->size);
     if (info->data_size > 0)
       sizes += "   +   data " + size_text(info->data_size) + "   =   " + size_text(info->size + info->data_size);
-  }
-  if (!sizes.empty()) {
-    lv_obj_t *size_label = text_label(panel, sizes, COLOR_ACCENT);
-    lv_obj_align_to(size_label, meta_label, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 10);
-    last = size_label;
+    line_below(sizes, COLOR_ACCENT, 10);
   }
 
-  // Scrollable body: about, controls, source, changelog.
-  std::string body;
-  if (info != nullptr && !info->about.empty())
-    body += info->about + "\n\n";
-  if (info != nullptr && !info->controls.empty()) {
-    body += "Controls\n";
-    for (const auto &line : info->controls)
-      body += "  -  " + line + "\n";  // the built-in fonts are ASCII plus symbols
-    body += "\n";
-  }
-  if (info != nullptr && (!info->upstream.empty() || !info->source.empty())) {
-    body += "Source\n";
-    if (!info->upstream.empty())
-      body += "  Based on " + info->upstream + "\n";
-    if (!info->source.empty())
-      body += "  Built from " + info->source + "\n";
-    body += "\n";
-  }
-  if (info != nullptr && !info->changelog.empty())
-    body += "What's new\n" + info->changelog + "\n";
-  if (body.empty())
-    body = "No listing for this app yet.\n\n" + url;
+  // Scrollable body: about, then headed sections for controls, source and changelog.
   lv_obj_t *scroller = plain_box(panel);
   lv_obj_set_style_bg_opa(scroller, LV_OPA_TRANSP, 0);
   lv_obj_update_layout(panel);
@@ -769,9 +751,37 @@ void PappLoader::open_detail_(int index) {
   lv_obj_set_pos(scroller, text_x, body_y);
   lv_obj_set_size(scroller, text_w, screen_h - body_y - margin);
   lv_obj_add_flag(scroller, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_t *body_label = text_label(scroller, body, COLOR_TEXT);
-  lv_obj_set_width(body_label, text_w - 12);
-  lv_label_set_long_mode(body_label, LV_LABEL_LONG_WRAP);
+  lv_obj_t *below = nullptr;
+  auto block = [&below, scroller, text_w](const std::string &text, uint32_t color, int32_t gap) {
+    lv_obj_t *label = text_label(scroller, text, color);
+    lv_obj_set_width(label, text_w - 12);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    if (below != nullptr)
+      lv_obj_align_to(label, below, LV_ALIGN_OUT_BOTTOM_LEFT, 0, gap);
+    below = label;
+  };
+  auto section = [&block](const char *heading, const std::string &text) {
+    block(heading, COLOR_ACCENT, 18);
+    block(text, COLOR_TEXT, 4);
+  };
+  if (info != nullptr && !info->about.empty())
+    block(info->about, COLOR_TEXT, 0);
+  if (info != nullptr && !info->controls.empty()) {
+    std::string lines;
+    for (const auto &line : info->controls)
+      lines += (lines.empty() ? "" : "\n") + line;
+    section("Controls", lines);
+  }
+  if (info != nullptr && (!info->upstream.empty() || !info->source.empty())) {
+    std::string lines = info->upstream.empty() ? "" : "Based on " + info->upstream;
+    if (!info->source.empty())
+      lines += (lines.empty() ? "" : "\n") + std::string("Built from ") + info->source;
+    section("Source", lines);
+  }
+  if (info != nullptr && !info->changelog.empty())
+    section("What's new", info->changelog);
+  if (below == nullptr)
+    block("No listing for this app yet.\n\n" + url, COLOR_MUTED, 0);
 
   this->focus_detail_button_(0);
   this->progress_ui_screen_ = nullptr;  // progress moves to the loader's panel, above this page

@@ -1,13 +1,13 @@
 {
   "name": "psram_redalert",
   "title": "Red Alert (work in progress)",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Command & Conquer: Red Alert (Vanilla Conquer) as a PAPP. Work in progress: reaches the menu, with music and touch; missions are being fixed. Needs your own REDALERT.MIX and MAIN.MIX (from the freeware release or your CDs) in /sd/roms/redalert/.",
   "dev_build": true,
   "build": "custom",
   "source": {
-    "repo": "https://github.com/TheAssemblyArmada/Vanilla-Conquer",
-    "ref": "ce83b59edd99cccac6cebaae054ca04962c744b7",
+    "repo": "https://github.com/NonaSuomy/Vanilla-Conquer",
+    "ref": "bcce972e66b95b86a6dfd7e17697ca296bc66486",
     "path": "redalert"
   },
   "patches": [
@@ -322,6 +322,7 @@
         "wsa.cpp",
         "wsproto.cpp",
         "wspudp.cpp",
+        "wsptcp.cpp",
         "wwkeyboard.cpp",
         "wwmouse.cpp",
         "xordelta.cpp",

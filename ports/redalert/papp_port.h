@@ -46,7 +46,7 @@ void papp_video_shutdown(void);
 // Sockets (papp_net.cpp) use descriptors PAPP_SOCKET_FD_BASE.. so close()
 // can tell them from files; they must stay below newlib's FD_SETSIZE (64).
 #define PAPP_SOCKET_FD_BASE 40
-#define PAPP_SOCKET_FD_COUNT 8
+#define PAPP_SOCKET_FD_COUNT 16 // a TCP game: listener, up to 7 peers, discovery socket
 int papp_socket_close(int fd);
 
 // Microseconds since boot.

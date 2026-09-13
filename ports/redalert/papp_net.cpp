@@ -1,7 +1,9 @@
-// BSD sockets for the Red Alert PAPP, just enough for Vanilla Conquer's LAN
-// play (common/wspudp.cpp: IPX packets over UDP broadcast). Each socket is a
-// loader UDP handle (net_udp_*); descriptors 40..47 keep them apart from files
-// and inside newlib's FD_SETSIZE for select().
+// BSD sockets for the Red Alert PAPP, just enough for Vanilla Conquer's network
+// play: common/wspudp.cpp (IPX packets over UDP broadcast) and the optional
+// common/wsptcp.cpp (framed packets over TCP, for other subnets and the
+// internet). Each socket is a loader handle (net_udp_* / net_tcp_*);
+// descriptors 40..55 keep them apart from files and inside newlib's
+// FD_SETSIZE for select().
 #include "papp_port.h"
 
 #include <arpa/inet.h>
@@ -9,6 +11,7 @@
 #include <ifaddrs.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -26,7 +29,9 @@ enum
 struct Socket
 {
     bool used;
-    int handle;        // loader handle, -1 until bound
+    int handle;        // loader handle, -1 until bound (UDP) or listening/connecting (TCP)
+    bool stream;       // TCP
+    uint16_t port;     // TCP: port from bind(), used by listen()
     bool broadcast;
     bool pending;      // a datagram taken by select() and not yet read
     int pending_len;
@@ -59,6 +64,36 @@ static bool net_available()
     return papp_svc->net_udp_open != nullptr; // an older loader has no network
 }
 
+static bool tcp_available()
+{
+    return papp_svc->net_tcp_connect != nullptr && papp_svc->net_poll != nullptr; // loaders before TCP
+}
+
+static int new_socket(bool stream)
+{
+    for (int i = 0; i < SOCKET_COUNT; i++) {
+        if (!s_sockets[i].used) {
+            memset(&s_sockets[i], 0, sizeof(s_sockets[i]));
+            s_sockets[i].used = true;
+            s_sockets[i].handle = -1;
+            s_sockets[i].stream = stream;
+            return SOCKET_FD_BASE + i;
+        }
+    }
+    errno = EMFILE;
+    return -1;
+}
+
+// net_poll bits for a TCP socket: 1 readable, 2 writable, 4 failed.
+static int tcp_poll(const Socket* s)
+{
+    if (s->handle < 0) {
+        return 0;
+    }
+    const int bits = papp_svc->net_poll(s->handle);
+    return bits < 0 ? 4 : bits;
+}
+
 // Bind on first use: VC binds explicitly, but a send before bind must work too.
 static bool ensure_open(Socket* s, uint16_t port)
 {
@@ -87,20 +122,12 @@ extern "C" {
 int socket(int domain, int type, int protocol)
 {
     (void)protocol;
-    if (!net_available() || domain != AF_INET || type != SOCK_DGRAM) {
+    const bool stream = type == SOCK_STREAM;
+    if (!net_available() || domain != AF_INET || (type != SOCK_DGRAM && !(stream && tcp_available()))) {
         errno = EAFNOSUPPORT;
         return -1;
     }
-    for (int i = 0; i < SOCKET_COUNT; i++) {
-        if (!s_sockets[i].used) {
-            memset(&s_sockets[i], 0, sizeof(s_sockets[i]));
-            s_sockets[i].used = true;
-            s_sockets[i].handle = -1;
-            return SOCKET_FD_BASE + i;
-        }
-    }
-    errno = EMFILE;
-    return -1;
+    return new_socket(stream);
 }
 
 int bind(int fd, const struct sockaddr* addr, socklen_t len)
@@ -111,11 +138,140 @@ int bind(int fd, const struct sockaddr* addr, socklen_t len)
         return -1;
     }
     const sockaddr_in* in = reinterpret_cast<const sockaddr_in*>(addr);
+    if (s->stream) {
+        // TCP: the loader binds when listen() opens the listener.
+        if (s->handle >= 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        s->port = ntohs(in->sin_port);
+        return 0;
+    }
     if (s->handle >= 0 || !ensure_open(s, ntohs(in->sin_port))) {
         errno = EADDRINUSE;
         return -1;
     }
     return 0;
+}
+
+int listen(int fd, int backlog)
+{
+    (void)backlog;
+    Socket* s = socket_of(fd);
+    if (s == nullptr || !s->stream || s->handle >= 0) {
+        errno = s == nullptr ? EBADF : EINVAL;
+        return -1;
+    }
+    s->handle = papp_svc->net_tcp_listen(s->port);
+    if (s->handle < 0) {
+        errno = EADDRINUSE;
+        return -1;
+    }
+    return 0;
+}
+
+int accept(int fd, struct sockaddr* addr, socklen_t* len)
+{
+    Socket* s = socket_of(fd);
+    if (s == nullptr || !s->stream || s->handle < 0) {
+        errno = s == nullptr ? EBADF : EINVAL;
+        return -1;
+    }
+    uint32_t ip = 0;
+    uint16_t port = 0;
+    const int handle = papp_svc->net_tcp_accept(s->handle, &ip, &port);
+    if (handle == -2) {
+        errno = EWOULDBLOCK;
+        return -1;
+    }
+    if (handle < 0) {
+        errno = ECONNABORTED;
+        return -1;
+    }
+    const int client = new_socket(true);
+    if (client < 0) {
+        papp_svc->net_udp_close(handle); // closes any loader handle
+        return -1;
+    }
+    socket_of(client)->handle = handle;
+    if (addr != nullptr && len != nullptr && *len >= sizeof(sockaddr_in)) {
+        sockaddr_in* in = reinterpret_cast<sockaddr_in*>(addr);
+        memset(in, 0, sizeof(*in));
+        in->sin_family = AF_INET;
+        in->sin_port = htons(port);
+        in->sin_addr.s_addr = htonl(ip);
+        *len = sizeof(sockaddr_in);
+    }
+    return client;
+}
+
+// Always non-blocking: returns EINPROGRESS, and select() reports the socket
+// writable (with SO_ERROR set on failure) once the connection is decided.
+int connect(int fd, const struct sockaddr* addr, socklen_t len)
+{
+    Socket* s = socket_of(fd);
+    if (s == nullptr || !s->stream || addr == nullptr || len < sizeof(sockaddr_in)) {
+        errno = s == nullptr ? EBADF : EINVAL;
+        return -1;
+    }
+    if (s->handle >= 0) {
+        errno = EISCONN;
+        return -1;
+    }
+    const sockaddr_in* in = reinterpret_cast<const sockaddr_in*>(addr);
+    s->handle = papp_svc->net_tcp_connect(ntohl(in->sin_addr.s_addr), ntohs(in->sin_port));
+    if (s->handle < 0) {
+        errno = ECONNREFUSED;
+        return -1;
+    }
+    errno = EINPROGRESS;
+    return -1;
+}
+
+ssize_t send(int fd, const void* buf, size_t len, int flags)
+{
+    (void)flags;
+    Socket* s = socket_of(fd);
+    if (s == nullptr || !s->stream) {
+        errno = s == nullptr ? EBADF : EDESTADDRREQ;
+        return -1;
+    }
+    if (s->handle < 0) {
+        errno = ENOTCONN;
+        return -1;
+    }
+    const int sent = papp_svc->net_tcp_send(s->handle, buf, (int)len);
+    if (sent == 0 && len != 0) {
+        errno = EWOULDBLOCK;
+        return -1;
+    }
+    if (sent < 0) {
+        errno = EPIPE;
+        return -1;
+    }
+    return sent;
+}
+
+ssize_t recv(int fd, void* buf, size_t len, int flags)
+{
+    Socket* s = socket_of(fd);
+    if (s != nullptr && !s->stream) {
+        return recvfrom(fd, buf, len, flags, nullptr, nullptr);
+    }
+    if (s == nullptr || s->handle < 0) {
+        errno = s == nullptr ? EBADF : ENOTCONN;
+        return -1;
+    }
+    const int got = papp_svc->net_tcp_recv(s->handle, buf, (int)len);
+    if (got == -2) {
+        errno = EWOULDBLOCK;
+        return -1;
+    }
+    if (got < 0) {
+        errno = ECONNRESET;
+        return -1;
+    }
+    return got; // 0: the peer closed
 }
 
 int setsockopt(int fd, int level, int name, const void* value, socklen_t len)
@@ -138,7 +294,9 @@ int getsockopt(int fd, int level, int name, void* value, socklen_t* len)
         return -1;
     }
     if (level == SOL_SOCKET && name == SO_ERROR && value != nullptr && len != nullptr && *len >= sizeof(int)) {
-        *static_cast<int*>(value) = 0;
+        const Socket* s = socket_of(fd);
+        // TCP: how a non-blocking connect ended (VC reads this when select() says writable).
+        *static_cast<int*>(value) = s->stream && (tcp_poll(s) & 4) ? ECONNREFUSED : 0;
         *len = sizeof(int);
     }
     return 0;
@@ -205,23 +363,25 @@ ssize_t recvfrom(int fd, void* buf, size_t len, int flags, struct sockaddr* from
     return (ssize_t)n;
 }
 
-// Readable: a datagram is waiting. Writable: always. Never waits: the game
-// polls every frame.
+// UDP: readable when a datagram is waiting, writable once bound.
+// TCP: the loader's readiness; a failed socket counts as both, so the caller's
+// recv()/SO_ERROR sees the failure. Never waits: the game polls every frame.
 int select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds, struct timeval* timeout)
 {
     (void)timeout;
     int ready = 0;
     for (int fd = 0; fd < nfds && fd < FD_SETSIZE; fd++) {
         Socket* s = socket_of(fd);
+        const int bits = s != nullptr && s->stream ? tcp_poll(s) : 0;
         if (readfds != nullptr && FD_ISSET(fd, readfds)) {
-            if (s != nullptr && poll_pending(s)) {
+            if (s != nullptr && (s->stream ? (bits & 5) != 0 : poll_pending(s))) {
                 ready++;
             } else {
                 FD_CLR(fd, readfds);
             }
         }
         if (writefds != nullptr && FD_ISSET(fd, writefds)) {
-            if (s != nullptr && s->handle >= 0) {
+            if (s != nullptr && (s->stream ? (bits & 6) != 0 : s->handle >= 0)) {
                 ready++;
             } else {
                 FD_CLR(fd, writefds);
@@ -232,6 +392,15 @@ int select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds, struc
         }
     }
     return ready;
+}
+
+// The device has no signals, and the ESP newlib has no signal(). wsptcp.cpp
+// only asks to ignore SIGPIPE, which the loader's sockets never raise.
+void (*signal(int sig, void (*handler)(int)))(int)
+{
+    (void)sig;
+    (void)handler;
+    return SIG_DFL;
 }
 
 // papp_syscalls.c routes close() of a socket descriptor here.
@@ -320,13 +489,22 @@ int gethostname(char* name, size_t len)
     return 0;
 }
 
+// This machine by its own name (or none); anything else (TCP `Host=`) through
+// the loader's resolver, which also takes dotted quads.
 struct hostent* gethostbyname(const char* name)
 {
-    (void)name; // only ever asked for this machine
     static uint32_t addr;
     static char* list[2] = {reinterpret_cast<char*>(&addr), nullptr};
     static char host_name[] = "redalert-p4";
     static struct hostent host = {host_name, nullptr, AF_INET, 4, list};
+    if (name != nullptr && *name != '\0' && strcmp(name, host_name) != 0) {
+        uint32_t ip;
+        if (papp_svc->net_resolve == nullptr || !papp_svc->net_resolve(name, &ip)) {
+            return nullptr;
+        }
+        addr = htonl(ip);
+        return &host;
+    }
     uint32_t mask;
     return local_ipv4(&addr, &mask) ? &host : nullptr;
 }

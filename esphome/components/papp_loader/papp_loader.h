@@ -45,6 +45,13 @@ class PappLoader : public Component {
   // Step through the catalogs: +1 next, -1 previous (wraps around).
   void next_catalog(int step = 1);
   // The catalog shown first (YAML `default_catalog`); set before setup().
+  // ESPHOMEBREW store view (YAML `library_style: grid`): the library shows
+  // icon tiles instead of a list, and tapping an app opens its detail page
+  // (about, controls, sizes, Stream / Install / Launch / Update). App info
+  // comes from the <app>.json next to each .papp (see docs/building.md).
+  void set_store_ui(bool enabled) { this->store_ui_ = enabled; }
+  // Where Install puts apps (as <name>.papp plus its <name>.json).
+  void set_install_dir(const std::string &dir) { this->install_dir_ = dir; }
   void set_initial_catalog(size_t index) {
     if (index < this->catalogs_.size()) {
       this->catalog_index_ = index;
@@ -245,6 +252,8 @@ class PappLoader : public Component {
   static void papp_task_entry_(void *arg);
   static void papp_load_task_entry_(void *arg);
   static void papp_catalog_task_entry_(void *arg);
+  static void papp_info_task_entry_(void *arg);
+  static void papp_install_task_entry_(void *arg);
   esp_err_t sync_app_data_(const std::string &papp_url);
   std::string find_data_file_(const std::string &target) const;
   esp_err_t download_data_file_(const data::DataFile &file, const std::string &path, uint32_t done_before,
@@ -432,6 +441,48 @@ class PappLoader : public Component {
   size_t catalog_index_{0};
   // The URL the running fetch is for: a switch mid-fetch refetches afterwards.
   std::string catalog_fetch_url_;
+
+  // ── Store view (papp_store.cpp) ──
+ public:
+  // One app's listing, from its <app>.json (all fields optional).
+  struct AppInfo {
+    bool has_info{false};
+    std::string name, title, version, author, category, license, about, changelog, upstream, source;
+    std::vector<std::string> controls;
+    uint32_t size{0}, data_size{0};
+    std::string sha256;
+    std::string sidecar;            // the raw JSON, saved next to an installed copy
+    std::vector<uint8_t> icon_png;  // decoded from the listing's base64 icon
+  };
+
+ protected:
+  bool store_ui_{false};
+  std::string install_dir_{"/sd/roms/papp"};
+  // Info for catalog_entries_ (same order), fetched by a task after each listing.
+  std::vector<AppInfo> app_info_;
+  std::vector<AppInfo> info_result_;
+  std::vector<std::string> info_urls_;
+  uint32_t catalog_generation_{0};
+  uint32_t info_generation_{0};
+  TaskHandle_t info_task_handle_{nullptr};
+  volatile bool info_loading_{false};
+  volatile bool info_done_{false};
+  void start_info_fetch_();
+  void poll_info_fetch_();
+  // name -> installed version, from <install_dir>/*.json.
+  std::vector<std::pair<std::string, std::string>> installed_;
+  void scan_installed_();
+  std::string installed_version_(const std::string &name) const;
+  // Install/Update of one app: the .papp (checked against its size and
+  // sha256), its data, then its listing, in a task.
+  int install_index_{-1};
+  AppInfo install_info_;  // copies for the task: app_info_ can be replaced meanwhile
+  std::string install_url_;
+  TaskHandle_t install_task_handle_{nullptr};
+  volatile bool install_done_{false};
+  volatile esp_err_t install_result_{ESP_OK};
+  void start_install_(int index);
+  void poll_install_();
   void list_catalog_folder_();
   TaskHandle_t papp_catalog_task_handle_{nullptr};
   volatile bool catalog_loading_{false};
@@ -460,6 +511,35 @@ class PappLoader : public Component {
   bool launcher_a_state_{false};
   bool launcher_touch_state_{false};
   bool launcher_input_armed_{false};
+  bool launcher_b_state_{false};
+  bool launcher_l_state_{false};
+  bool launcher_r_state_{false};
+  // Store view widgets.
+  struct AppIcon {
+    uint16_t *pixels{nullptr};
+    lv_image_dsc_t dsc{};
+  };
+  std::vector<AppIcon> tile_icons_;  // per app, 112x112
+  std::vector<lv_obj_t *> catalog_tiles_;
+  uint16_t grid_columns_{1};
+  lv_obj_t *detail_panel_{nullptr};
+  AppIcon detail_icon_{};
+  std::vector<lv_obj_t *> detail_buttons_;
+  std::vector<uint8_t> detail_actions_;
+  uint8_t detail_focus_{0};
+  int detail_index_{-1};
+  std::string detail_url_;  // reopened after the grid is rebuilt, if still listed
+  static void store_tile_event_cb_(lv_event_t *event);
+  static void store_button_event_cb_(lv_event_t *event);
+  static void release_icon_(AppIcon *icon);
+  void free_icons_();
+  bool decode_icon_(const std::vector<uint8_t> &png, uint16_t side, AppIcon *out);
+  void build_store_grid_();
+  void open_detail_(int index);
+  void close_detail_();
+  void focus_detail_button_(uint8_t index);
+  void run_detail_action_(uint8_t action);
+  bool handle_store_controls_(uint8_t newly_pressed, bool a_pressed, bool b_pressed, bool l_pressed, bool r_pressed);
 #endif
 };
 

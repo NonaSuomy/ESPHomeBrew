@@ -6,13 +6,15 @@ from esphome.components import binary_sensor, display, esp32, lvgl, sensor, spea
 from esphome.const import CONF_ID, CONF_NAME, CONF_PATH, CONF_URL
 
 DEPENDENCIES = ["network"]
-AUTO_LOAD = ["binary_sensor", "sensor", "speaker", "touchscreen"]
+AUTO_LOAD = ["binary_sensor", "json", "sensor", "speaker", "touchscreen"]
 
 
 CONF_AUTOSTART = "autostart"
 CONF_CATALOG_URL = "catalog_url"
 CONF_CATALOGS = "catalogs"
 CONF_DEFAULT_CATALOG = "default_catalog"
+CONF_LIBRARY_STYLE = "library_style"
+CONF_INSTALL_DIR = "install_dir"
 CONF_REPORT_URL = "report_url"
 CONF_REPORT_LOG_BYTES = "report_log_bytes"
 CONF_DATA_ROOT = "data_root"
@@ -108,6 +110,11 @@ CONFIG_SCHEMA = cv.Schema(
         # the library list; see README "Library sources".
         cv.Optional(CONF_CATALOGS): cv.All(cv.ensure_list(CATALOG_SCHEMA), cv.Length(min=1, max=8)),
         cv.Optional(CONF_DEFAULT_CATALOG): cv.string_strict,
+        # "grid": the ESPHOMEBREW store view (icons, badges, a detail page with
+        # Stream / Install) instead of a plain list; see README "Store view".
+        cv.Optional(CONF_LIBRARY_STYLE, default="list"): cv.one_of("list", "grid", lower=True),
+        # Where Install puts store apps (and their listings, which mark them installed).
+        cv.Optional(CONF_INSTALL_DIR, default="/sd/roms/papp"): validate_data_root,
         # POST a JSON test report here after every app run (see docs/feedback.md).
         cv.Optional(CONF_REPORT_URL): cv.url,
         cv.Optional(CONF_REPORT_LOG_BYTES, default=4096): cv.int_range(min=256, max=32768),
@@ -166,6 +173,8 @@ async def to_code(config):
         default = config.get(CONF_DEFAULT_CATALOG, catalogs[0][CONF_NAME]).lower()
         index = next(i for i, catalog in enumerate(catalogs) if catalog[CONF_NAME].lower() == default)
         cg.add(var.set_initial_catalog(index))
+    cg.add(var.set_store_ui(config[CONF_LIBRARY_STYLE] == "grid"))
+    cg.add(var.set_install_dir(config[CONF_INSTALL_DIR]))
     if report_url := config.get(CONF_REPORT_URL):
         cg.add(var.set_report_url(report_url))
         cg.add(var.set_report_log_bytes(config[CONF_REPORT_LOG_BYTES]))

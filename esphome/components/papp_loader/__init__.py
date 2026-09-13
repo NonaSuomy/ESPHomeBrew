@@ -3,7 +3,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import binary_sensor, display, esp32, lvgl, sensor, speaker, touchscreen
 
-from esphome.const import CONF_ID, CONF_PATH
+from esphome.const import CONF_ID, CONF_NAME, CONF_PATH, CONF_URL
 
 DEPENDENCIES = ["network"]
 AUTO_LOAD = ["binary_sensor", "sensor", "speaker", "touchscreen"]
@@ -11,6 +11,8 @@ AUTO_LOAD = ["binary_sensor", "sensor", "speaker", "touchscreen"]
 
 CONF_AUTOSTART = "autostart"
 CONF_CATALOG_URL = "catalog_url"
+CONF_CATALOGS = "catalogs"
+CONF_DEFAULT_CATALOG = "default_catalog"
 CONF_REPORT_URL = "report_url"
 CONF_REPORT_LOG_BYTES = "report_log_bytes"
 CONF_DATA_ROOT = "data_root"
@@ -67,12 +69,45 @@ def validate_data_root(value):
     return value
 
 
+def validate_catalog_url(value):
+    """An HTTP(S) catalog page, or an absolute folder of .papp files such as /sd/roms/papp/."""
+    value = cv.string_strict(value)
+    if value.startswith(("http://", "https://")):
+        return cv.url(value)
+    if value.startswith("/") and ".." not in value.split("/"):
+        return value
+    raise cv.Invalid("a catalog url is an http(s):// catalog page or a folder such as /sd/roms/papp/")
+
+
+CATALOG_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_NAME): cv.All(cv.string_strict, cv.Length(min=1, max=24)),
+        cv.Required(CONF_URL): validate_catalog_url,
+    }
+)
+
+
+def validate_catalogs(config):
+    catalogs = config.get(CONF_CATALOGS, [])
+    names = [catalog[CONF_NAME].lower() for catalog in catalogs]
+    if len(set(names)) != len(names):
+        raise cv.Invalid("catalog names must be unique")
+    default = config.get(CONF_DEFAULT_CATALOG)
+    if default is not None and default.lower() not in names:
+        raise cv.Invalid(f"default_catalog '{default}' is not one of the catalogs")
+    return config
+
+
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(PappLoader),
         cv.Required(CONF_PATH): cv.string,
         cv.Optional(CONF_AUTOSTART, default=False): cv.boolean,
         cv.Optional(CONF_CATALOG_URL): cv.string,
+        # Several library sources (catalog pages or .papp folders), switched from
+        # the library list; see README "Library sources".
+        cv.Optional(CONF_CATALOGS): cv.All(cv.ensure_list(CATALOG_SCHEMA), cv.Length(min=1, max=8)),
+        cv.Optional(CONF_DEFAULT_CATALOG): cv.string_strict,
         # POST a JSON test report here after every app run (see docs/feedback.md).
         cv.Optional(CONF_REPORT_URL): cv.url,
         cv.Optional(CONF_REPORT_LOG_BYTES, default=4096): cv.int_range(min=256, max=32768),
@@ -102,6 +137,7 @@ CONFIG_SCHEMA = cv.Schema(
         **BUTTON_SCHEMAS,
     }
 ).extend(cv.COMPONENT_SCHEMA)
+CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, cv.has_at_most_one_key(CONF_CATALOG_URL, CONF_CATALOGS), validate_catalogs)
 
 
 async def to_code(config):
@@ -123,6 +159,13 @@ async def to_code(config):
     cg.add(var.set_autostart(config[CONF_AUTOSTART]))
     if catalog_url := config.get(CONF_CATALOG_URL):
         cg.add(var.set_catalog_url(catalog_url))
+    catalogs = config.get(CONF_CATALOGS, [])
+    for catalog in catalogs:
+        cg.add(var.add_catalog(catalog[CONF_NAME], catalog[CONF_URL]))
+    if catalogs:
+        default = config.get(CONF_DEFAULT_CATALOG, catalogs[0][CONF_NAME]).lower()
+        index = next(i for i, catalog in enumerate(catalogs) if catalog[CONF_NAME].lower() == default)
+        cg.add(var.set_initial_catalog(index))
     if report_url := config.get(CONF_REPORT_URL):
         cg.add(var.set_report_url(report_url))
         cg.add(var.set_report_log_bytes(config[CONF_REPORT_LOG_BYTES]))

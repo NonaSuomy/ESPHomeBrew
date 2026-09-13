@@ -220,6 +220,12 @@ static void papp_catalog_button_event_cb(lv_event_t *event) {
     delete context;
   }
 }
+
+// The "◀ name ▶" row at the top of the list: a tap shows the next catalog.
+static void papp_catalog_switch_event_cb(lv_event_t *event) {
+  if (event != nullptr && lv_event_get_code(event) == LV_EVENT_CLICKED)
+    static_cast<PappLoader *>(lv_event_get_user_data(event))->next_catalog(1);
+}
 #endif
 
 #ifdef PAPP_LOADER_USE_USB_HIDX
@@ -417,7 +423,10 @@ void PappLoader::loop() {
       this->papp_catalog_task_handle_ = nullptr;
     }
     this->catalog_loading_ = false;
-    if (this->catalog_result_ == ESP_OK) {
+    if (this->catalog_fetch_url_ != this->catalog_url_) {
+      // Another catalog was chosen while this one loaded: show that one instead.
+      this->refresh_catalog();
+    } else if (this->catalog_result_ == ESP_OK) {
       this->catalog_entries_ = parse_papp_catalog(this->catalog_html_, this->catalog_url_);
       ESP_LOGI(TAG, "PAPP catalog found %u application(s)",
                static_cast<unsigned>(this->catalog_entries_.size()));
@@ -429,6 +438,9 @@ void PappLoader::loop() {
     } else {
       ESP_LOGW(TAG, "PAPP catalog request failed: %s (0x%x)",
                esp_err_to_name(static_cast<esp_err_t>(this->catalog_result_)), this->catalog_result_);
+#ifdef PAPP_LOADER_USE_LVGL
+      this->catalog_ui_pending_ = true;  // replace "Loading..." with the empty list
+#endif
     }
   }
 #ifdef PAPP_LOADER_USE_LVGL
@@ -537,6 +549,91 @@ void PappLoader::dump_config() {
     ESP_LOGCONFIG(TAG, "  App data also looked for in: %s", root.c_str());
   if (!this->catalog_url_.empty())
     ESP_LOGCONFIG(TAG, "  PAPP catalog: %s", this->catalog_url_.c_str());
+  for (const auto &catalog : this->catalogs_)
+    ESP_LOGCONFIG(TAG, "  PAPP library source: %s -> %s", catalog.name.c_str(), catalog.url.c_str());
+}
+
+void PappLoader::select_catalog_index(size_t index) {
+  if (index >= this->catalogs_.size())
+    return;
+  this->catalog_index_ = index;
+  this->catalog_url_ = this->catalogs_[index].url;
+  ESP_LOGI(TAG, "PAPP library: %s (%s)", this->catalogs_[index].name.c_str(), this->catalog_url_.c_str());
+  this->catalog_entries_.clear();
+#ifdef PAPP_LOADER_USE_LVGL
+  this->catalog_ui_pending_ = true;
+#endif
+  this->refresh_catalog();
+}
+
+void PappLoader::select_catalog(const std::string &name) {
+  auto lower = [](std::string text) {
+    for (char &c : text)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return text;
+  };
+  for (size_t i = 0; i < this->catalogs_.size(); i++) {
+    if (lower(this->catalogs_[i].name) == lower(name)) {
+      this->select_catalog_index(i);
+      return;
+    }
+  }
+  ESP_LOGW(TAG, "No PAPP catalog named %s", name.c_str());
+}
+
+void PappLoader::next_catalog(int step) {
+  const int count = static_cast<int>(this->catalogs_.size());
+  if (count < 2)
+    return;
+  const int next = ((static_cast<int>(this->catalog_index_) + step) % count + count) % count;
+  this->select_catalog_index(static_cast<size_t>(next));
+}
+
+// A folder catalog (a URL starting with '/', such as /sd/roms/papp/): the
+// .papp files in that folder under every data search root, so the same folder
+// on the SD card and a USB stick are listed together.
+void PappLoader::list_catalog_folder_() {
+  std::string folder = this->catalog_url_;
+  if (folder.back() != '/')
+    folder += '/';
+  std::vector<std::pair<std::string, std::string>> folders;  // root label, folder
+  for (const auto &root : this->data_search_) {
+    if (folder.rfind(root + "/", 0) == 0) {
+      const std::string rest = folder.substr(root.size());
+      for (const auto &other : this->data_search_)
+        folders.emplace_back(other.substr(1), other + rest);
+      break;
+    }
+  }
+  if (folders.empty())
+    folders.emplace_back("", folder);
+
+  std::vector<std::pair<std::string, std::string>> entries;
+  for (size_t i = 0; i < folders.size(); i++) {
+    DIR *dir = opendir(runtime_path(folders[i].second.c_str()).c_str());
+    if (dir == nullptr)
+      continue;
+    while (dirent *entry = readdir(dir)) {
+      std::string file = entry->d_name;
+      std::string lower = file;
+      for (char &c : lower)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      if (lower.size() <= 5 || lower.compare(lower.size() - 5, 5, ".papp") != 0)
+        continue;
+      std::string label = file.substr(0, file.size() - 5);
+      if (i > 0)
+        label += " (" + folders[i].first + ")";  // not on the first root, e.g. "(usb0)"
+      entries.emplace_back(label, folders[i].second + file);
+    }
+    closedir(dir);
+  }
+  std::sort(entries.begin(), entries.end());
+  this->catalog_entries_ = std::move(entries);
+  ESP_LOGI(TAG, "PAPP folder catalog %s: %u application(s)", folder.c_str(),
+           static_cast<unsigned>(this->catalog_entries_.size()));
+#ifdef PAPP_LOADER_USE_LVGL
+  this->catalog_ui_pending_ = true;
+#endif
 }
 
 void PappLoader::refresh_catalog() {
@@ -544,7 +641,13 @@ void PappLoader::refresh_catalog() {
     ESP_LOGW(TAG, "Cannot refresh PAPP catalog without catalog_url");
     return;
   }
+  if (this->catalog_url_[0] == '/') {
+    this->list_catalog_folder_();
+    return;
+  }
   if (this->catalog_loading_) {
+    // The fetch that finishes checks whether it is still for the catalog being
+    // shown, and fetches the current one if not.
     ESP_LOGD(TAG, "PAPP catalog request already in progress");
     return;
   }
@@ -554,6 +657,7 @@ void PappLoader::refresh_catalog() {
   }
 
   this->catalog_html_.clear();
+  this->catalog_fetch_url_ = this->catalog_url_;
   this->catalog_done_ = false;
   this->catalog_result_ = -1;
   this->catalog_loading_ = true;
@@ -915,7 +1019,7 @@ void PappLoader::papp_load_task_entry_(void *arg) {
 
 void PappLoader::papp_catalog_task_entry_(void *arg) {
   auto *self = static_cast<PappLoader *>(arg);
-  const std::string url = self->catalog_url_;
+  const std::string url = self->catalog_fetch_url_;
   self->catalog_result_ = fetch_http_text(url.c_str(), &self->catalog_html_);
   self->catalog_done_ = true;
   // As with the PAPP loader task, the ESPHome loop deletes this task after it
@@ -931,7 +1035,9 @@ void PappLoader::set_catalog_selection_(uint16_t index) {
   if (this->catalog_container_ == nullptr)
     return;
 
-  const uint32_t count = lv_obj_get_child_count(this->catalog_container_);
+  // `index` counts apps; the switcher row, when present, comes first.
+  const uint32_t children = lv_obj_get_child_count(this->catalog_container_);
+  const uint32_t count = children > this->catalog_header_rows_ ? children - this->catalog_header_rows_ : 0;
   if (count == 0) {
     this->catalog_selection_ = 0;
     return;
@@ -940,12 +1046,13 @@ void PappLoader::set_catalog_selection_(uint16_t index) {
     index = static_cast<uint16_t>(count - 1);
   this->catalog_selection_ = index;
 
-  for (uint32_t i = 0; i < count; i++) {
+  for (uint32_t i = 0; i < children; i++) {
     lv_obj_t *child = lv_obj_get_child(this->catalog_container_, static_cast<int32_t>(i));
     if (child != nullptr)
       lv_obj_remove_state(child, LV_STATE_FOCUSED);
   }
-  lv_obj_t *selected = lv_obj_get_child(this->catalog_container_, static_cast<int32_t>(index));
+  lv_obj_t *selected =
+      lv_obj_get_child(this->catalog_container_, static_cast<int32_t>(index + this->catalog_header_rows_));
   if (selected != nullptr) {
     lv_obj_add_state(selected, LV_STATE_FOCUSED);
     lv_obj_scroll_to_view(selected, LV_ANIM_OFF);
@@ -1015,7 +1122,11 @@ void PappLoader::handle_launcher_controls_() {
   }
 
   const uint8_t newly_pressed = direction & static_cast<uint8_t>(~this->launcher_direction_state_);
-  if (!this->catalog_entries_.empty() && newly_pressed != 0) {
+  // Left/right switch catalogs (up/down still move through the list).
+  if (this->catalogs_.size() > 1 && (newly_pressed & ((1U << 1) | (1U << 3))) != 0 &&
+      (newly_pressed & ((1U << 0) | (1U << 2))) == 0) {
+    this->next_catalog((newly_pressed & (1U << 1)) != 0 ? 1 : -1);
+  } else if (!this->catalog_entries_.empty() && newly_pressed != 0) {
     const uint32_t count = this->catalog_entries_.size();
     uint16_t next = this->catalog_selection_;
     if ((newly_pressed & (1U << 0)) != 0) {
@@ -1033,7 +1144,8 @@ void PappLoader::handle_launcher_controls_() {
 
   const bool select_pressed = (a && !this->launcher_a_state_) || (touch && !this->launcher_touch_state_);
   if (select_pressed && !this->catalog_entries_.empty()) {
-    lv_obj_t *selected = lv_obj_get_child(this->catalog_container_, static_cast<int32_t>(this->catalog_selection_));
+    lv_obj_t *selected = lv_obj_get_child(this->catalog_container_,
+                                          static_cast<int32_t>(this->catalog_selection_ + this->catalog_header_rows_));
     if (selected != nullptr) {
       ESP_LOGI(TAG, "PAPP catalog physical select: %u/%u", static_cast<unsigned>(this->catalog_selection_ + 1),
                static_cast<unsigned>(this->catalog_entries_.size()));
@@ -1052,8 +1164,18 @@ void PappLoader::update_catalog_ui_() {
 
   lv_obj_clean(this->catalog_container_);
   this->catalog_selection_ = 0;
+  this->catalog_header_rows_ = 0;
+  if (this->catalogs_.size() > 1) {
+    const std::string title =
+        std::string(LV_SYMBOL_LEFT "  ") + this->catalogs_[this->catalog_index_].name + "  " LV_SYMBOL_RIGHT;
+    lv_obj_t *header = lv_list_add_btn(this->catalog_container_, nullptr, title.c_str());
+    if (header != nullptr) {
+      lv_obj_add_event_cb(header, papp_catalog_switch_event_cb, LV_EVENT_CLICKED, this);
+      this->catalog_header_rows_ = 1;
+    }
+  }
   if (this->catalog_entries_.empty()) {
-    lv_list_add_text(this->catalog_container_, "No .papp files found");
+    lv_list_add_text(this->catalog_container_, this->catalog_loading_ ? "Loading..." : "No .papp files found");
     return;
   }
 

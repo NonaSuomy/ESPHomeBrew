@@ -25,6 +25,28 @@ papp_loader:
   # ... display_id, touchscreen_id, speaker_id, usb_hidx_id, path as before
 ```
 
+### Several library sources
+
+Instead of one `catalog_url`, list up to eight named sources. Each is an HTTP(S) catalog page or a folder of `.papp` files:
+
+```yaml
+papp_loader:
+  catalogs:
+    - name: SD / USB
+      url: /sd/roms/papp/          # a folder: the .papp files there on every data_search root
+    - name: Network
+      url: http://192.168.1.10:8000/
+    - name: Store
+      url: https://nonasuomy.github.io/papp-conversions/
+  default_catalog: Store           # optional; the first one otherwise
+```
+
+- With more than one source, the library list starts with a `◀ Store ▶` row. Tap it, or press **left/right** on the d-pad or buttons, to switch; up/down still move through the apps.
+- A folder source lists the folder on each `data_search` root, so `/sd/roms/papp/` also shows `/usb0/roms/papp/`. Apps from the second and later roots are labelled, for example `doom (usb0)`. Folder sources work offline.
+- Switching while a catalog is still loading shows the one you picked once the fetch returns, so pages no longer need a "refresh twice" script.
+- From YAML lambdas: `id(papp_runtime)->select_catalog("Network");`, `->next_catalog(1)` / `(-1)`, and `->refresh_catalog()`.
+- `catalogs` and `catalog_url` can't be used together. `catalog_url` alone behaves as before.
+
 ## 3. Include the page
 
 ```yaml

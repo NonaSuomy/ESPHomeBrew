@@ -40,7 +40,36 @@ uintptr_t mp_hal_stdio_poll(uintptr_t poll_flags)
     return ret;
 }
 
-// The log gets whole lines; the screen gets everything as it comes.
+// The log gets whole lines, at most LOG_LINES_PER_S of them on average (a
+// burst of LOG_BURST): the log is a serial port, and a print() loop must not
+// wait for it. The screen gets everything as it comes.
+#define LOG_LINES_PER_S 10
+#define LOG_BURST 60
+
+static void log_line(const char *line)
+{
+    static int64_t last_us = 0;
+    static int64_t tokens_us = (int64_t)LOG_BURST * (1000000 / LOG_LINES_PER_S);
+    static unsigned dropped = 0;
+    const int64_t now = papp_time_us();
+    const int64_t cost = 1000000 / LOG_LINES_PER_S;
+    tokens_us += now - last_us;
+    last_us = now;
+    if (tokens_us > (int64_t)LOG_BURST * cost) {
+        tokens_us = (int64_t)LOG_BURST * cost;
+    }
+    if (tokens_us < cost) {
+        dropped++;
+        return;
+    }
+    tokens_us -= cost;
+    if (dropped) {
+        papp_svc->log_printf("> (%u console lines not logged)\n", dropped);
+        dropped = 0;
+    }
+    papp_svc->log_printf("> %s\n", line);
+}
+
 static void log_console(const char *str, size_t len)
 {
     static char line[200];
@@ -52,7 +81,7 @@ static void log_console(const char *str, size_t len)
         }
         if (c == '\n' || used == sizeof(line) - 1) {
             line[used] = '\0';
-            papp_svc->log_printf("> %s\n", line);
+            log_line(line);
             used = 0;
             if (c == '\n') {
                 continue;

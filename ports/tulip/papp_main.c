@@ -10,6 +10,7 @@
 // heap in PSRAM, set up LVGL, run _boot.py and boot.py, then the REPL.
 #include "papp_port.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "py/compile.h"
@@ -204,6 +205,10 @@ __attribute__((section(".text.entry"), used)) int app_entry(const app_services_t
 {
     papp_svc = svc;
     papp_syscalls_init();
+    // Set up newlib's stdio here, on one task, before the three tasks share
+    // it (its locks are no-ops); unbuffered, so each printf reaches the log.
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     svc->log_printf("TULIP: Tulip Creative Computer PAPP starting\n");
 
     if (svc->task_create(mp_task, "tulip_mp", MP_TASK_STACK_BYTES, NULL, 5, &s_mp_task, 0) != 0) {

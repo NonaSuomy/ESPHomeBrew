@@ -3,6 +3,28 @@
   "title": "Duke Nukem 3D",
   "version": "0.1.1",
   "description": "Duke Nukem 3D (BUILD engine) as a PSRAM app. The store downloads the shareware duke3d.grp to /sd/roms/duke3d/.",
+  "author": "3D Realms / Ken Silverman; P4 port by giltal",
+  "category": "Game",
+  "license": "GPL-2.0 + BUILD licence",
+  "about": "Duke Nukem 3D on the BUILD engine, as a PSRAM app. The store downloads the shareware episode (duke3d.grp) on first launch; your own full duke3d.grp on the card is used instead and never replaced.",
+  "controls": [
+    "Up/Down: move forward / back; menus",
+    "Left/Right: turn",
+    "A: fire",
+    "B: open / use; menu select",
+    "X: jump",
+    "Y: crouch",
+    "L / R: previous / next weapon",
+    "Select: automap",
+    "Start: menu / back",
+    "Menu (hold 3 s): quit to launcher"
+  ],
+  "upstream": {
+    "project": "Chocolate Duke Nukem 3D",
+    "version": "1.0",
+    "url": "https://github.com/fabiensanglard/chocolate_duke3D"
+  },
+  "icon": "icon.png",
   "build": "custom",
   "source": {
     "repo": "https://github.com/giltal/RetroESP32-P4",

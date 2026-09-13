@@ -17,6 +17,7 @@ Needs the ESP-IDF RISC-V toolchain (riscv32-esp-elf-*) on PATH and git.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -286,6 +287,83 @@ def custom_units(manifest: dict, src_root: Path, build_dir: Path) -> tuple[list[
     return units, ldflags
 
 
+MAX_ICON_BYTES = 64 * 1024
+MAX_ICON_SIDE = 256
+MAX_SCREENSHOTS = 3
+MAX_SCREENSHOT_BYTES = 300 * 1024
+MAX_SCREENSHOT_SIZE = (1024, 600)
+STORE_TEXT_LIMITS = {"author": 60, "category": 30, "license": 60, "about": 2000, "changelog": 4000}
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def listing_png(name: str, app_dir: Path, rel: object, what: str, max_bytes: int, max_w: int, max_h: int) -> dict:
+    """A PNG from the app's folder, checked for size and dimensions, as base64."""
+    path = (app_dir / str(rel)).resolve()
+    if app_dir.resolve() not in path.parents or not path.is_file():
+        raise ValueError(f"{name}: {what} must be a file inside apps/{name}/")
+    png = path.read_bytes()
+    if len(png) > max_bytes or png[:8] != PNG_SIGNATURE or png[12:16] != b"IHDR":
+        raise ValueError(f"{name}: {what} must be a PNG of at most {max_bytes // 1024} KB")
+    width, height = struct.unpack(">II", png[16:24])
+    if not (0 < width <= max_w and 0 < height <= max_h):
+        raise ValueError(f"{name}: {what} is {width}x{height}; at most {max_w}x{max_h}")
+    return {"type": "image/png", "width": width, "height": height, "base64": base64.b64encode(png).decode("ascii")}
+
+
+UPSTREAM_LIMITS = {"project": 60, "version": 30, "url": 200}
+
+
+def upstream_info(name: str, upstream: object) -> dict:
+    """The original project an app is ported from: {"project", "version", "url"},
+    only "project" required."""
+    if not isinstance(upstream, dict) or "project" not in upstream or set(upstream) - set(UPSTREAM_LIMITS):
+        raise ValueError(f"{name}: upstream must be an object with project and optional version and url")
+    info = {}
+    for key, limit in UPSTREAM_LIMITS.items():
+        if key in upstream:
+            value = upstream[key]
+            if not isinstance(value, str) or not value.strip() or len(value) > limit:
+                raise ValueError(f"{name}: upstream {key} must be text of 1 to {limit} characters")
+            info[key] = value.strip()
+    if "url" in info and not info["url"].startswith("https://"):
+        raise ValueError(f"{name}: upstream url must start with https://")
+    return info
+
+
+def store_info(name: str, manifest: dict, app_dir: Path) -> dict:
+    """The store listing extras from papp.json: author, category, license, about,
+    changelog, controls, upstream, icon and screenshots.
+
+    All optional. Images are PNGs in the app's folder: an icon of at most
+    256x256 and 64 KB, and up to three screenshots of at most 1024x600 and
+    300 KB, carried as base64 until make_catalog publishes them.
+    """
+    info: dict = {}
+    for key, limit in STORE_TEXT_LIMITS.items():
+        if key in manifest:
+            value = manifest[key]
+            if not isinstance(value, str) or not value.strip() or len(value) > limit:
+                raise ValueError(f"{name}: {key} must be text of 1 to {limit} characters")
+            info[key] = value.strip()
+    if "controls" in manifest:
+        controls = manifest["controls"]
+        if (not isinstance(controls, list) or not 1 <= len(controls) <= 20
+                or not all(isinstance(c, str) and 0 < len(c.strip()) <= 60 for c in controls)):
+            raise ValueError(f"{name}: controls must be 1 to 20 lines of up to 60 characters")
+        info["controls"] = [c.strip() for c in controls]
+    if "upstream" in manifest:
+        info["upstream"] = upstream_info(name, manifest["upstream"])
+    if "icon" in manifest:
+        info["icon"] = listing_png(name, app_dir, manifest["icon"], "icon", MAX_ICON_BYTES, MAX_ICON_SIDE, MAX_ICON_SIDE)
+    if "screenshots" in manifest:
+        shots = manifest["screenshots"]
+        if not isinstance(shots, list) or not 1 <= len(shots) <= MAX_SCREENSHOTS:
+            raise ValueError(f"{name}: screenshots must list 1 to {MAX_SCREENSHOTS} PNG files")
+        info["screenshots"] = [listing_png(name, app_dir, shot, "screenshot", MAX_SCREENSHOT_BYTES, *MAX_SCREENSHOT_SIZE)
+                               for shot in shots]
+    return info
+
+
 def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
     manifest = json.loads(manifest_path.read_text())
     name = manifest["name"]
@@ -293,6 +371,7 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
         raise ValueError(f"{manifest_path}: name '{name}' must match its folder")
     print(f"=== {name} ===", flush=True)
     data_files = check_data(name, manifest.get("data"))
+    listing = store_info(name, manifest, manifest_path.parent)
 
     source = manifest["source"]
     build = manifest["build"]
@@ -426,6 +505,7 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
         info["publish"] = False
     if data_files:
         info["data"] = data_files
+    info.update(listing)
     (out / f"{name}.json").write_text(json.dumps(info, indent=2) + "\n")
     print(f"  {papp.name}: {len(data)} bytes, text={header['text_size']} bss={header['bss_size']}, sha256 {info['sha256'][:16]}", flush=True)
     return info

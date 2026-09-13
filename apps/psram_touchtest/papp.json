@@ -3,6 +3,15 @@
   "title": "Touch test",
   "version": "0.1.0",
   "description": "Draws a colored marker in each corner and a crosshair where you touch, to check touch_read and the canvas orientation.",
+  "author": "RetroESP32-P4",
+  "category": "Tool",
+  "license": "Unspecified (upstream has no licence file)",
+  "about": "Draws a coloured marker in each corner and a crosshair wherever you touch, to check the touch panel's calibration and orientation.",
+  "controls": [
+    "Touch: draws a crosshair under the finger",
+    "X: back to the launcher"
+  ],
+  "icon": "icon.png",
   "build": "plain",
   "source": {
     "repo": "https://github.com/NonaSuomy/RetroESP32-P4",

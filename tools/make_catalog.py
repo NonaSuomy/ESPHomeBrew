@@ -27,6 +27,7 @@ missing. One line per file:
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import html
 import json
@@ -132,11 +133,63 @@ def release_page(repo: str, app: dict) -> str:
     return f"https://github.com/{repo}/releases/tag/{release_tag(app)}"
 
 
+def sidecar_name(app: dict) -> str:
+    """The app's listing as JSON; the loader finds it by swapping .papp for .json."""
+    return f"{app['name']}-{app['version']}.json"
+
+
+def icon_name(app: dict) -> str:
+    return f"{app['name']}-{app['version']}.png"
+
+
+def screenshot_name(app: dict, index: int) -> str:
+    return f"{app['name']}-{app['version']}-screen{index + 1}.png"
+
+
+LISTING_FIELDS = ("author", "category", "license", "about", "changelog", "controls", "upstream")
+
+
+def store_entry(repo: str, a: dict) -> dict:
+    """One app in store.json and in its sidecar: what a store UI shows before downloading."""
+    return {
+        "name": a["name"],
+        "title": a["title"],
+        "version": a["version"],
+        "description": a.get("description", ""),
+        **{key: a[key] for key in LISTING_FIELDS if key in a},
+        **({"icon": {**a["icon"], "url": pages_base(repo) + icon_name(a)}} if a.get("icon") else {}),
+        # Screenshots are big, so only their URLs; the icon stays inline.
+        **({"screenshots": [{"width": s["width"], "height": s["height"], "url": pages_base(repo) + screenshot_name(a, i)}
+                            for i, s in enumerate(a["screenshots"])]} if a.get("screenshots") else {}),
+        "file": asset_name(a),
+        "url": pages_url(repo, a),
+        "info_url": pages_base(repo) + sidecar_name(a),
+        "release_url": asset_url(repo, a),
+        "size": a["size"],
+        "data_size": data_size(a),
+        "sha256": a["sha256"],
+        "abi": a["abi"],
+        "source": a["source"],
+        **({"data": {
+            "list_url": pages_base(repo) + data_list_name(a),
+            "license": a["data"]["license"],
+            "source": {"repo": a["data"]["repo"], "ref": a["data"]["ref"]},
+            "files": [{"target": f["target"], "size": f["size"], "sha256": f["sha256"],
+                       "url": pages_base(repo) + urllib.parse.quote(data_site_path(a, f["target"]))}
+                      for f in a["data"]["files"]],
+        }} if a.get("data") else {}),
+    }
+
+
 def render(repo: str, apps: list[dict]) -> str:
     rows = []
     for app in sorted(apps, key=lambda a: a["name"]):
+        # Icons are separate files: inline base64 would push the page past the
+        # 64 KB the device reads.
+        icon = (f'<img src="{html.escape(icon_name(app))}" width="32" height="32" alt=""> '
+                if app.get("icon") else "")
         rows.append(
-            f'<li><a href="{html.escape(asset_name(app))}">{html.escape(asset_name(app))}</a>'
+            f'<li>{icon}<a href="{html.escape(asset_name(app))}">{html.escape(asset_name(app))}</a>'
             f" {html.escape(app['title'])} &middot; {app['size'] // 1024} KB"
             + (f" + {data_size(app) / 1e6:.1f} MB data" if app.get("data") else "")
             + f" &middot; <code>{app['sha256'][:12]}</code>"
@@ -170,35 +223,17 @@ def main() -> int:
         print(f"catalog is {len(page.encode())} bytes; the device reads at most {MAX_CATALOG_BYTES}", file=sys.stderr)
         return 1
 
-    store = {
-        "apps": [
-            {
-                "name": a["name"],
-                "title": a["title"],
-                "version": a["version"],
-                "description": a.get("description", ""),
-                "file": asset_name(a),
-                "url": pages_url(args.repo, a),
-                "release_url": asset_url(args.repo, a),
-                "size": a["size"],
-                "sha256": a["sha256"],
-                "abi": a["abi"],
-                "source": a["source"],
-                **({"data": {
-                    "list_url": pages_base(args.repo) + data_list_name(a),
-                    "license": a["data"]["license"],
-                    "source": {"repo": a["data"]["repo"], "ref": a["data"]["ref"]},
-                    "files": [{"target": f["target"], "size": f["size"], "sha256": f["sha256"],
-                               "url": pages_base(args.repo) + urllib.parse.quote(data_site_path(a, f["target"]))}
-                              for f in a["data"]["files"]],
-                }} if a.get("data") else {}),
-            }
-            for a in sorted(apps, key=lambda a: a["name"])
-        ]
-    }
+    store = {"apps": [store_entry(args.repo, a) for a in sorted(apps, key=lambda a: a["name"])]}
     args.out.mkdir(parents=True, exist_ok=True)
-    for a in apps:
+    for a, entry in zip(sorted(apps, key=lambda a: a["name"]), store["apps"]):
         shutil.copyfile(args.dist / a["file"], args.out / asset_name(a))
+        # The app's full listing next to its .papp (swap .papp for .json), so a
+        # device reading the HTML catalog, or a folder of .papp files, can show it.
+        (args.out / sidecar_name(a)).write_text(json.dumps(entry, indent=2) + "\n")
+        if a.get("icon"):
+            (args.out / icon_name(a)).write_bytes(base64.b64decode(a["icon"]["base64"]))
+        for i, shot in enumerate(a.get("screenshots", [])):
+            (args.out / screenshot_name(a, i)).write_bytes(base64.b64decode(shot["base64"]))
         if a.get("data"):
             (args.out / data_list_name(a)).write_text(publish_data(args.repo, a, args.out, args.data_cache))
             print(f"data: {a['name']}: {len(a['data']['files'])} file(s), {data_size(a):,} bytes")

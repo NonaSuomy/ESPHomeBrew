@@ -3,6 +3,27 @@
   "title": "Doom",
   "version": "0.1.1",
   "description": "PrBoom as a PSRAM app. The store downloads the shareware doom1.wad and prboom.wad to /sd/roms/doom/.",
+  "author": "PrBoom team; P4 port by RetroESP32-P4",
+  "category": "Game",
+  "license": "GPL-2.0 (PrBoom)",
+  "about": "The classic 1993 first-person shooter, running from PSRAM on the ESP32-P4 via PrBoom. The store fetches the free shareware episode (doom1.wad) and prboom.wad onto the card on first launch; drop in your own doom.wad or doom2.wad for the full game.",
+  "controls": [
+    "D-pad: move / turn; menu navigation",
+    "A: fire; menu select",
+    "B (hold): run; B + Left/Right: strafe",
+    "B: menu back",
+    "Start: use / open doors",
+    "Select: switch weapon",
+    "Y: automap",
+    "Menu: game menu",
+    "Menu (hold 3 s): quit to launcher"
+  ],
+  "upstream": {
+    "project": "PrBoom",
+    "version": "2.5.0",
+    "url": "https://prboom.sourceforge.net/"
+  },
+  "icon": "icon.png",
   "build": "custom",
   "source": {
     "repo": "https://github.com/NonaSuomy/RetroESP32-P4",

@@ -3,6 +3,28 @@
   "title": "Quake",
   "version": "0.1.1",
   "description": "WinQuake as a PSRAM app, with MP3 music. The store downloads the shareware id1/pak0.pak to /sd/roms/quake/.",
+  "author": "id Software (WinQuake); P4 port by RetroESP32-P4",
+  "category": "Game",
+  "license": "GPL-2.0",
+  "about": "WinQuake as a PSRAM app, with MP3 music. The store fetches the shareware id1/pak0.pak on first launch; add pak1.pak from the full game for all four episodes.",
+  "controls": [
+    "Up/Down: move forward / back",
+    "Left/Right: turn",
+    "L / R: strafe left / right",
+    "A: fire; menu select",
+    "B: jump; menu back",
+    "X (hold): swim down",
+    "Y (hold): run",
+    "Select: next weapon",
+    "Start: menu",
+    "Menu (hold 3 s): quit to launcher"
+  ],
+  "upstream": {
+    "project": "WinQuake (id Software)",
+    "version": "1.09",
+    "url": "https://github.com/id-Software/Quake"
+  },
+  "icon": "icon.png",
   "build": "custom",
   "source": {
     "repo": "https://github.com/NonaSuomy/RetroESP32-P4",

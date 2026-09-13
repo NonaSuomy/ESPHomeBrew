@@ -24,6 +24,28 @@ Every app in this store lives in `apps/<name>/papp.json`. GitHub Actions (`.gith
   - `custom`: an explicit recipe for bigger ports. See below.
 - For `lvgl` and `plain`, the app folder must contain its `*.c` files and, for LVGL apps, `lv_conf.h`.
 
+### Store listing (optional)
+
+What a store screen shows before an app is downloaded:
+
+```json
+{
+  "author": "giltal",
+  "category": "Game",
+  "license": "GPL-2.0",
+  "about": "A longer description for the app's detail screen.",
+  "changelog": "0.1.1: sound fixes\n0.1.0: first release",
+  "controls": ["D-pad: move", "A: fire", "Start: menu"],
+  "upstream": {"project": "PrBoom", "version": "2.5.0", "url": "https://github.com/..."},
+  "icon": "icon.png",
+  "screenshots": ["screen1.png", "screen2.png"]
+}
+```
+
+- `author` (up to 60 characters), `category` (30), `license` (60), `about` (2000) and `changelog` (4000) are text; `controls` is 1–20 lines of up to 60 characters; `upstream` names the original project the port comes from (`project` up to 60 characters, optional `version` up to 30 and an `https://` `url`), shown next to the `source` repo and commit the app is built from. The fields follow the Homebrew App Store (hb-app.store) listing.
+- `icon` is a PNG in the app's folder, at most 256×256 and 64 KB; `screenshots` lists up to three PNGs of at most 1024×600 and 300 KB. Use your own or freely licensed art, not official game logos.
+- Publish store puts all of it, with the icon as base64, the `.papp` size and the data size, into `store.json` and into a sidecar next to each app (`psram_doom-0.1.1.json`, found by swapping `.papp` for `.json`). The icon is also published as `psram_doom-0.1.1.png`, which the web page shows, and screenshots as `psram_doom-0.1.1-screen1.png`, … (listed by URL only, to keep the JSON small). A LAN server or SD folder can carry the same sidecar next to its `.papp` files.
+
 Sources come from the `source` repository at a pinned commit, and so does the PAPP SDK (`psram_app.h`, `psram_app.ld`, `pack_papp.py`), so an app always builds against the loader ABI of its own tree. They are fetched at build time rather than copied here, because upstream has no license file. Today the apps come from [NonaSuomy/RetroESP32-P4](https://github.com/NonaSuomy/RetroESP32-P4) (`papp-serial-upload`) and [giltal/RetroESP32-P4](https://github.com/giltal/RetroESP32-P4).
 
 ### Custom recipes

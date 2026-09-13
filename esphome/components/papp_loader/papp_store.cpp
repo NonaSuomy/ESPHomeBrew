@@ -33,8 +33,8 @@ static const char *const TAG = "papp_store";
 // A listing with a 256x256 icon is about 90 KB of JSON.
 static constexpr size_t INFO_MAX_BYTES = 192 * 1024;
 static constexpr uint16_t TILE_W = 176;
-static constexpr uint16_t TILE_H = 208;
-static constexpr uint16_t TILE_GAP = 16;
+static constexpr uint16_t TILE_H = 188;
+static constexpr uint16_t TILE_GAP = 12;
 static constexpr uint16_t TILE_ICON = 112;
 static constexpr uint16_t DETAIL_ICON = 192;
 
@@ -464,6 +464,14 @@ static lv_obj_t *text_label(lv_obj_t *parent, const std::string &text, uint32_t 
   return label;
 }
 
+// Keeps a label to one line ending in "...": LONG_DOT alone still wraps when
+// the height follows the content.
+static void one_line(lv_obj_t *label, int32_t width) {
+  lv_obj_set_width(label, width);
+  lv_obj_set_height(label, lv_font_get_line_height(lv_obj_get_style_text_font(label, LV_PART_MAIN)));
+  lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+}
+
 // A coloured square with the app's initials, for apps without an icon.
 static void letter_tile(lv_obj_t *box, const std::string &title) {
   uint32_t hash = 2166136261u;
@@ -547,7 +555,7 @@ void PappLoader::build_store_grid_() {
 
     lv_obj_t *icon = plain_box(tile);
     lv_obj_set_size(icon, TILE_ICON, TILE_ICON);
-    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 14);
+    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 10);
     lv_obj_set_style_radius(icon, 24, 0);
     lv_obj_set_style_clip_corner(icon, true, 0);
     lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
@@ -559,23 +567,21 @@ void PappLoader::build_store_grid_() {
     }
 
     lv_obj_t *name = text_label(tile, title, COLOR_TEXT);
-    lv_obj_set_width(name, TILE_W - 16);
-    lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+    one_line(name, TILE_W - 16);
     lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(name, LV_ALIGN_TOP_MID, 0, TILE_ICON + 24);
+    lv_obj_align(name, LV_ALIGN_TOP_MID, 0, TILE_ICON + 18);
 
     std::string sub;
     if (info != nullptr && !info->version.empty())
       sub = "v" + info->version;
     if (info != nullptr && info->size > 0)
-      sub += (sub.empty() ? "" : " \xC2\xB7 ") + size_text(info->size + info->data_size);
+      sub += (sub.empty() ? "" : "  |  ") + size_text(info->size + info->data_size);
     if (!sub.empty()) {
       lv_obj_t *meta = text_label(tile, sub, COLOR_MUTED);
       set_font(meta, small_font());
-      lv_obj_set_width(meta, TILE_W - 16);
-      lv_label_set_long_mode(meta, LV_LABEL_LONG_DOT);
+      one_line(meta, TILE_W - 16);
       lv_obj_set_style_text_align(meta, LV_TEXT_ALIGN_CENTER, 0);
-      lv_obj_align(meta, LV_ALIGN_TOP_MID, 0, TILE_ICON + 52);
+      lv_obj_align(meta, LV_ALIGN_TOP_MID, 0, TILE_ICON + 44);
     }
 
     // INSTALLED / UPDATE, from the listing next to an installed copy.
@@ -696,13 +702,12 @@ void PappLoader::open_detail_(int index) {
   lv_obj_t *name = text_label(panel, title, 0xFFFFFF);
   set_font(name, title_font());
   lv_obj_set_pos(name, text_x, margin - 4);
-  lv_obj_set_width(name, text_w);
-  lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+  one_line(name, text_w);
 
   std::string meta;
   auto add = [&meta](const std::string &part) {
     if (!part.empty())
-      meta += (meta.empty() ? "" : "   \xC2\xB7   ") + part;
+      meta += (meta.empty() ? "" : "   |   ") + part;
   };
   if (info != nullptr) {
     add(info->author.empty() ? "" : "by " + info->author);
@@ -738,7 +743,7 @@ void PappLoader::open_detail_(int index) {
   if (info != nullptr && !info->controls.empty()) {
     body += "Controls\n";
     for (const auto &line : info->controls)
-      body += "  \xE2\x80\xA2 " + line + "\n";
+      body += "  -  " + line + "\n";  // the built-in fonts are ASCII plus symbols
     body += "\n";
   }
   if (info != nullptr && (!info->upstream.empty() || !info->source.empty())) {

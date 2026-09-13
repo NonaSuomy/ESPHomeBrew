@@ -720,6 +720,17 @@ class ReadFileTests(unittest.TestCase):
         long = eb.describe_file("/sd/big.txt", b"x" * (eb.READFILE_INLINE_CHARS + 10))
         self.assertIn(f"first {eb.READFILE_INLINE_CHARS} of", long)
 
+    def test_serial_capture_is_allowed_with_seconds(self):
+        self.cfg.devices = [*self.cfg.devices, "/dev/ttyUSB0"]
+        eb.validate(self.req("readfile path=/sd/x.txt seconds=10 serial=/dev/ttyUSB0"), self.cfg)
+        with self.assertRaises(eb.BridgeError):
+            eb.validate(self.req("readfile path=/sd/x.txt serial=/dev/ttyUSB0"), self.cfg)
+
+    def test_panic_lines_are_picked_out(self):
+        serial = "I (1) boot\nassert failed: sdmmc_isr sdmmc_host.c:123 (ok)\nCore  0 register dump:\nE psram_mspi: MSPI PSRAM error\n"
+        self.assertEqual([line for line in serial.splitlines() if eb.PANIC_LINE.search(line)],
+                         ["assert failed: sdmmc_isr sdmmc_host.c:123 (ok)", "E psram_mspi: MSPI PSRAM error"])
+
     def test_readfile_job_posts_the_text(self):
         port = fake_stream_server(file_packet(0, b"CRC[0]=0000abcd\n"))
         calls = []

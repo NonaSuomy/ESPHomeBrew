@@ -1259,7 +1259,7 @@ void PappLoader::flush_framebuffer_() {
   ++flush_frames;
   flush_total_us += flush_us;
   flush_worst_us = std::max(flush_worst_us, flush_us);
-  if (flush_frames == 60) {
+  if (flush_frames == 1800) {
     ESP_LOGI(TAG, "PAPP video flush: avg=%lld us worst=%lld us last=%lld us",
              static_cast<long long>(flush_total_us / flush_frames),
              static_cast<long long>(flush_worst_us), static_cast<long long>(flush_us));
@@ -1780,7 +1780,7 @@ void PappLoader::audio_submit_(short *stereo_buf, int frame_count) {
   const size_t written = this->speaker_->play(reinterpret_cast<const uint8_t *>(stereo_buf), bytes, pdMS_TO_TICKS(100));
   static int64_t last_audio_debug_log_us = 0;
   const int64_t audio_now_us = esp_timer_get_time();
-  if (audio_now_us - last_audio_debug_log_us >= 1000000) {
+  if (audio_now_us - last_audio_debug_log_us >= 30000000) {
     int peak = 0;
     for (int i = 0; i < frame_count * 2; i++) {
       const int value = std::abs(static_cast<int>(stereo_buf[i]));

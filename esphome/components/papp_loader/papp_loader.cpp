@@ -312,8 +312,9 @@ void PappLoader::setup() {
     // A lower-priority stream task can be starved indefinitely even though it
     // deliberately sleeps between packets. Match that priority so FreeRTOS
     // time-slices it, then yield for 200 ms after every packet batch.
+    // 16 KiB: `readfile` runs FATFS (long-file-name buffers) and stat() here.
     const BaseType_t result = xTaskCreatePinnedToCore(
-        &PappLoader::screen_stream_task_entry_, "papp_stream", 8192, this, 5,
+        &PappLoader::screen_stream_task_entry_, "papp_stream", 16384, this, 5,
         &this->stream_task_handle_, 0);
     if (result != pdPASS)
       ESP_LOGW(TAG, "Could not start optional screen stream task");

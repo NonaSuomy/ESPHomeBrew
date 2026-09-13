@@ -275,8 +275,8 @@ def validate(req: Request, cfg: Config) -> Path | None:
     if (req.action in {"logs", "run"} or req.seconds_given) and not 5 <= req.seconds <= cfg.max_log_seconds:
         raise BridgeError(f"`seconds` must be between 5 and {cfg.max_log_seconds}.")
     if req.serial is not None:
-        if req.action not in ("launch", "close") or not req.seconds_given:
-            raise BridgeError("`serial=` goes with `launch`/`close` and `seconds=`.")
+        if req.action not in ("launch", "close", "readfile") or not req.seconds_given:
+            raise BridgeError("`serial=` goes with `launch`/`close`/`readfile` and `seconds=`.")
         if req.serial not in cfg.devices:
             raise BridgeError(f"Serial port `{req.serial}` is not in this bridge's allowlist.")
     if req.action in DEVICE_API_ACTIONS:
@@ -534,6 +534,9 @@ class SerialCapture:
 # A live panic dump (serial), or the report ESPHome's esp32 crash handler logs
 # after the reboot ("[E][esp32.crash:...]:   BT0: 0x4FF0A146 (backtrace)").
 CRASH = re.compile(r"abort\(\) was called|Guru Meditation|panic'ed|^MEPC\s*:|^Backtrace:|esp32\.crash\S*:\s+(?:PC|BT\d+):", re.M)
+# The lines of a serial panic that say what failed (the assert text only goes to serial).
+PANIC_LINE = re.compile(r"assert failed|abort\(\) was called|Guru Meditation|panic'ed|stack overflow|"
+                        r"MSPI PSRAM error|psram (?:pms|read address|rx|tx)|Stack protection|^E \w+: ", re.M)
 ELF_SHA = re.compile(r"ELF file SHA256:\s*([0-9a-fA-F]{8,64})")
 HEX = re.compile(r"0x([0-9a-fA-F]{8})\b")
 PAPP_BASE, PAPP_END = 0x4A000000, 0x4C000000
@@ -963,8 +966,30 @@ class Runner:
         if req.action == "readfile":
             if self.dry_run:
                 return JobResult(True, f"📄 `{req.path}` would be read from {self.cfg.api_host} (dry run).", "", 0.0)
-            content = capture_file(self.cfg, req.path)
-            return JobResult(True, mask(describe_file(req.path, content), self.secrets), "", time.monotonic() - start)
+            if not req.serial:
+                content = capture_file(self.cfg, req.path)
+                return JobResult(True, mask(describe_file(req.path, content), self.secrets), "", time.monotonic() - start)
+            # With serial=, keep reading the console for `seconds` so a panic dump
+            # (its assert text only goes to serial) is captured too.
+            capture = SerialCapture(req.serial, self.cfg.max_log_bytes)
+            capture.start()
+            content, error = None, None
+            try:
+                content = capture_file(self.cfg, req.path)
+            except BridgeError as failure:
+                error = failure
+            finally:
+                time.sleep(req.seconds)
+                serial_log = capture.stop()
+            log = mask(f"=== serial {req.serial} ===\n{serial_log}", self.secrets)
+            summary = mask(describe_file(req.path, content), self.secrets) if content is not None else f"❌ `readfile` failed: {error}"
+            panic = [line for line in serial_log.splitlines() if PANIC_LINE.search(line)]
+            if panic:
+                summary += "\nSerial console:\n```\n" + mask("\n".join(panic[:12]), self.secrets) + "\n```"
+            decoded = decode_crash(self.cfg, log)
+            if decoded:
+                log += f"\n\n=== crash decoded ===\n{decoded}"
+            return JobResult(content is not None, summary, log, time.monotonic() - start)
         if req.action in DEVICE_API_ACTIONS:
             data = {"url": req.url or ""} if req.action == "launch" else {}
             served = ""

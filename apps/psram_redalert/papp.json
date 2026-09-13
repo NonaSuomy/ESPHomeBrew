@@ -3,6 +3,11 @@
   "title": "Red Alert",
   "version": "0.1.9",
   "description": "Command & Conquer: Red Alert (Vanilla Conquer) as a PAPP, with movies, music, touch, keyboard and mouse, and network multiplayer against PCs running Vanilla Conquer. LAN play works out of the box; for other networks or the internet, set [Network] Protocol=tcp and Host=<the host's IP> in /sd/roms/redalert/redalert.ini (the host needs Protocol=tcp and TCP port 1234 open). Needs your own REDALERT.MIX and MAIN.MIX (from the freeware release or your CDs) in /sd/roms/redalert/.",
+  "author": "Westwood / Electronic Arts; Vanilla Conquer port",
+  "category": "Game",
+  "license": "GPL-3.0 (Vanilla Conquer)",
+  "about": "Command & Conquer: Red Alert on Vanilla Conquer, with movies, music, touch, USB keyboard and mouse. Plays network games against PCs running Vanilla Conquer, on the LAN or over TCP across networks. Needs REDALERT.MIX and MAIN.MIX from the freeware release or your own discs in /sd/roms/redalert/.",
+  "icon": "icon.png",
   "dev_build": false,
   "build": "custom",
   "source": {

@@ -129,6 +129,8 @@ void papp_mp_wait(void);
 uint32_t papp_random_seed(void);
 extern const char tulip_desktop_help_text[];  // tulip/shared/help.c
 
+#define MP_SSIZE_MAX (0x7fffffff)  // newlib's limits.h has no SSIZE_MAX here
+
 typedef int32_t mp_int_t;   // must be pointer size
 typedef uint32_t mp_uint_t; // must be pointer size
 typedef long mp_off_t;

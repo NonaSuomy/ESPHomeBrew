@@ -26,6 +26,8 @@ Request format (reply in any channel, mention the bridge):
     @esp-bridge close
     @esp-bridge catalog
     @esp-bridge status
+    @esp-bridge view device.yaml source=local
+    @esp-bridge edit device.yaml source=local "find=refresh: 1d" "replace=refresh: 0s"   # edit_requesters only
     @esp-bridge launch url=… seconds=30 serial=/dev/ttyUSB0   # also read the serial port
 launch/close/catalog call the papp_loader API actions from esphome/device_control.yaml
 over the ESPHome native API (needs aioesphomeapi, which the ESPHome venv already has).
@@ -43,6 +45,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import difflib
 import fnmatch
 import hashlib
 import json
@@ -65,11 +68,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ACTIONS = ("status", "config", "compile", "upload", "logs", "run", "launch", "close", "catalog", "screenshot",
-           "readfile")
+           "readfile", "view", "edit")
 # Bridge action -> ESPHome API action (esphome/device_control.yaml).
 DEVICE_API_ACTIONS = {"launch": "papp_launch", "close": "papp_close", "catalog": "papp_refresh_catalog",
                       "screenshot": "papp_screenshot", "readfile": "papp_read_file"}
-NEEDS_YAML = {"config", "compile", "upload", "logs", "run"}
+NEEDS_YAML = {"config", "compile", "upload", "logs", "run", "view", "edit"}
+EDIT_TEXT_MAX = 4000  # characters in `find` / `replace`
+# Values of keys like these are hidden when a YAML is shown (`!secret` names stay visible).
+INLINE_SECRET = re.compile(r"(?im)^(\s*-?\s*[\w.-]*(?:password|passwd|psk|key|token|secret)[\w.-]*\s*:\s*)(?!!secret\b)(\S.*)$")
 NEEDS_DEVICE = {"upload", "logs", "run"}
 REF_RE = re.compile(r"^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,120}$")
 TAIL_LINES = 40
@@ -113,6 +119,7 @@ class Config:
     show_requests: bool = True
     firmware_elf: list[str] = field(default_factory=list)  # globs; default: the local/repo build dirs
     addr2line: str | None = None
+    edit_requesters: list[str] = field(default_factory=list)  # who may `edit` local YAML (none by default)
 
     @staticmethod
     def load(path: Path, *, need_token: bool = True) -> "Config":
@@ -160,6 +167,7 @@ class Config:
         cfg.screen_port = int(api.get("screen_port", 3233))
         cfg.proxy_port = int(api.get("proxy_port", 8765))
         cfg.show_requests = bool(raw.get("console", {}).get("show_requests", True))
+        cfg.edit_requesters = [h.lstrip("@").lower() for h in raw.get("actions", {}).get("edit_requesters", [])]
         elf = api.get("firmware_elf", [])
         cfg.firmware_elf = [elf] if isinstance(elf, str) else list(elf)
         cfg.addr2line = api.get("addr2line")
@@ -187,6 +195,9 @@ class Request:
     seconds_given: bool = False  # launch/close only capture device logs when asked
     serial: str | None = None  # also read this serial port during launch/close
     path: str | None = None  # readfile: a file or directory (ending in /) on the SD card
+    find: str | None = None  # edit: text that must occur exactly once in the YAML
+    replace: str | None = None  # edit: what replaces it
+    requester: str = ""  # handle that sent the request (edit is limited to [actions].edit_requesters)
 
 
 def request_words(text: str, handle: str) -> list[str] | None:
@@ -251,7 +262,7 @@ def parse_request(text: str, data: dict | None, handle: str) -> Request | None:
     return Request(action=action, yaml=fields.get("yaml"), ref=fields.get("ref", "main"),
                    source=fields.get("source", "repo").lower(), device=fields.get("device"), seconds=seconds,
                    url=fields.get("url"), seconds_given="seconds" in fields, serial=fields.get("serial"),
-                   path=fields.get("path"))
+                   path=fields.get("path"), find=fields.get("find"), replace=fields.get("replace"))
 
 
 def _inside(base: Path, rel: str) -> Path:
@@ -301,6 +312,19 @@ def validate(req: Request, cfg: Config) -> Path | None:
         return None
     if not req.yaml:
         raise BridgeError(f"`{req.action}` needs a YAML file.")
+    if req.action in ("view", "edit") and Path(req.yaml).name.lower().startswith("secrets"):
+        raise BridgeError("Secrets files can't be shown or edited through the bridge.")
+    if req.action == "edit":
+        # An edited config can pull in external components that run code here when it is
+        # compiled, so edits are limited to the handles the bridge owner lists.
+        if req.requester not in cfg.edit_requesters:
+            raise BridgeError(f"@{req.requester} may not edit YAML on this bridge (see [actions].edit_requesters).")
+        if req.source != "local":
+            raise BridgeError("`edit` only changes files in the local directory (`source=local`); change the repo with a PR.")
+        if not req.find or req.replace is None:
+            raise BridgeError("`edit` needs `find` (text that occurs exactly once) and `replace`.")
+        if len(req.find) > EDIT_TEXT_MAX or len(req.replace) > EDIT_TEXT_MAX:
+            raise BridgeError(f"`find` and `replace` are limited to {EDIT_TEXT_MAX} characters each.")
     if req.source == "repo":
         if not (cfg.repo_url and cfg.repo_path):
             raise BridgeError("This bridge has no repository configured; use `source=local`.")
@@ -767,6 +791,18 @@ def capture_file(cfg: Config, path: str, timeout: float = 20.0) -> bytes:
         raise BridgeError(f"Could not open the stream on {cfg.api_host}:{cfg.screen_port}: {error}.") from error
 
 
+def hide_inline_secrets(text: str) -> str:
+    """Hide values written straight into a YAML under password/key/token-like keys."""
+    return INLINE_SECRET.sub(lambda m: m.group(1) + "***", text)
+
+
+def code_block(text: str, lang: str = "") -> str:
+    """A chat code block whose lines can't mention anyone, become bridge requests or end it early."""
+    shown = text[:READFILE_INLINE_CHARS].replace("@", "@\u200b").replace("```", "``\u200b`")
+    more = f"\n(first {READFILE_INLINE_CHARS} of {len(text)} characters)" if len(text) > READFILE_INLINE_CHARS else ""
+    return f"```{lang}\n{shown}\n```{more}"
+
+
 def describe_file(path: str, content: bytes) -> str:
     """Chat text for a read file. Text is shown inline; other files only by size and hash,
     so game data never leaves the device through the chat."""
@@ -777,13 +813,8 @@ def describe_file(path: str, content: bytes) -> str:
     if text is None or "\0" in text:
         digest = hashlib.sha256(content).hexdigest()
         return f"📄 `{path}`: binary, {len(content)} bytes, sha256 `{digest[:16]}…` (not shown)."
-    # Neutralise mentions and fences so file lines cannot address people, become
-    # bridge requests or end the code block early.
-    shown = text[:READFILE_INLINE_CHARS].replace("@", "@\u200b").replace("```", "``\u200b`")
-    more = (f"\n(first {READFILE_INLINE_CHARS} of {len(text)} characters)"
-            if len(text) > READFILE_INLINE_CHARS else "")
     kind = "directory listing" if path.endswith("/") else f"{len(content)} bytes"
-    return f"📄 `{path}` ({kind}):\n```\n{shown}\n```{more}"
+    return f"📄 `{path}` ({kind}):\n{code_block(text)}"
 
 
 def capture_screenshot(cfg: Config, timeout: float = 20.0) -> tuple[int, int, bytes]:
@@ -948,6 +979,37 @@ class Runner:
             shutil.copyfile(src, target)
         return self._git("rev-parse", "HEAD").strip()
 
+    def edit_yaml(self, req: Request, yaml_path: Path, where: str, start: float) -> JobResult:
+        """Replace one exact occurrence, keep a backup, and undo it if `esphome config` fails."""
+        assert req.find is not None and req.replace is not None
+        raw = b"" if self.dry_run else yaml_path.read_bytes()
+        original = raw.decode("utf-8")
+        # Requests arrive with \n; match files saved with \r\n too.
+        crlf = "\r\n" in original
+        find, replace = (req.find.replace("\r\n", "\n").replace("\n", "\r\n"), req.replace.replace("\r\n", "\n").replace("\n", "\r\n")) if crlf else (req.find, req.replace)
+        count = original.count(find)
+        if not self.dry_run and count != 1:
+            raise BridgeError(f"`find` must occur exactly once in `{req.yaml}`; it occurs {count} times. Nothing was changed.")
+        updated = original.replace(find, replace, 1)
+        diff = "".join(difflib.unified_diff(original.replace("\r\n", "\n").splitlines(keepends=True),
+                                            updated.replace("\r\n", "\n").splitlines(keepends=True),
+                                            f"a/{req.yaml}", f"b/{req.yaml}", n=2))
+        shown = code_block(mask(hide_inline_secrets(diff), self.secrets), "diff")
+        if self.dry_run:
+            return JobResult(True, f"✏️ `{req.yaml}` would be edited (dry run).", "", 0.0)
+        backup = yaml_path.with_name(f"{yaml_path.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+        backup.write_bytes(raw)
+        yaml_path.write_bytes(updated.encode("utf-8"))
+        code, out, _ = run_process(esphome_argv(self.cfg, "config", yaml_path, None), yaml_path.parent,
+                                   self.cfg.timeouts["config"], self.cfg.max_log_bytes)
+        took = time.monotonic() - start
+        if code != 0:
+            yaml_path.write_bytes(raw)
+            return JobResult(False, f"❌ `esphome config` rejected the edit to `{req.yaml}`, so the original is back "
+                                    f"(unchanged; backup `{backup.name}`).\n{shown}", mask(out, self.secrets), took)
+        return JobResult(True, f"✏️ Edited `{req.yaml}` from {where}; `esphome config` passed. Backup: `{backup.name}`.\n{shown}",
+                         "", took)
+
     def execute(self, req: Request) -> JobResult:
         start = time.monotonic()
         if req.action == "status":
@@ -1025,6 +1087,13 @@ class Runner:
         yaml_path = _inside(base, req.yaml)
         if not self.dry_run and not yaml_path.exists():
             raise BridgeError(f"`{req.yaml}` does not exist at {where}.")
+        if req.action == "view":
+            text = "" if self.dry_run else yaml_path.read_bytes().decode("utf-8", errors="replace")
+            shown = mask(hide_inline_secrets(text), self.secrets)
+            return JobResult(True, f"📄 `{req.yaml}` from {where}, secret values hidden:\n{code_block(shown)}", "",
+                             time.monotonic() - start)
+        if req.action == "edit":
+            return self.edit_yaml(req, yaml_path, where, start)
         steps: list[tuple[str, list[str], int, int | None]] = []
         if req.action in {"config", "compile", "upload", "run"}:
             timeout = self.cfg.timeouts["upload"] + self.cfg.timeouts["compile"] if req.action == "run" else self.cfg.timeouts.get(req.action, 900)
@@ -1193,6 +1262,8 @@ def handle_event(event: dict, cfg: Config, hub: Hub, runner: Runner) -> None:
         req, refusal = None, str(error)
     else:
         refusal = None
+        if req is not None:
+            req.requester = author
     if req is None and refusal is None:
         return
     if author not in cfg.allowed_requesters:

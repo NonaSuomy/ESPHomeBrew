@@ -780,6 +780,84 @@ class ReadFileTests(unittest.TestCase):
         self.assertEqual(uploaded, [])
 
 
+class ViewEditTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = make_config(Path(self.tmp.name), enabled='["status", "config", "view", "edit"]')
+        self.cfg.edit_requesters = ["nona", "claude"]
+        self.runner = eb.Runner(self.cfg)
+        self.office = Path(self.tmp.name) / "local" / "office.yaml"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def req(self, text, requester="claude", **data):
+        if data:
+            req = eb.parse_request("", {"esp_bridge": {"action": text, **data}}, "esp-bridge")
+        else:
+            req = eb.parse_request("@esp-bridge " + text, None, "esp-bridge")
+        req.requester = requester
+        return req
+
+    def test_view_hides_secret_values_and_defuses_mentions(self):
+        self.office.write_text("esphome:\n  name: office\nwifi:\n  password: plain-secret-1\n  ssid: !secret wifi_ssid\n"
+                               "api:\n  encryption:\n    key: !secret api_key_016\nsubstitutions:\n  note: hunter2-long\n"
+                               "  cmd: '@esp-bridge launch'\n")
+        req = self.req("view office.yaml source=local")
+        eb.validate(req, self.cfg)
+        text = self.runner.execute(req).summary
+        self.assertIn("password: ***", text)
+        self.assertNotIn("plain-secret-1", text)
+        self.assertIn("key: !secret api_key_016", text)
+        self.assertNotIn("hunter2-long", text)
+        self.assertIsNone(eb.request_words(text, "esp-bridge"))
+
+    def test_edit_is_limited(self):
+        cases = [self.req("edit", "someone", yaml="office.yaml", source="local", find="a", replace="b"),
+                 self.req("edit", yaml="esphome/device.yaml", source="repo", find="a", replace="b"),
+                 self.req("edit", yaml="secrets.yaml", source="local", find="a", replace="b"),
+                 self.req("edit", yaml="office.yaml", source="local", replace="b"),
+                 self.req("edit", yaml="office.yaml", source="local", find="a" * (eb.EDIT_TEXT_MAX + 1), replace="b")]
+        for req in cases:
+            with self.subTest(req=req), self.assertRaises(eb.BridgeError):
+                eb.validate(req, self.cfg)
+        with self.assertRaises(eb.BridgeError):
+            eb.validate(self.req("view secrets.yaml source=local"), self.cfg)
+
+    def edit(self, find, replace, config_result=(0, "INFO Configuration is valid!", False)):
+        req = self.req("edit", yaml="office.yaml", source="local", find=find, replace=replace)
+        eb.validate(req, self.cfg)
+        with mock.patch.object(eb, "run_process", return_value=config_result) as run:
+            return self.runner.execute(req), run
+
+    def test_edit_replaces_once_keeps_a_backup_and_validates(self):
+        result, run = self.edit("name: office", "name: office2")
+        self.assertTrue(result.ok)
+        self.assertEqual(self.office.read_text(), "esphome:\n  name: office2\n")
+        backups = list(self.office.parent.glob("office.yaml.bak-*"))
+        self.assertEqual([b.read_text() for b in backups], ["esphome:\n  name: office\n"])
+        self.assertIn("+  name: office2", result.summary)
+        self.assertEqual(run.call_args[0][0][1], "config")
+
+    def test_rejected_edit_is_undone(self):
+        result, _ = self.edit("name: office", "name: [broken", (1, "ERROR bad yaml", False))
+        self.assertFalse(result.ok)
+        self.assertEqual(self.office.read_text(), "esphome:\n  name: office\n")
+        self.assertIn("original is back", result.summary)
+
+    def test_find_must_match_exactly_once(self):
+        with self.assertRaises(eb.BridgeError) as caught:
+            self.edit("e", "x")
+        self.assertIn("occurs", str(caught.exception))
+        self.assertEqual(self.office.read_text(), "esphome:\n  name: office\n")
+
+    def test_crlf_files_are_matched_and_kept(self):
+        self.office.write_bytes(b"esphome:\r\n  name: office\r\nlogger:\r\n")
+        result, _ = self.edit("  name: office\nlogger:", "  name: office\nlogger:\n  level: DEBUG")
+        self.assertTrue(result.ok)
+        self.assertEqual(self.office.read_bytes(), b"esphome:\r\n  name: office\r\nlogger:\r\n  level: DEBUG\r\n")
+
+
 class DeviceStageTests(unittest.TestCase):
     def tearDown(self):
         sys.modules.pop("aioesphomeapi", None)

@@ -75,6 +75,8 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 | `@esp-bridge catalog` | Reload the store list on the device |
 | `@esp-bridge screenshot` | Post an 800×480 PNG of the running PAPP in the thread |
 | `@esp-bridge readfile path=/sd/roms/redalert/DESYNCLOG.TXT` | Post a text file from the device's SD card; `path=/sd/roms/` lists a directory |
+| `@esp-bridge view device.yaml source=local` | Post the YAML with secret values hidden |
+| `@esp-bridge edit device.yaml source=local "find=refresh: 1d" "replace=refresh: 0s"` | Change one exact piece of a local YAML, then validate it (see below) |
 
 - **Where the code comes from.** `source=repo` (the default) builds from a clean checkout of this repository at `ref=`. `extra_files` (e.g. your `secrets.yaml`) are copied in first and never committed. `source=local` builds a file in your `[local].dir` as it is.
 - **Agents** can send the same fields as message data: `post_message { text: "@esp-bridge compile", data: { esp_bridge: { action: "compile", yaml: "esphome/device.yaml", ref: "main" } } }`.
@@ -121,6 +123,16 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 - Only paths under `/sd/` are served, without `..`, up to 1 MiB for a file and 64 KiB for a listing.
 - Text is posted inline, up to 15,000 characters, with mentions defused so a file line can't address anyone or become a bridge request. Binary files are reported by size and SHA-256 only, so game data never leaves the device through the chat.
 - It needs a loader and `device_control.yaml` with `papp_read_file`, and `readfile` in the bridge's `[actions].enabled`.
+
+## Viewing and editing your local YAML
+
+`view` posts one of your local YAML files, so the team can see how a device is set up. `edit` changes it without you having to open an editor.
+
+- **`view`** shows the whole file. Values in your `secrets.yaml` files become `***`, and so do values written straight under password-, key-, token-, psk- or secret-like keys. `!secret name` references stay visible, because they are only names.
+- **`edit`** replaces one exact piece of text. `find` must occur exactly once in the file, otherwise nothing changes. Before writing, the bridge saves the old file next to it as `<name>.bak-<date-time>`. It then runs `esphome config`; if that fails, it puts the original back and says why. The reply shows the change as a diff, with secrets hidden.
+  - One-line changes can go in the chat line with quotes: `"find=refresh: 1d" "replace=refresh: 0s"`. For multi-line changes, agents send them as message data: `{"esp_bridge": {"action": "edit", "yaml": "device.yaml", "source": "local", "find": "…", "replace": "…"}}`.
+- **Limits:** only `source=local` files that match `[local].allowed_yaml`, never `secrets*` files, and at most 4,000 characters for `find` and for `replace`. Repository files change through pull requests instead.
+- **Who may edit:** an edited config can pull in external components that run code on your machine when it is compiled. So `edit` only works for the handles in `[actions].edit_requesters`, a subset of `allowed_requesters`. Nobody is listed by default.
 
 ## What it will and won't do
 

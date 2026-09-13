@@ -3197,15 +3197,67 @@ std::string PappLoader::get_load_status() {
   return status;
 }
 
+#ifdef PAPP_LOADER_USE_LVGL
+// Plain objects and a label, like the page widgets, so this works whichever
+// LVGL widgets the config enables.
+void PappLoader::ensure_progress_overlay_() {
+  if (this->overlay_panel_ != nullptr)
+    return;
+  lv_obj_t *panel = lv_obj_create(lv_layer_top());
+  lv_obj_set_size(panel, 560, 84);
+  lv_obj_align(panel, LV_ALIGN_BOTTOM_MID, 0, -28);
+  lv_obj_set_style_bg_color(panel, lv_color_hex(0x0B1626), 0);
+  lv_obj_set_style_bg_opa(panel, LV_OPA_90, 0);
+  lv_obj_set_style_border_color(panel, lv_color_hex(0x38BDF8), 0);
+  lv_obj_set_style_border_width(panel, 1, 0);
+  lv_obj_set_style_radius(panel, 14, 0);
+  lv_obj_set_style_pad_all(panel, 14, 0);
+  lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_remove_flag(panel, LV_OBJ_FLAG_CLICKABLE);  // never blocks touches on the page
+  lv_obj_add_flag(panel, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t *label = lv_label_create(panel);
+  lv_obj_set_width(label, lv_pct(100));
+  lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+  lv_obj_set_style_text_color(label, lv_color_hex(0xE2E8F0), 0);
+  lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 0);
+
+  lv_obj_t *track = lv_obj_create(panel);
+  lv_obj_set_size(track, lv_pct(100), 10);
+  lv_obj_align(track, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_obj_set_style_pad_all(track, 0, 0);
+  lv_obj_set_style_border_width(track, 0, 0);
+  lv_obj_set_style_radius(track, 5, 0);
+  lv_obj_set_style_bg_color(track, lv_color_hex(0x1E293B), 0);
+  lv_obj_remove_flag(track, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_remove_flag(track, LV_OBJ_FLAG_CLICKABLE);
+
+  lv_obj_t *fill = lv_obj_create(track);
+  lv_obj_set_size(fill, 0, lv_pct(100));
+  lv_obj_align(fill, LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_set_style_border_width(fill, 0, 0);
+  lv_obj_set_style_radius(fill, 5, 0);
+  lv_obj_set_style_bg_color(fill, lv_color_hex(0x38BDF8), 0);
+  lv_obj_remove_flag(fill, LV_OBJ_FLAG_CLICKABLE);
+
+  this->overlay_panel_ = panel;
+  this->overlay_label_ = label;
+  this->overlay_fill_ = fill;
+}
+#endif
+
 void PappLoader::update_progress_ui_() {
 #ifdef PAPP_LOADER_USE_LVGL
-  if ((this->progress_fill_ == nullptr && this->progress_label_ == nullptr) || this->lvgl_ == nullptr ||
-      !this->lvgl_->is_loop_started() || this->lvgl_->is_paused())
+  if (this->lvgl_ == nullptr || !this->lvgl_->is_loop_started() || this->lvgl_->is_paused())
     return;
+  // Redraw when the progress changed, or when another page came on screen
+  // (whether the page's own widgets or the loader's panel shows it).
+  lv_obj_t *screen = lv_screen_active();
   const uint32_t seq = this->progress_seq_;
-  if (seq == this->progress_ui_seq_)
+  if (seq == this->progress_ui_seq_ && screen == this->progress_ui_screen_)
     return;
   this->progress_ui_seq_ = seq;
+  this->progress_ui_screen_ = screen;
 
   char status[PROGRESS_STATUS_SIZE];
   portENTER_CRITICAL(&this->progress_lock_);
@@ -3215,6 +3267,38 @@ void PappLoader::update_progress_ui_() {
   const uint32_t total = this->progress_total_;
   portEXIT_CRITICAL(&this->progress_lock_);
   status[sizeof(status) - 1] = '\0';
+
+  // The page's widgets when they are on screen, otherwise the loader's panel.
+  lv_obj_t *page_widget = this->progress_fill_ != nullptr ? this->progress_fill_ : this->progress_label_;
+  const bool page_shows = page_widget != nullptr && lv_obj_get_screen(page_widget) == screen;
+  if (!page_shows) {
+    const bool show = active || status[0] != '\0';
+    if (!show && this->overlay_panel_ == nullptr)
+      return;
+    this->ensure_progress_overlay_();
+    if (!show) {
+      lv_obj_add_flag(this->overlay_panel_, LV_OBJ_FLAG_HIDDEN);
+      return;
+    }
+    const int32_t percent =
+        active && total > 0 ? static_cast<int32_t>(std::min<uint64_t>(100, static_cast<uint64_t>(done) * 100 / total)) : 0;
+    lv_obj_set_width(this->overlay_fill_, lv_pct(percent));
+    lv_obj_set_style_bg_opa(lv_obj_get_parent(this->overlay_fill_), active ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_label_set_text(this->overlay_label_, status[0] != '\0' ? status : "Loading...");
+    lv_obj_remove_flag(this->overlay_panel_, LV_OBJ_FLAG_HIDDEN);
+    if (active) {
+      this->cancel_timeout("papp_progress_overlay");
+    } else {
+      // A failure message floats over every page, so let it go after a while.
+      this->set_timeout("papp_progress_overlay", 8000, [this]() {
+        if (this->overlay_panel_ != nullptr)
+          lv_obj_add_flag(this->overlay_panel_, LV_OBJ_FLAG_HIDDEN);
+      });
+    }
+    return;
+  }
+  if (this->overlay_panel_ != nullptr)
+    lv_obj_add_flag(this->overlay_panel_, LV_OBJ_FLAG_HIDDEN);
 
   if (this->progress_fill_ != nullptr) {
     lv_obj_t *track = lv_obj_get_parent(this->progress_fill_);

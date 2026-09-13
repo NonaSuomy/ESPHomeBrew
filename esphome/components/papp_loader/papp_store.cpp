@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <memory>
 #include <new>
 #include <sys/stat.h>
 
@@ -21,9 +22,7 @@
 #include "esphome/core/log.h"
 #include "mbedtls/base64.h"
 
-#ifdef PAPP_LOADER_USE_LVGL
 #include "PNGdec.h"
-#endif
 
 namespace esphome {
 namespace papp_loader {
@@ -137,6 +136,84 @@ static std::string size_text(uint32_t bytes) {
   return text;
 }
 
+// ── Icon decoding (runs in the info task, and for the detail page) ─────────
+
+struct IconDecode {
+  PNG *png;
+  uint16_t *row;       // one decoded line
+  uint32_t *acc;       // box-filter accumulators, 3 per output pixel
+  uint16_t *counts;    // source pixels per output pixel
+  uint16_t *out;
+  uint16_t src_w, src_h, side;
+};
+
+static void icon_draw(PNGDRAW *draw) {
+  auto *d = static_cast<IconDecode *>(draw->pUser);
+  d->png->getLineAsRGB565(draw, d->row, PNG_RGB565_LITTLE_ENDIAN, ICON_BLEND_BGR);
+  const uint32_t oy = static_cast<uint32_t>(draw->y) * d->side / d->src_h;
+  for (uint32_t x = 0; x < d->src_w; x++) {
+    const uint32_t ox = x * d->side / d->src_w;
+    const uint16_t p = d->row[x];
+    uint32_t *a = d->acc + (oy * d->side + ox) * 3;
+    a[0] += p >> 11;
+    a[1] += (p >> 5) & 0x3F;
+    a[2] += p & 0x1F;
+    d->counts[oy * d->side + ox]++;
+  }
+}
+
+// Decodes a PNG and box-filters it down (or nearest-up) to side x side RGB565
+// in PSRAM. Safe from any task: each call has its own decoder.
+static std::shared_ptr<uint16_t> decode_png_icon(const std::vector<uint8_t> &png_bytes, uint16_t side) {
+  if (png_bytes.empty())
+    return nullptr;
+  void *memory = heap_caps_malloc(sizeof(PNG), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (memory == nullptr)
+    return nullptr;
+  PNG *png = new (memory) PNG();
+  std::shared_ptr<uint16_t> result;
+  if (png->openRAM(const_cast<uint8_t *>(png_bytes.data()), static_cast<int>(png_bytes.size()), icon_draw) ==
+      PNG_SUCCESS) {
+    const uint16_t w = png->getWidth(), h = png->getHeight();
+    const size_t cells = static_cast<size_t>(side) * side;
+    IconDecode d{};
+    d.png = png;
+    d.src_w = w;
+    d.src_h = h;
+    d.side = side;
+    bool ok = w > 0 && h > 0 && w <= 512 && h <= 512;
+    if (ok) {
+      d.row = static_cast<uint16_t *>(heap_caps_malloc(w * sizeof(uint16_t), MALLOC_CAP_SPIRAM));
+      d.acc = static_cast<uint32_t *>(heap_caps_calloc(cells * 3, sizeof(uint32_t), MALLOC_CAP_SPIRAM));
+      d.counts = static_cast<uint16_t *>(heap_caps_calloc(cells, sizeof(uint16_t), MALLOC_CAP_SPIRAM));
+      d.out = static_cast<uint16_t *>(heap_caps_malloc(cells * sizeof(uint16_t), MALLOC_CAP_SPIRAM));
+      ok = d.row && d.acc && d.counts && d.out && png->decode(&d, 0) == PNG_SUCCESS;  // state rides in pUser
+    }
+    png->close();
+    if (ok) {
+      for (size_t i = 0; i < cells; i++) {
+        const uint32_t n = d.counts[i];
+        if (n == 0) {
+          // Upscaling leaves gaps: take the cell above or to the left.
+          d.out[i] = i >= side ? d.out[i - side] : (i > 0 ? d.out[i - 1] : 0);
+          continue;
+        }
+        const uint32_t *a = d.acc + i * 3;
+        d.out[i] = static_cast<uint16_t>(((a[0] / n) << 11) | ((a[1] / n) << 5) | (a[2] / n));
+      }
+      result = std::shared_ptr<uint16_t>(d.out, [](uint16_t *p) { heap_caps_free(p); });
+      d.out = nullptr;
+    }
+    heap_caps_free(d.row);
+    heap_caps_free(d.acc);
+    heap_caps_free(d.counts);
+    heap_caps_free(d.out);
+  }
+  png->~PNG();
+  heap_caps_free(memory);
+  return result;
+}
+
 // ── Listings ────────────────────────────────────────────────────────────────
 
 void PappLoader::start_info_fetch_() {
@@ -172,11 +249,14 @@ void PappLoader::papp_info_task_entry_(void *arg) {
                                                           : read_small_file(sidecar, &text, INFO_MAX_BYTES);
     if (err == ESP_OK && parse_app_info(text, &infos[i])) {
       infos[i].sidecar = std::move(text);
+      // Decoded here, not on the LVGL loop: a folder of 30+ apps took seconds there.
+      infos[i].tile_icon = decode_png_icon(infos[i].icon_png, TILE_ICON);
       found++;
     }
   }
   ESP_LOGI(TAG, "App info: %u of %u app(s) have a listing", static_cast<unsigned>(found),
            static_cast<unsigned>(urls.size()));
+  self->info_installed_ = scan_installed_(self->install_dir_);
   self->info_result_ = std::move(infos);
   self->info_done_ = true;
   for (;;)
@@ -198,28 +278,31 @@ void PappLoader::poll_info_fetch_() {
     return;
   }
   this->app_info_ = std::move(this->info_result_);
+  this->installed_ = std::move(this->info_installed_);
 #ifdef PAPP_LOADER_USE_LVGL
   this->catalog_ui_pending_ = true;
 #endif
 }
 
-void PappLoader::scan_installed_() {
-  this->installed_.clear();
-  const std::string dir = runtime_path(this->install_dir_.c_str());
-  DIR *folder = opendir(dir.c_str());
+// name -> version of every app with a listing in install_dir. Reads the card,
+// so it runs in the info and install tasks.
+std::vector<std::pair<std::string, std::string>> PappLoader::scan_installed_(const std::string &install_dir) {
+  std::vector<std::pair<std::string, std::string>> installed;
+  DIR *folder = opendir(runtime_path(install_dir.c_str()).c_str());
   if (folder == nullptr)
-    return;
+    return installed;
   while (dirent *entry = readdir(folder)) {
     const std::string file = entry->d_name;
     if (file.size() < 6 || file.compare(file.size() - 5, 5, ".json") != 0)
       continue;
     std::string text;
     AppInfo info;
-    if (read_small_file(this->install_dir_ + "/" + file, &text, INFO_MAX_BYTES) == ESP_OK &&
-        parse_app_info(text, &info) && !info.name.empty())
-      this->installed_.emplace_back(info.name, info.version);
+    if (read_small_file(install_dir + "/" + file, &text, INFO_MAX_BYTES) == ESP_OK && parse_app_info(text, &info) &&
+        !info.name.empty())
+      installed.emplace_back(info.name, info.version);
   }
   closedir(folder);
+  return installed;
 }
 
 std::string PappLoader::installed_version_(const std::string &name) const {
@@ -289,6 +372,7 @@ void PappLoader::papp_install_task_entry_(void *arg) {
     }
     self->set_progress_(false, 0, 0, "Installed %.60s", info.title.empty() ? info.name.c_str() : info.title.c_str());
   }
+  self->install_installed_ = scan_installed_(self->install_dir_);
   self->install_result_ = err;
   self->install_done_ = true;
   for (;;)
@@ -301,6 +385,7 @@ void PappLoader::poll_install_() {
   vTaskDelete(this->install_task_handle_);
   this->install_task_handle_ = nullptr;
   ESP_LOGI(TAG, "Install finished: %s", esp_err_to_name(this->install_result_));
+  this->installed_ = std::move(this->install_installed_);
 #ifdef PAPP_LOADER_USE_LVGL
   // Rebuilt with the new badges; an open detail page reopens with Launch.
   this->catalog_ui_pending_ = true;
@@ -311,95 +396,23 @@ void PappLoader::poll_install_() {
 
 // ── Icons ───────────────────────────────────────────────────────────────────
 
-struct IconDecode {
-  PNG *png;
-  uint16_t *row;       // one decoded line
-  uint32_t *acc;       // box-filter accumulators, 3 per output pixel
-  uint16_t *counts;    // source pixels per output pixel
-  uint16_t *out;
-  uint16_t src_w, src_h, side;
-};
-
-static void icon_draw(PNGDRAW *draw) {
-  auto *d = static_cast<IconDecode *>(draw->pUser);
-  d->png->getLineAsRGB565(draw, d->row, PNG_RGB565_LITTLE_ENDIAN, ICON_BLEND_BGR);
-  const uint32_t oy = static_cast<uint32_t>(draw->y) * d->side / d->src_h;
-  for (uint32_t x = 0; x < d->src_w; x++) {
-    const uint32_t ox = x * d->side / d->src_w;
-    const uint16_t p = d->row[x];
-    uint32_t *a = d->acc + (oy * d->side + ox) * 3;
-    a[0] += p >> 11;
-    a[1] += (p >> 5) & 0x3F;
-    a[2] += p & 0x1F;
-    d->counts[oy * d->side + ox]++;
-  }
-}
-
-// Decodes a PNG and box-filters it down (or nearest-up) to side x side RGB565.
-bool PappLoader::decode_icon_(const std::vector<uint8_t> &png_bytes, uint16_t side, AppIcon *out) {
-  static PNG *png = nullptr;
-  if (png == nullptr) {
-    void *memory = heap_caps_malloc(sizeof(PNG), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (memory == nullptr)
-      return false;
-    png = new (memory) PNG();
-  }
-  if (png_bytes.empty() ||
-      png->openRAM(const_cast<uint8_t *>(png_bytes.data()), static_cast<int>(png_bytes.size()), icon_draw) != PNG_SUCCESS)
-    return false;
-  const uint16_t w = png->getWidth(), h = png->getHeight();
-  if (w == 0 || h == 0 || w > 512 || h > 512) {
-    png->close();
-    return false;
-  }
-  const size_t cells = static_cast<size_t>(side) * side;
-  IconDecode d{};
-  d.png = png;
-  d.src_w = w;
-  d.src_h = h;
-  d.side = side;
-  d.row = static_cast<uint16_t *>(heap_caps_malloc(w * sizeof(uint16_t), MALLOC_CAP_SPIRAM));
-  d.acc = static_cast<uint32_t *>(heap_caps_calloc(cells * 3, sizeof(uint32_t), MALLOC_CAP_SPIRAM));
-  d.counts = static_cast<uint16_t *>(heap_caps_calloc(cells, sizeof(uint16_t), MALLOC_CAP_SPIRAM));
-  d.out = static_cast<uint16_t *>(heap_caps_malloc(cells * sizeof(uint16_t), MALLOC_CAP_SPIRAM));
-  bool ok = d.row && d.acc && d.counts && d.out;
-  if (ok)
-    ok = png->decode(&d, 0) == PNG_SUCCESS;  // the decode state rides in pUser
-  png->close();
-  if (ok) {
-    for (size_t i = 0; i < cells; i++) {
-      const uint32_t n = d.counts[i];
-      if (n == 0) {
-        // Upscaling leaves gaps: take the cell above or to the left.
-        d.out[i] = i >= side ? d.out[i - side] : (i > 0 ? d.out[i - 1] : 0);
-        continue;
-      }
-      const uint32_t *a = d.acc + i * 3;
-      d.out[i] = static_cast<uint16_t>(((a[0] / n) << 11) | ((a[1] / n) << 5) | (a[2] / n));
-    }
-    out->pixels = d.out;
-    std::memset(&out->dsc, 0, sizeof(out->dsc));
-    out->dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-    out->dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-    out->dsc.header.w = side;
-    out->dsc.header.h = side;
-    out->dsc.header.stride = side * sizeof(uint16_t);
-    out->dsc.data_size = cells * sizeof(uint16_t);
-    out->dsc.data = reinterpret_cast<const uint8_t *>(d.out);
-    d.out = nullptr;
-  }
-  heap_caps_free(d.row);
-  heap_caps_free(d.acc);
-  heap_caps_free(d.counts);
-  heap_caps_free(d.out);
-  return ok;
+// Shows decoded pixels through an image descriptor; the icon keeps them alive.
+void PappLoader::set_icon_(AppIcon *icon, std::shared_ptr<uint16_t> pixels, uint16_t side) {
+  *icon = AppIcon{};
+  icon->pixels = std::move(pixels);
+  icon->dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+  icon->dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+  icon->dsc.header.w = side;
+  icon->dsc.header.h = side;
+  icon->dsc.header.stride = side * sizeof(uint16_t);
+  icon->dsc.data_size = static_cast<uint32_t>(side) * side * sizeof(uint16_t);
+  icon->dsc.data = reinterpret_cast<const uint8_t *>(icon->pixels.get());
 }
 
 void PappLoader::release_icon_(AppIcon *icon) {
   // Raw RGB565 is drawn straight from these pixels (nothing decoded into
-  // LVGL's image cache), so they can simply be freed once no object shows them.
-  if (icon->pixels != nullptr)
-    heap_caps_free(icon->pixels);
+  // LVGL's image cache), so dropping the reference once no object shows them
+  // is enough; the listing may still hold its own.
   *icon = AppIcon{};
 }
 
@@ -407,6 +420,7 @@ void PappLoader::free_icons_() {
   for (auto &icon : this->tile_icons_)
     release_icon_(&icon);
   this->tile_icons_.clear();
+}
 }
 
 // ── Grid ────────────────────────────────────────────────────────────────────
@@ -518,7 +532,6 @@ void PappLoader::store_tile_event_cb_(lv_event_t *event) {
 void PappLoader::build_store_grid_() {
   this->free_icons_();
   this->catalog_tiles_.clear();
-  this->scan_installed_();
   if (this->catalog_entries_.empty())
     return;
 
@@ -562,7 +575,8 @@ void PappLoader::build_store_grid_() {
     lv_obj_set_style_radius(icon, 24, 0);
     lv_obj_set_style_clip_corner(icon, true, 0);
     lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
-    if (info != nullptr && this->decode_icon_(info->icon_png, TILE_ICON, &this->tile_icons_[i])) {
+    if (info != nullptr && info->tile_icon) {
+      set_icon_(&this->tile_icons_[i], info->tile_icon, TILE_ICON);
       lv_obj_set_style_bg_image_src(icon, &this->tile_icons_[i].dsc, 0);
       lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, 0);
     } else {
@@ -655,7 +669,10 @@ void PappLoader::open_detail_(int index) {
   lv_obj_set_pos(icon, margin, margin);
   lv_obj_set_style_radius(icon, 36, 0);
   lv_obj_set_style_clip_corner(icon, true, 0);
-  if (info != nullptr && this->decode_icon_(info->icon_png, DETAIL_ICON, &this->detail_icon_)) {
+  // One icon at the larger size is quick enough to decode here.
+  std::shared_ptr<uint16_t> big = info != nullptr ? decode_png_icon(info->icon_png, DETAIL_ICON) : nullptr;
+  if (big) {
+    set_icon_(&this->detail_icon_, std::move(big), DETAIL_ICON);
     lv_obj_set_style_bg_image_src(icon, &this->detail_icon_.dsc, 0);
     lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, 0);
   } else {

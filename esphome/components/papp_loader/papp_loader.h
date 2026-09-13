@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -466,6 +467,7 @@ class PappLoader : public Component {
     std::string sha256;
     std::string sidecar;            // the raw JSON, saved next to an installed copy
     std::vector<uint8_t> icon_png;  // decoded from the listing's base64 icon
+    std::shared_ptr<uint16_t> tile_icon;  // 112x112 RGB565 in PSRAM, decoded by the info task
   };
 
  protected:
@@ -484,7 +486,10 @@ class PappLoader : public Component {
   void poll_info_fetch_();
   // name -> installed version, from <install_dir>/*.json.
   std::vector<std::pair<std::string, std::string>> installed_;
-  void scan_installed_();
+  // The same, as found by the info and install tasks; the loop takes it over.
+  std::vector<std::pair<std::string, std::string>> info_installed_;
+  std::vector<std::pair<std::string, std::string>> install_installed_;
+  static std::vector<std::pair<std::string, std::string>> scan_installed_(const std::string &install_dir);
   std::string installed_version_(const std::string &name) const;
   // Install/Update of one app: the .papp (checked against its size and
   // sha256), its data, then its listing, in a task.
@@ -529,7 +534,7 @@ class PappLoader : public Component {
   bool launcher_r_state_{false};
   // Store view widgets.
   struct AppIcon {
-    uint16_t *pixels{nullptr};
+    std::shared_ptr<uint16_t> pixels;
     lv_image_dsc_t dsc{};
   };
   std::vector<AppIcon> tile_icons_;  // per app, 112x112
@@ -555,8 +560,8 @@ class PappLoader : public Component {
   static void store_tile_event_cb_(lv_event_t *event);
   static void store_button_event_cb_(lv_event_t *event);
   static void release_icon_(AppIcon *icon);
+  static void set_icon_(AppIcon *icon, std::shared_ptr<uint16_t> pixels, uint16_t side);
   void free_icons_();
-  bool decode_icon_(const std::vector<uint8_t> &png, uint16_t side, AppIcon *out);
   void build_store_grid_();
   void open_detail_(int index);
   void close_detail_();

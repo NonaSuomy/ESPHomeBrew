@@ -182,6 +182,13 @@ class PappLoader : public Component {
   static int svc_net_udp_recv(int handle, void *buf, int len, uint32_t *ip, uint16_t *port);
   static void svc_net_udp_close(int handle);
   static int svc_net_ipv4(uint32_t *ip, uint32_t *netmask);
+  static int svc_net_tcp_connect(uint32_t ip, uint16_t port);
+  static int svc_net_tcp_listen(uint16_t port);
+  static int svc_net_tcp_accept(int handle, uint32_t *ip, uint16_t *port);
+  static int svc_net_tcp_send(int handle, const void *buf, int len);
+  static int svc_net_tcp_recv(int handle, void *buf, int len);
+  static int svc_net_poll(int handle);
+  static int svc_net_resolve(const char *host, uint32_t *ip);
   static void close_app_sockets_();
   static void *svc_file_open(const char *path, const char *mode);
   static int svc_file_close(void *stream);

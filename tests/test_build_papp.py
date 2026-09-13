@@ -33,6 +33,31 @@ class ManifestTests(unittest.TestCase):
                 if m["build"] == "custom":
                     self.assertTrue(m["groups"])
                 bp.check_data(m["name"], m.get("data"))
+                bp.store_info(m["name"], m, path.parent)
+
+    def test_store_listing_is_checked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "psram_x"
+            folder.mkdir()
+
+            def png(w, h, pad=0):
+                return b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", w, h) + b"\x00" * (5 + pad)
+
+            (folder / "icon.png").write_bytes(png(96, 96))
+            info = bp.store_info("psram_x", {"author": " giltal ", "controls": ["A: fire"], "icon": "icon.png"}, folder)
+            self.assertEqual((info["author"], info["controls"]), ("giltal", ["A: fire"]))
+            self.assertEqual((info["icon"]["width"], info["icon"]["height"], info["icon"]["type"]), (96, 96, "image/png"))
+            self.assertEqual(bp.store_info("psram_x", {}, folder), {})
+            (folder / "big.png").write_bytes(png(256, 64))
+            (folder / "heavy.png").write_bytes(png(64, 64, pad=bp.MAX_ICON_BYTES))
+            (folder / "fake.png").write_bytes(b"GIF89a" + b"\x00" * 30)
+            (Path(tmp) / "outside.png").write_bytes(png(8, 8))
+            bad = [{"icon": "big.png"}, {"icon": "heavy.png"}, {"icon": "fake.png"}, {"icon": "../outside.png"},
+                   {"icon": "missing.png"}, {"author": ""}, {"about": "x" * 2001}, {"controls": []},
+                   {"controls": ["x" * 61]}, {"controls": "A: fire"}]
+            for manifest in bad:
+                with self.subTest(manifest=str(manifest)[:40]), self.assertRaises(ValueError):
+                    bp.store_info("psram_x", manifest, folder)
 
     def test_data_blocks_are_checked(self):
         good = {"repo": "https://github.com/o/r", "ref": "a" * 40, "license": "shareware",

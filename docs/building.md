@@ -24,6 +24,24 @@ Every app in this store lives in `apps/<name>/papp.json`. GitHub Actions (`.gith
   - `custom`: an explicit recipe for bigger ports. See below.
 - For `lvgl` and `plain`, the app folder must contain its `*.c` files and, for LVGL apps, `lv_conf.h`.
 
+### Store listing (optional)
+
+What a store screen shows before an app is downloaded:
+
+```json
+{
+  "author": "giltal",
+  "category": "Game",
+  "about": "A longer description for the app's detail screen.",
+  "controls": ["D-pad: move", "A: fire", "Start: menu"],
+  "icon": "icon.png"
+}
+```
+
+- `author` (up to 60 characters), `category` (30) and `about` (2000) are text; `controls` is 1–20 lines of up to 60 characters.
+- `icon` is a PNG in the app's folder, at most 128×128 and 32 KB. Use your own or freely licensed art, not official game logos.
+- Publish store puts all of it, with the icon as base64, the `.papp` size and the data size, into `store.json` and into a sidecar next to each app (`psram_doom-0.1.1.json`, found by swapping `.papp` for `.json`). The icon is also published as `psram_doom-0.1.1.png`, which the web page shows. A LAN server or SD folder can carry the same sidecar next to its `.papp` files.
+
 Sources come from the `source` repository at a pinned commit, and so does the PAPP SDK (`psram_app.h`, `psram_app.ld`, `pack_papp.py`), so an app always builds against the loader ABI of its own tree. They are fetched at build time rather than copied here, because upstream has no license file. Today the apps come from [NonaSuomy/RetroESP32-P4](https://github.com/NonaSuomy/RetroESP32-P4) (`papp-serial-upload`) and [giltal/RetroESP32-P4](https://github.com/giltal/RetroESP32-P4).
 
 ### Custom recipes

@@ -17,6 +17,7 @@ Needs the ESP-IDF RISC-V toolchain (riscv32-esp-elf-*) on PATH and git.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -286,6 +287,46 @@ def custom_units(manifest: dict, src_root: Path, build_dir: Path) -> tuple[list[
     return units, ldflags
 
 
+MAX_ICON_BYTES = 32 * 1024
+MAX_ICON_SIDE = 128
+STORE_TEXT_LIMITS = {"author": 60, "category": 30, "about": 2000}
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def store_info(name: str, manifest: dict, app_dir: Path) -> dict:
+    """The store listing extras from papp.json: author, category, about, controls and icon.
+
+    All optional. The icon is a PNG in the app's folder, at most 128x128 and
+    32 KB, carried as base64 so a catalog or sidecar needs no second request.
+    """
+    info: dict = {}
+    for key, limit in STORE_TEXT_LIMITS.items():
+        if key in manifest:
+            value = manifest[key]
+            if not isinstance(value, str) or not value.strip() or len(value) > limit:
+                raise ValueError(f"{name}: {key} must be text of 1 to {limit} characters")
+            info[key] = value.strip()
+    if "controls" in manifest:
+        controls = manifest["controls"]
+        if (not isinstance(controls, list) or not 1 <= len(controls) <= 20
+                or not all(isinstance(c, str) and 0 < len(c.strip()) <= 60 for c in controls)):
+            raise ValueError(f"{name}: controls must be 1 to 20 lines of up to 60 characters")
+        info["controls"] = [c.strip() for c in controls]
+    if "icon" in manifest:
+        path = (app_dir / str(manifest["icon"])).resolve()
+        if app_dir.resolve() not in path.parents or not path.is_file():
+            raise ValueError(f"{name}: icon must be a file inside apps/{name}/")
+        png = path.read_bytes()
+        if len(png) > MAX_ICON_BYTES or png[:8] != PNG_SIGNATURE or png[12:16] != b"IHDR":
+            raise ValueError(f"{name}: icon must be a PNG of at most {MAX_ICON_BYTES // 1024} KB")
+        width, height = struct.unpack(">II", png[16:24])
+        if not (0 < width <= MAX_ICON_SIDE and 0 < height <= MAX_ICON_SIDE):
+            raise ValueError(f"{name}: icon is {width}x{height}; at most {MAX_ICON_SIDE}x{MAX_ICON_SIDE}")
+        info["icon"] = {"type": "image/png", "width": width, "height": height,
+                        "base64": base64.b64encode(png).decode("ascii")}
+    return info
+
+
 def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
     manifest = json.loads(manifest_path.read_text())
     name = manifest["name"]
@@ -293,6 +334,7 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
         raise ValueError(f"{manifest_path}: name '{name}' must match its folder")
     print(f"=== {name} ===", flush=True)
     data_files = check_data(name, manifest.get("data"))
+    listing = store_info(name, manifest, manifest_path.parent)
 
     source = manifest["source"]
     build = manifest["build"]
@@ -426,6 +468,7 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
         info["publish"] = False
     if data_files:
         info["data"] = data_files
+    info.update(listing)
     (out / f"{name}.json").write_text(json.dumps(info, indent=2) + "\n")
     print(f"  {papp.name}: {len(data)} bytes, text={header['text_size']} bss={header['bss_size']}, sha256 {info['sha256'][:16]}", flush=True)
     return info

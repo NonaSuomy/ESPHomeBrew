@@ -34,6 +34,23 @@ class PappLoader : public Component {
   void set_path(const std::string &path) { this->path_ = path; }
   void set_catalog_url(const std::string &url) { this->catalog_url_ = url; }
   void refresh_catalog();
+  // Named library sources (YAML `catalogs:`): an HTTP catalog page, or a folder
+  // such as /sd/roms/papp/ whose .papp files are listed from every data
+  // search root (/sd, /usb0, ...). With more than one, the library list starts
+  // with a "◀ name ▶" row; tap it, or press left/right, to switch.
+  void add_catalog(const std::string &name, const std::string &url) { this->catalogs_.push_back({name, url}); }
+  // Show the catalog with this name (case-insensitive). Unknown names are ignored.
+  void select_catalog(const std::string &name);
+  void select_catalog_index(size_t index);
+  // Step through the catalogs: +1 next, -1 previous (wraps around).
+  void next_catalog(int step = 1);
+  // The catalog shown first (YAML `default_catalog`); set before setup().
+  void set_initial_catalog(size_t index) {
+    if (index < this->catalogs_.size()) {
+      this->catalog_index_ = index;
+      this->catalog_url_ = this->catalogs_[index].url;
+    }
+  }
   // When set, every app run ends with a JSON test report POSTed here: the app,
   // how it ended, its return code or load error, runtime and the tail of its log.
   void set_report_url(const std::string &url) { this->report_url_ = url; }
@@ -378,6 +395,15 @@ class PappLoader : public Component {
   std::string catalog_url_;
   std::string catalog_html_;
   std::vector<std::pair<std::string, std::string>> catalog_entries_;
+  struct CatalogSource {
+    std::string name;
+    std::string url;
+  };
+  std::vector<CatalogSource> catalogs_;
+  size_t catalog_index_{0};
+  // The URL the running fetch is for: a switch mid-fetch refetches afterwards.
+  std::string catalog_fetch_url_;
+  void list_catalog_folder_();
   TaskHandle_t papp_catalog_task_handle_{nullptr};
   volatile bool catalog_loading_{false};
   volatile bool catalog_done_{false};
@@ -392,6 +418,8 @@ class PappLoader : public Component {
   lv_obj_t *progress_fill_{nullptr};
   lv_obj_t *progress_label_{nullptr};
   uint16_t catalog_selection_{0};
+  // 1 when the list starts with the catalog switcher row, else 0.
+  uint8_t catalog_header_rows_{0};
   uint8_t launcher_direction_state_{0};
   bool launcher_a_state_{false};
   bool launcher_touch_state_{false};

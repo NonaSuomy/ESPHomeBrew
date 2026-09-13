@@ -87,6 +87,12 @@ papp_loader:
   path: /sd/roms/papp/app.papp
   display_id: main_display
   touchscreen_id: touch_panel
-  catalog_url: https://nonasuomy.github.io/papp-conversions/
+  # Several library sources; store_page_config.yaml keeps the single catalog_url form.
+  catalogs:
+    - name: SD / USB
+      url: /sd/roms/papp/
+    - name: Store
+      url: https://nonasuomy.github.io/papp-conversions/
+  default_catalog: Store
   report_url: https://example.invalid/papp-report
   report_log_bytes: 4096

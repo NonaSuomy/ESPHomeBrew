@@ -253,7 +253,14 @@ class PappLoader : public Component {
   void update_catalog_ui_();
   void update_progress_ui_();
   void flush_framebuffer_();
+  // Sends a panel-oriented 800x480 frame to the display (plus the remote-view
+  // sample and the close button). The caller holds display_mutex_.
+  void send_display_buffer_(const uint16_t *display_buffer, int64_t start_us);
   void render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t in_h, float scale, bool byte_swap);
+  void log_render_time_(int64_t render_start_us, uint16_t in_w, uint16_t in_h, float scale);
+  // Where render_custom_ last put a frame in rotated_framebuffer_ (x, y, w, h):
+  // the black border around it only needs clearing when that changes.
+  uint16_t direct_frame_[4]{0, 0, 0, 0};
   void render_emu_();
   void clear_(uint16_t color);
   void draw_close_overlay_();

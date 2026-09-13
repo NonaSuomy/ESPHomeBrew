@@ -252,7 +252,7 @@ static void draw_bars(uint16_t *fb)
     if (level == nullptr || inventory == nullptr || level->level.isTitle() || level->level.isCutsceneLevel()) {
         return;
     }
-    if (inventory->titleTimer > 1.0f || inventory->active) {
+    if (inventory->titleTimer > 1.0f || inventory->active || inventory->video != nullptr) {
         return;
     }
     Lara *lara = level->players[0];

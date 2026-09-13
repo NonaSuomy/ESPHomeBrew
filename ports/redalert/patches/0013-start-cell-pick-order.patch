@@ -1,0 +1,21 @@
+diff --git a/redalert/scenario.cpp b/redalert/scenario.cpp
+index 3738c61..d4533cf 100644
+--- a/redalert/scenario.cpp
++++ b/redalert/scenario.cpp
+@@ -3178,8 +3178,14 @@ static void Create_Units(bool official)
+     //	int deficiency = (Session.Players.Count() + Session.Options.AIPlayers) - num_waypts;
+     if (deficiency > 0) {
+         for (int index = 0; index < deficiency; index++) {
+-            CELL trycell = XY_Cell(Map.MapCellX + Random_Pick(0, Map.MapCellWidth - 1),
+-                                   Map.MapCellY + Random_Pick(0, Map.MapCellHeight - 1));
++            // Two picks as two arguments would be drawn in whatever order the
++            // compiler evaluates arguments (GCC: right to left on x86-64, left to
++            // right on RISC-V), swapping X and Y between machines and
++            // desyncing network games. Draw them in a fixed order: Y first, as
++            // x86-64 GCC builds always have.
++            int y = Random_Pick(0, Map.MapCellHeight - 1);
++            int x = Random_Pick(0, Map.MapCellWidth - 1);
++            CELL trycell = XY_Cell(Map.MapCellX + x, Map.MapCellY + y);
+ 
+             trycell = Map.Nearby_Location(trycell, SPEED_TRACK);
+             waypts[num_waypts] = trycell;

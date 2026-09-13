@@ -71,7 +71,8 @@ static constexpr size_t HTTP_READ_BUFFER_SIZE = 16 * 1024;
 static constexpr uint32_t HTTP_TIMEOUT_MS = 15000;
 static constexpr uint8_t HTTP_MAX_REDIRECTIONS = 5;
 static constexpr size_t MAX_CATALOG_SIZE = 64 * 1024;
-static constexpr uint16_t SCREEN_STREAM_PORT = 3232;
+// Not 3232: that is ESPHome's OTA port on ESP32, taken as soon as the YAML has `ota:`.
+static constexpr uint16_t SCREEN_STREAM_PORT = 3233;
 // This is a diagnostic transport, not the panel's render target.  Keeping it
 // below 400 kB/s lets it coexist with Quake's render/audio tasks over the
 // board's Ethernet link without holding stale frames in TCP buffers.

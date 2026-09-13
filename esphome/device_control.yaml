@@ -6,7 +6,7 @@
 #   papp_close()           close the running PAPP
 #   papp_refresh_catalog() reload the store catalog
 #   papp_screenshot()      send one 800x480 capture of the running PAPP to the
-#                          diagnostic stream on TCP port 3232 (bridge `screenshot`)
+#                          diagnostic stream on TCP port 3233 (bridge `screenshot`)
 #   papp_read_file(path)   send one SD card file under /sd/ (or a listing, for a
 #                          path ending in /) to the same stream (bridge `readfile`)
 #

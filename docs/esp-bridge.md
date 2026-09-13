@@ -107,7 +107,7 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 
 ## Screenshots
 
-`@esp-bridge screenshot` shows you what a running PAPP is drawing, which is useful while porting an app. The bridge calls `papp_screenshot`. The loader then sends one copy of the app's 800×480 canvas over its diagnostic stream on TCP port 3232 (`[device_api] screen_port`), and the bridge posts it as a PNG in the thread.
+`@esp-bridge screenshot` shows you what a running PAPP is drawing, which is useful while porting an app. The bridge calls `papp_screenshot`. The loader then sends one copy of the app's 800×480 canvas over its diagnostic stream on TCP port 3233 (`[device_api] screen_port`; not 3232, which ESPHome's OTA uses), and the bridge posts it as a PNG in the thread.
 
 - It captures the PAPP canvas, the way the app drew it and the right way up. The loader's on-screen close button is not in it.
 - With no app running, the bridge says so. The ESPHome/LVGL menu can't be captured this way.

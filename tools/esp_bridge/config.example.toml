@@ -64,9 +64,9 @@ show_requests = true
 [actions]
 # Start read-only; add "upload", "run", "logs" when you're happy with it.
 enabled = ["status", "config", "compile", "upload", "logs", "run", "launch", "close", "catalog", "screenshot", "readfile",
-           "writefile", "view", "edit"]
-# Who may change local YAML with `edit`, or text files on the device's SD card with
-# `writefile` (a subset of allowed_requesters). An edited config can pull in code that
+           "writefile", "deletefile", "view", "edit"]
+# Who may change local YAML with `edit`, or files on the device's SD card with
+# `writefile`/`deletefile` (a subset of allowed_requesters). An edited config can pull in code that
 # runs on this machine when compiled, so list only people and agents you trust with
 # that. Empty or missing: nobody can edit.
 edit_requesters = ["nona", "claude"]

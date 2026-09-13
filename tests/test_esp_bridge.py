@@ -842,6 +842,57 @@ class WriteFileTests(unittest.TestCase):
         self.assertIn("app is running", result.summary)
 
 
+class DeleteFileTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = make_api_config(Path(self.tmp.name))
+        self.cfg.enabled = [*self.cfg.enabled, "deletefile"]
+        self.cfg.edit_requesters = ["nona", "claude"]
+        self.runner = eb.Runner(self.cfg)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def req(self, path="/sd/roms/redalert/SYNC001.TXT", requester="nona"):
+        req = eb.parse_request(f"@esp-bridge deletefile path={path}", None, "esp-bridge")
+        req.requester = requester
+        return req
+
+    def test_deletefile_is_limited(self):
+        for path in ["/sd/roms/redalert/SYNC001.TXT", "/sd/roms/redalert/redalert.ini.bak", "/sd/x/crash.log"]:
+            eb.validate(self.req(path), self.cfg)
+        refused = [self.req(requester="someone"), self.req("/sd/roms/redalert/MAIN.MIX"), self.req("/sd/apps/doom.papp"),
+                   self.req("/sd/roms/"), self.req("/sd/../x.txt"), self.req("/boot/x.txt")]
+        for req in refused:
+            with self.subTest(path=req.path, requester=req.requester), self.assertRaises(eb.BridgeError):
+                eb.validate(req, self.cfg)
+
+    def run_delete(self, listings):
+        req = self.req()
+        eb.validate(req, self.cfg)
+        with mock.patch.object(eb, "capture_file", side_effect=listings) as capture, \
+                mock.patch.object(eb, "call_device_action") as action:
+            return self.runner.execute(req), capture, action
+
+    def test_delete_is_checked_in_the_folder_listing(self):
+        before = b"REDALERT.MIX\t25046328\nsync001.txt\t6755\n"
+        result, capture, action = self.run_delete([before, b"REDALERT.MIX\t25046328\n"])
+        self.assertTrue(result.ok)
+        action.assert_called_once_with(self.cfg, "papp_delete_file", {"path": "/sd/roms/redalert/SYNC001.TXT"})
+        self.assertEqual([call.args[1] for call in capture.call_args_list], ["/sd/roms/redalert/"] * 2)
+        self.assertIn("6755 bytes", result.summary)
+
+    def test_missing_or_refused_deletes_are_reported(self):
+        result, _, action = self.run_delete([b"REDALERT.MIX\t25046328\n"])
+        self.assertFalse(result.ok)
+        self.assertIn("not on the card", result.summary)
+        action.assert_not_called()
+        listing = b"sync001.txt\t6755\n"
+        result, _, _ = self.run_delete([listing, listing])
+        self.assertFalse(result.ok)
+        self.assertIn("still there", result.summary)
+
+
 class ViewEditTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

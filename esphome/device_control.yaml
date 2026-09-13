@@ -13,6 +13,8 @@
 #                          replace a small text file under /sd/ (.ini, .cfg, .txt,
 #                          .json, ...), keeping the old one as .bak; refused while
 #                          an app runs (bridge `writefile`)
+#   papp_delete_file(path) remove one of those files, or a leftover .bak/.log,
+#                          under /sd/; refused while an app runs (bridge `deletefile`)
 #
 # Include it from the device YAML (the device must already have `api:`; this
 # package only adds actions to it). The long form with refresh: 0s picks up new
@@ -57,3 +59,8 @@ api:
         data: string
       then:
         - lambda: id(${papp_loader_id})->write_file(path, data);
+    - action: papp_delete_file
+      variables:
+        path: string
+      then:
+        - lambda: id(${papp_loader_id})->delete_file(path);

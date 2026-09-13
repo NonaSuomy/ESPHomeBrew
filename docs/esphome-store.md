@@ -79,7 +79,15 @@ With `library_style: grid` the library becomes an app store, like the Switch Hom
   ```
 
   Up to six buttons per source, each running any ESPHome actions. The menu starts parked, so the grid can use the whole page width: give the list (`set_catalog_container`) the full width and leave the right edge free for the tab (34 px).
-- **Listings** come from the `.json` file next to each `.papp` (`psram_doom-0.1.1.json`; see [building.md](building.md#store-listing-optional)). The GitHub store publishes them. For a LAN server or an SD folder, copy the `.json` next to the `.papp`. They load in the background after the list: tiles appear at once and their icons fill in.
+- **Listings** come from the `.json` file next to each `.papp` (`psram_doom-0.1.1.json`; see [building.md](building.md#store-listing-optional)). The GitHub store publishes them. They load in the background after the list: tiles appear at once and their icons fill in.
+- **A LAN server or SD folder** gets its listings from `tools/make_listing.py`:
+
+  ```sh
+  python3 tools/make_listing.py /srv/papp --base-url http://10.20.30.158:8000/
+  python3 tools/make_listing.py /srv/papp --base-url http://10.20.30.158:8000/ --mirror-data
+  ```
+
+  It writes `<app>.json` next to every `.papp`, with that file's size and sha256 (checked by Install). Apps that are also in the store (`doom.papp` matches `psram_doom`) get the store's title, icon, about, controls, licence and upstream project, plus an `<app>.files` data list, so their game data downloads like it does from the store. With `--mirror-data` the data files are downloaded into `data/` on the server and listed from there. Other apps get a basic listing; put a `<app>.png` (up to 256×256) next to one for its icon. Edit a `.json` by hand if you like: rerunning keeps your changes (`--force` starts over).
 - The icons are drawn as plain LVGL objects, so no extra LVGL widgets are needed. Larger title text and smaller detail text are used when the config has those Montserrat sizes (e.g. `montserrat_28` and `montserrat_16`); otherwise everything uses the default font.
 
 ## 3. Include the page

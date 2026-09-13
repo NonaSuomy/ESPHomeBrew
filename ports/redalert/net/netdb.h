@@ -1,4 +1,5 @@
-// Host lookup for the Red Alert PAPP's socket layer: only this device.
+// Host lookup for the Red Alert PAPP's socket layer: this device, or a name/address
+// resolved by the loader (TCP `Host=`).
 #pragma once
 
 #include <netinet/in.h>

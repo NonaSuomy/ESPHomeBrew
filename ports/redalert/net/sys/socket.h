@@ -1,6 +1,6 @@
 // Minimal BSD sockets for the Red Alert PAPP. newlib has no network headers;
-// these declare just what Vanilla Conquer's UDP code uses. The functions are
-// in papp_net.cpp, on top of the loader's net_udp_* services.
+// these declare just what Vanilla Conquer's UDP and TCP code uses. The
+// functions are in papp_net.cpp, on top of the loader's net_* services.
 #pragma once
 
 #include <stddef.h>
@@ -47,6 +47,11 @@ int setsockopt(int fd, int level, int name, const void* value, socklen_t len);
 int getsockopt(int fd, int level, int name, void* value, socklen_t* len);
 ssize_t sendto(int fd, const void* buf, size_t len, int flags, const struct sockaddr* to, socklen_t to_len);
 ssize_t recvfrom(int fd, void* buf, size_t len, int flags, struct sockaddr* from, socklen_t* from_len);
+int listen(int fd, int backlog);
+int accept(int fd, struct sockaddr* addr, socklen_t* len);
+int connect(int fd, const struct sockaddr* addr, socklen_t len);
+ssize_t send(int fd, const void* buf, size_t len, int flags);
+ssize_t recv(int fd, void* buf, size_t len, int flags);
 
 #ifdef __cplusplus
 }

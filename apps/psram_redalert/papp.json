@@ -6,8 +6,8 @@
   "dev_build": true,
   "build": "custom",
   "source": {
-    "repo": "https://github.com/TheAssemblyArmada/Vanilla-Conquer",
-    "ref": "ce83b59edd99cccac6cebaae054ca04962c744b7",
+    "repo": "https://github.com/NonaSuomy/Vanilla-Conquer",
+    "ref": "bcce972e66b95b86a6dfd7e17697ca296bc66486",
     "path": "redalert"
   },
   "patches": [
@@ -322,6 +322,7 @@
         "wsa.cpp",
         "wsproto.cpp",
         "wspudp.cpp",
+        "wsptcp.cpp",
         "wwkeyboard.cpp",
         "wwmouse.cpp",
         "xordelta.cpp",

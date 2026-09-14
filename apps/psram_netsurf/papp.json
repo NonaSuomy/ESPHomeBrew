@@ -1,16 +1,19 @@
 {
   "name": "psram_netsurf",
   "title": "NetSurf",
-  "version": "0.2.3",
-  "description": "The NetSurf web browser (framebuffer frontend) as a PAPP on the whole panel: http:// and https:// pages over the loader's network and TLS, files on the card and NetSurf's about: pages, with touch, USB keyboard and mouse. Work in progress.",
+  "version": "0.3.0",
+  "description": "The NetSurf web browser (framebuffer frontend) as a PAPP on the whole panel: http:// and https:// pages over the loader's network and TLS, files on the card and NetSurf's about: pages, with FreeType text in the DejaVu fonts, WebP and SVG images, bookmarks and history, touch, USB keyboard and mouse. Work in progress.",
   "author": "The NetSurf Developers; PAPP port",
   "category": "Tool",
-  "license": "GPL-2.0 (NetSurf); MIT, zlib, libpng, IJG (libraries)",
-  "about": "NetSurf is a small, fast web browser with its own HTML and CSS engine. This port runs its framebuffer frontend on the whole panel (the store's Screen setting can pick 800x480) with NetSurf's built-in bitmap font: HTML 4 and CSS 2 (partly CSS 3) pages, PNG, JPEG, GIF and BMP images, forms and cookies, but no JavaScript. It loads http:// pages over the loader's TCP services and https:// pages over its TLS service, which checks every certificate against the firmware's certificate bundle (sites it cannot verify do not open; there is no way to skip the check). Local files open as file:///sd/..., and NetSurf's about: pages work. Its files live in /sd/roms/netsurf/: Choices (options), Cookies, and optionally Messages or your own copies of default.css, welcome.html and the other built-in resources, which then replace the built-in ones. There is no disk cache. The folder is optional: without it NetSurf runs with its built-in defaults and keeps no cookies. Video and sound links (.mp4, .webm, .mkv, .mov, .avi, .ts, .mp3, .ogg, .opus, .m4a, or a video/audio answer) open in the Video Player (psram_video) when it is installed or in a library source; quitting it comes back to the page.",
+  "license": "GPL-2.0; MIT, BSD, zlib, libpng, IJG, FTL, Bitstream Vera",
+  "about": "NetSurf is a small, fast web browser with its own HTML and CSS engine. This port runs its framebuffer frontend on the whole panel (the store's Screen setting can pick 800x480) and draws text with FreeType in the DejaVu fonts (sans-serif, serif and monospace; built in for Latin, Greek and Cyrillic, with italics slanted). It shows HTML 4 and CSS 2 (partly CSS 3) pages, PNG, JPEG, GIF, BMP, ICO, WebP and SVG images, forms and cookies, but no JavaScript and no web fonts. It loads http:// pages over the loader's TCP services and https:// pages over its TLS service, which checks every certificate against the firmware's certificate bundle (sites it cannot verify do not open; there is no way to skip the check). Local files open as file:///sd/..., and NetSurf's about: pages work. The star in the toolbar bookmarks the page; the button next to it lists the bookmarks (about:hotlist), and about:history lists the pages visited. Tapping a text field opens the on-screen keyboard. Its files live in /sd/roms/netsurf/: Choices (options), Cookies, Hotlist (bookmarks), URLs (history), and optionally Messages, the full DejaVu fonts in fonts/ (more characters and real italics) or your own copies of default.css, welcome.html and the other built-in resources, which then replace the built-in ones. There is no disk cache. The folder is optional: without it NetSurf runs with its built-in defaults and keeps no cookies, bookmarks or history once it quits. Video and sound links (.mp4, .webm, .mkv, .mov, .avi, .ts, .mp3, .ogg, .opus, .m4a, or a video/audio answer) open in the Video Player (psram_video) when it is installed or in a library source; quitting it comes back to the page.",
   "controls": [
     "Touch: tap to click, drag the page to scroll",
     "Touch the scroll bars to drag them",
+    "Tap a text field: the on-screen keyboard opens",
     "Bottom-right button: on-screen keyboard",
+    "Star button: bookmark the page, or not (Ctrl-D)",
+    "List button: bookmarks (Ctrl-B); Ctrl-H: history",
     "USB mouse: point, click; middle button drag scrolls",
     "USB keyboard: type; arrows, PgUp/PgDn, Home/End scroll",
     "F6 or Ctrl-L: new address; F5: reload",
@@ -105,6 +108,36 @@
       "path": "libs/libjpeg-turbo",
       "repo": "https://github.com/libjpeg-turbo/libjpeg-turbo",
       "ref": "8ecba3647edb6dd940463fedf38ca33a8e2a73d1"
+    },
+    {
+      "path": "libs/freetype",
+      "repo": "https://github.com/freetype/freetype",
+      "ref": "0a0221a1347e2f1e07c395263540026e9a0aa7c7"
+    },
+    {
+      "path": "libs/libwebp",
+      "repo": "https://github.com/webmproject/libwebp",
+      "ref": "4fa21912338357f89e4fd51cf2368325b59e9bd9"
+    },
+    {
+      "path": "libs/libsvgtiny",
+      "repo": "https://github.com/netsurf-browser/libsvgtiny",
+      "ref": "073283b29dd800e4d938db42af7e131db848bf3b"
+    },
+    {
+      "path": "libs/expat",
+      "repo": "https://github.com/libexpat/libexpat",
+      "ref": "12cf0b1f25f026a022fe728ad8f7e3d017285b80"
+    },
+    {
+      "path": "libs/fonttools",
+      "repo": "https://github.com/fonttools/fonttools",
+      "ref": "656f89dbf2026a7225aafba4fa11218210a765f5"
+    },
+    {
+      "path": "fonts/matplotlib",
+      "repo": "https://github.com/matplotlib/matplotlib",
+      "ref": "dd8d78b8dce60b6c8db86132892577a0b9dbe469"
     }
   ],
   "paths": [
@@ -112,7 +145,20 @@
     "tools",
     "frontends/framebuffer/res",
     "libs/libhubbub/build",
-    "libs/libparserutils/build"
+    "libs/libparserutils/build",
+    "libs/libwebp/src/webp",
+    "libs/libwebp/COPYING",
+    "libs/libsvgtiny/COPYING",
+    "libs/expat/expat/COPYING",
+    "libs/freetype/docs/FTL.TXT",
+    "libs/fonttools/Lib/fontTools",
+    "fonts/matplotlib/lib/matplotlib/mpl-data/fonts/ttf/DejaVuSans.ttf",
+    "fonts/matplotlib/lib/matplotlib/mpl-data/fonts/ttf/DejaVuSans-Bold.ttf",
+    "fonts/matplotlib/lib/matplotlib/mpl-data/fonts/ttf/DejaVuSerif.ttf",
+    "fonts/matplotlib/lib/matplotlib/mpl-data/fonts/ttf/DejaVuSerif-Bold.ttf",
+    "fonts/matplotlib/lib/matplotlib/mpl-data/fonts/ttf/DejaVuSansMono.ttf",
+    "fonts/matplotlib/lib/matplotlib/mpl-data/fonts/ttf/DejaVuSansMono-Bold.ttf",
+    "fonts/matplotlib/lib/matplotlib/mpl-data/fonts/ttf/LICENSE_DEJAVU"
   ],
   "patches": [
     "local:ports/netsurf/patches/*.patch"
@@ -132,6 +178,7 @@
   "linker_script": "local:ports/redalert/papp_cpp.ld",
   "includes": [
     "local:ports/netsurf/include",
+    "local:ports/netsurf/freetype",
     "local:",
     "libs/libwapcaplet/include",
     "libs/libparserutils/include",
@@ -145,6 +192,8 @@
     "libs/libnsfb/include",
     "libs/utf8proc",
     "libs/zlib",
+    "libs/freetype/include",
+    "libs/libsvgtiny/include",
     ".papp-gen/include"
   ],
   "cflags": [
@@ -171,6 +220,12 @@
     "-DWITH_GIF",
     "-DWITH_PNG",
     "-DWITH_JPEG",
+    "-DWITH_WEBP",
+    "-DWITH_NS_SVG",
+    "-DFB_USE_FREETYPE",
+    "-DFT2_BUILD_LIBRARY",
+    "-DFT_CONFIG_OPTIONS_H=<papp_ftoption.h>",
+    "-DFT_CONFIG_MODULES_H=<papp_ftmodule.h>",
     "-DWITH_NSPSL",
     "-DWITH_UTF8PROC",
     "-DSTMTEXPR=1",
@@ -394,7 +449,9 @@
         "handlers/image/gif.c",
         "handlers/image/ico.c",
         "handlers/image/png.c",
-        "handlers/image/jpeg.c"
+        "handlers/image/jpeg.c",
+        "handlers/image/webp.c",
+        "handlers/image/svg.c"
       ],
       "exclude": ["fs_backing_store.c", "fetchers/curl.c"]
     },
@@ -424,7 +481,6 @@
         "corewindow.c",
         "local_history.c",
         "clipboard.c",
-        "font_internal.c",
         "fbtk/fbtk.c",
         "fbtk/event.c",
         "fbtk/fill.c",
@@ -451,8 +507,75 @@
         "papp_syscalls.c",
         "papp_surface.c",
         "papp_http.c",
-        "papp_iconv.c"
+        "papp_iconv.c",
+        "papp_font.c",
+        "papp_path.c",
+        "papp_hotlist.c"
       ]
+    },
+    {
+      "dir": "libs/freetype/src",
+      "prefix": "ft_",
+      "files": [
+        "base/ftsystem.c",
+        "base/ftinit.c",
+        "base/ftdebug.c",
+        "base/ftbase.c",
+        "base/ftbbox.c",
+        "base/ftbitmap.c",
+        "base/ftglyph.c",
+        "base/ftstroke.c",
+        "truetype/truetype.c",
+        "sfnt/sfnt.c",
+        "smooth/smooth.c",
+        "autofit/autofit.c",
+        "cache/ftcache.c"
+      ]
+    },
+    {
+      "dir": "libs/libwebp/src",
+      "prefix": "webp_",
+      "includes": ["libs/libwebp"],
+      "files": [
+        "dec/*.c",
+        "dsp/alpha_processing.c",
+        "dsp/cpu.c",
+        "dsp/dec.c",
+        "dsp/dec_clip_tables.c",
+        "dsp/filters.c",
+        "dsp/lossless.c",
+        "dsp/rescaler.c",
+        "dsp/upsampling.c",
+        "dsp/yuv.c",
+        "utils/bit_reader_utils.c",
+        "utils/color_cache_utils.c",
+        "utils/filters_utils.c",
+        "utils/huffman_utils.c",
+        "utils/palette.c",
+        "utils/quant_levels_dec_utils.c",
+        "utils/random_utils.c",
+        "utils/rescaler_utils.c",
+        "utils/thread_utils.c",
+        "utils/utils.c"
+      ]
+    },
+    {
+      "dir": "libs/expat/expat/lib",
+      "prefix": "expat_",
+      "includes": [".papp-gen/expat", "libs/expat/expat/lib"],
+      "files": ["xmlparse.c", "xmlrole.c", "xmltok.c"]
+    },
+    {
+      "dir": "libs/libdom/bindings/xml",
+      "prefix": "domxml_",
+      "includes": ["libs/libdom/src", "libs/libdom/bindings/xml"],
+      "files": ["expat_xmlparser.c"]
+    },
+    {
+      "dir": "libs/libsvgtiny/src",
+      "prefix": "svgtiny_",
+      "includes": ["libs/libsvgtiny/src", ".papp-gen/svgtiny"],
+      "files": ["svgtiny.c", "svgtiny_gradient.c", "svgtiny_list.c", "svgtiny_parse.c", "svgtiny_path.c"]
     }
   ],
   "ldflags": [

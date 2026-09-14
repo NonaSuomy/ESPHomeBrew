@@ -16,6 +16,8 @@
 //             as that keycode; patches/0005 makes fbtk map them 1:1), others
 //             as its own numbers (mapped below). Ctrl and Alt arrive as their
 //             own taps and apply to the next key (Ctrl-L, Ctrl-+/-/0, Alt+Left).
+//             Once it has been used, the on-screen keyboard no longer opens
+//             by itself for text fields (papp_osk_auto_allowed).
 //   arrows    only exist as the loader's held D-pad, which W/A/S/D also press:
 //             a direction is an arrow key (with repeat) unless its letter was
 //             typed around then (as the Tulip port does).
@@ -287,6 +289,14 @@ static const int s_dir_input[DIR_COUNT] = {PAPP_INPUT_UP, PAPP_INPUT_DOWN, PAPP_
 static const int s_dir_key[DIR_COUNT] = {NSFB_KEY_UP, NSFB_KEY_DOWN, NSFB_KEY_LEFT, NSFB_KEY_RIGHT};
 static const char s_dir_letter[DIR_COUNT] = {'w', 's', 'a', 'd'};
 static int64_t s_letter_at[DIR_COUNT];  // when W/A/S/D was last typed
+
+// frontends/framebuffer/fbtk/osk.c (patches/0012): the on-screen keyboard
+// comes up by itself for a text field only while no USB keyboard is used.
+int papp_osk_auto_allowed(void);
+int papp_osk_auto_allowed(void)
+{
+    return !s_keyboard_seen;
+}
 
 static bool modifier_active(int64_t since, int64_t now)
 {

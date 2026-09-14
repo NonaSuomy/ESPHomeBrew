@@ -1,0 +1,256 @@
+--- a/content/fetchers/about/about.c
++++ b/content/fetchers/about/about.c
+@@ -62,6 +62,12 @@
+ #include "atestament.h"
+ #include "websearch.h"
+ 
++#ifdef PAPP_NETSURF
++/* ports/netsurf/papp_hotlist.c: the bookmarks and the pages visited */
++bool fetch_about_papp_hotlist_handler(struct fetch_about_context *ctx);
++bool fetch_about_papp_history_handler(struct fetch_about_context *ctx);
++#endif
++
+ typedef bool (*fetch_about_handler)(struct fetch_about_context *);
+ 
+ /**
+@@ -463,7 +469,25 @@ struct about_handlers about_handler_list[] = {
+ 		NULL,
+ 		fetch_about_websearch_handler,
+ 		true
+-	}
++	},
++#ifdef PAPP_NETSURF
++	{
++		/* the bookmarks (NetSurf's hotlist) */
++		"hotlist",
++		SLEN("hotlist"),
++		NULL,
++		fetch_about_papp_hotlist_handler,
++		false
++	},
++	{
++		/* pages visited, newest first */
++		"history",
++		SLEN("history"),
++		NULL,
++		fetch_about_papp_history_handler,
++		false
++	},
++#endif
+ };
+ 
+ #define about_handler_list_len \
+--- a/desktop/hotlist.c
++++ b/desktop/hotlist.c
+@@ -120,6 +120,13 @@ static nserror hotlist_save(const char *path)
+ 		return NSERROR_OK;
+ 	}
+ 
++#ifdef PAPP_NETSURF
++	/* The PAPP loader's files cannot be renamed or removed: write the
++	 * hotlist in place. Without the folder (no card, or no
++	 * /sd/roms/netsurf) this fails and the hotlist stays in memory. */
++	return hotlist_export(path, NULL);
++#endif
++
+ 	/* Get path to export to */
+ 	res = hotlist_get_temp_path(path, &temp_path);
+ 	if (res != NSERROR_OK) {
+--- a/frontends/framebuffer/gui.c
++++ b/frontends/framebuffer/gui.c
+@@ -124,6 +124,71 @@ static nserror fb_papp_url(const char *text, nsurl **url)
+ }
+ #endif
+ 
++#ifdef PAPP_NETSURF
++/* ports/netsurf/papp_hotlist.c: bookmarks (NetSurf's hotlist) and history */
++void papp_netsurf_started(void);
++void papp_netsurf_stopping(void);
++bool papp_hotlist_has(struct nsurl *url);
++bool papp_hotlist_toggle(struct nsurl *url);
++
++/* Toolbar buttons 'a' (a star: bookmark this page) and 'k' (the
++ * bookmarks page), between the address bar and the throbber. */
++#undef NSFB_TOOLBAR_DEFAULT_LAYOUT
++#define NSFB_TOOLBAR_DEFAULT_LAYOUT "blfsruaktc"
++
++#define FB_PAPP_STAR_OFF "\xe2\x98\x86"	/* U+2606 white star */
++#define FB_PAPP_STAR_ON "\xe2\x98\x85"	/* U+2605 black star */
++#define FB_PAPP_LIST "\xe2\x98\xb0"	/* U+2630, three bars: a list */
++
++/* show on the star whether the page is bookmarked: filled or hollow */
++static void fb_papp_update_star(struct gui_window *gw, struct nsurl *url)
++{
++	bool on;
++
++	if (gw->papp_star == NULL)
++		return;
++	on = url != NULL && papp_hotlist_has(url);
++	fbtk_set_text(gw->papp_star, on ? FB_PAPP_STAR_ON : FB_PAPP_STAR_OFF);
++}
++
++/* bookmark the page, or remove its bookmark */
++static void fb_papp_toggle_bookmark(struct gui_window *gw)
++{
++	struct nsurl *url = browser_window_access_url(gw->bw);
++
++	if (url == NULL)
++		return;
++	papp_hotlist_toggle(url);
++	fb_papp_update_star(gw, url);
++}
++
++/* open one of NetSurf's own pages */
++static void fb_papp_open(struct gui_window *gw, const char *address)
++{
++	nsurl *url;
++
++	if (nsurl_create(address, &url) != NSERROR_OK)
++		return;
++	browser_window_navigate(gw->bw, url, NULL, BW_NAVIGATE_HISTORY,
++			NULL, NULL, NULL);
++	nsurl_unref(url);
++}
++
++static int fb_papp_star_click(fbtk_widget_t *widget, fbtk_callback_info *cbi)
++{
++	if (cbi->event->type == NSFB_EVENT_KEY_UP)
++		fb_papp_toggle_bookmark(cbi->context);
++	return 1;
++}
++
++static int fb_papp_hotlist_click(fbtk_widget_t *widget, fbtk_callback_info *cbi)
++{
++	if (cbi->event->type == NSFB_EVENT_KEY_UP)
++		fb_papp_open(cbi->context, "about:hotlist");
++	return 1;
++}
++#endif
++
+ fbtk_widget_t *fbtk;
+ 
+ static bool fb_complete = false;
+@@ -1100,6 +1165,27 @@ fb_browser_window_input(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+ 			break;
+ #endif
+ 
++#ifdef PAPP_NETSURF
++		case NSFB_KEY_d: /* Ctrl-D: bookmark the page, or not */
++		case NSFB_KEY_b: /* Ctrl-B: the bookmarks page */
++		case NSFB_KEY_h: /* Ctrl-H: the history page */
++			if (modifier & FBTK_MOD_RCTRL ||
++					modifier & FBTK_MOD_LCTRL) {
++				if (cbi->event->value.keycode == NSFB_KEY_d)
++					fb_papp_toggle_bookmark(gw);
++				else if (cbi->event->value.keycode == NSFB_KEY_b)
++					fb_papp_open(gw, "about:hotlist");
++				else
++					fb_papp_open(gw, "about:history");
++				break;
++			}
++			ucs4 = fbtk_keycode_to_ucs4(cbi->event->value.keycode,
++						    modifier);
++			if (ucs4 != -1)
++				browser_window_key_press(gw->bw, ucs4);
++			break;
++#endif
++
+ 		case NSFB_KEY_RSHIFT:
+ 			modifier |= FBTK_MOD_RSHIFT;
+ 			break;
+@@ -1529,6 +1615,30 @@ create_toolbar(struct gui_window *gw,
+ 			gw->reload = widget;
+ 			break;
+ 
++#ifdef PAPP_NETSURF
++		case 'a': /* bookmark the page (a star) */
++		case 'k': /* the bookmarks page */
++			widget = fbtk_create_text_button(toolbar,
++					(xdir == 1) ? xpos :
++					 xpos - (toolbar_height - 2 * padding),
++					padding,
++					toolbar_height - 2 * padding,
++					-padding,
++					frame_col,
++					FB_COLOUR_BLACK,
++					(*itmtype == 'a') ? fb_papp_star_click :
++					 fb_papp_hotlist_click,
++					gw);
++			if (*itmtype == 'a') {
++				fbtk_set_text(widget, FB_PAPP_STAR_OFF);
++				gw->papp_star = widget;
++			} else {
++				fbtk_set_text(widget, FB_PAPP_LIST);
++				gw->papp_hotlist = widget;
++			}
++			break;
++#endif
++
+ 		case 't': /* throbber/activity indicator */
+ 			widget = fbtk_create_bitmap(toolbar,
+ 						    (xdir == 1)?xpos : 
+@@ -1701,6 +1811,17 @@ resize_toolbar(struct gui_window *gw,
+ 			h = -padding;
+ 			break;
+ 
++#ifdef PAPP_NETSURF
++		case 'a': /* bookmark the page (a star) */
++		case 'k': /* the bookmarks page */
++			widget = (*itmtype == 'a') ? gw->papp_star : gw->papp_hotlist;
++			w = toolbar_height - 2 * padding;
++			x = (xdir == 1) ? xpos : xpos - w;
++			y = padding;
++			h = -padding;
++			break;
++#endif
++
+ 		case 't': /* throbber/activity indicator */
+ 			widget = gw->throbber;
+ 			x = (xdir == 1) ? xpos : xpos - throbber0.width;
+@@ -2147,6 +2268,9 @@ static nserror
+ gui_window_set_url(struct gui_window *g, nsurl *url)
+ {
+ 	fbtk_set_text(g->url, nsurl_access(url));
++#ifdef PAPP_NETSURF
++	fb_papp_update_star(g, url);
++#endif
+ 	return NSERROR_OK;
+ }
+ 
+@@ -2445,6 +2569,11 @@ main(int argc, char** argv)
+ 
+ 	urldb_load_cookies(nsoption_charp(cookie_file));
+ 
++#ifdef PAPP_NETSURF
++	/* bookmarks and the history of visited pages */
++	papp_netsurf_started();
++#endif
++
+ 	/* create an initial browser window */
+ 
+ 	NSLOG(netsurf, INFO, "calling browser_window_create");
+@@ -2466,6 +2595,10 @@ main(int argc, char** argv)
+ 		browser_window_destroy(bw);
+ 	}
+ 
++#ifdef PAPP_NETSURF
++	papp_netsurf_stopping();
++#endif
++
+ 	netsurf_exit();
+ 
+ 	if (fb_font_finalise() == false)
+--- a/frontends/framebuffer/gui.h
++++ b/frontends/framebuffer/gui.h
+@@ -50,6 +50,11 @@ struct gui_window {
+ 
+ 	struct gui_window *next;
+ 	struct gui_window *prev;
++
++#ifdef PAPP_NETSURF
++	struct fbtk_widget_s *papp_star; /* bookmark the page */
++	struct fbtk_widget_s *papp_hotlist; /* the bookmarks page */
++#endif
+ };
+ 
+ 

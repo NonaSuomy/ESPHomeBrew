@@ -19,7 +19,7 @@
     "Gamepad: A click, B back, Y reload",
     "Gamepad: Select address bar, Start Enter, L/R page",
     "Menu or Escape held 3 s: quit to the launcher",
-    "X button top right: quit to the launcher"
+    "Close button (grey, top right): quit to the launcher"
   ],
   "upstream": {
     "project": "NetSurf",

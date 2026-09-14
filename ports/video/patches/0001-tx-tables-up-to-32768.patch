@@ -1,0 +1,53 @@
+diff --git a/libavutil/tx_template.c b/libavutil/tx_template.c
+index 701ef0d..fc7d516 100644
+--- a/libavutil/tx_template.c
++++ b/libavutil/tx_template.c
+@@ -43,12 +43,6 @@
+     SR_TABLE(8192)     \
+     SR_TABLE(16384)    \
+     SR_TABLE(32768)    \
+-    SR_TABLE(65536)    \
+-    SR_TABLE(131072)   \
+-    SR_TABLE(262144)   \
+-    SR_TABLE(524288)   \
+-    SR_TABLE(1048576)   \
+-    SR_TABLE(2097152)   \
+ 
+ #define SR_TABLE(len) \
+     TABLE_DEF(len, len/4 + 1);
+@@ -150,6 +144,9 @@ av_cold void TX_TAB(ff_tx_init_tabs)(int len)
+     int factor_2 = ff_ctz(len);
+     if (factor_2) {
+         int idx = factor_2 - 3;
++        /* psram_video: power-of-two tables only up to 32768 (they are .bss) */
++        if (idx >= (int)FF_ARRAY_ELEMS(sr_tabs_init_funcs))
++            idx = FF_ARRAY_ELEMS(sr_tabs_init_funcs) - 1;
+         for (int i = 0; i <= idx; i++)
+             ff_thread_once(&sr_tabs_init_once[i],
+                             sr_tabs_init_funcs[i]);
+@@ -722,12 +719,6 @@ DECL_SR_CODELET(4096,2048,1024)
+ DECL_SR_CODELET(8192,4096,2048)
+ DECL_SR_CODELET(16384,8192,4096)
+ DECL_SR_CODELET(32768,16384,8192)
+-DECL_SR_CODELET(65536,32768,16384)
+-DECL_SR_CODELET(131072,65536,32768)
+-DECL_SR_CODELET(262144,131072,65536)
+-DECL_SR_CODELET(524288,262144,131072)
+-DECL_SR_CODELET(1048576,524288,262144)
+-DECL_SR_CODELET(2097152,1048576,524288)
+ 
+ static av_cold int TX_NAME(ff_tx_fft_init)(AVTXContext *s,
+                                            const FFTXCodelet *cd,
+@@ -2158,12 +2149,6 @@ const FFTXCodelet * const TX_NAME(ff_tx_codelet_list)[] = {
+     &TX_NAME(ff_tx_fft8192_ns_def),
+     &TX_NAME(ff_tx_fft16384_ns_def),
+     &TX_NAME(ff_tx_fft32768_ns_def),
+-    &TX_NAME(ff_tx_fft65536_ns_def),
+-    &TX_NAME(ff_tx_fft131072_ns_def),
+-    &TX_NAME(ff_tx_fft262144_ns_def),
+-    &TX_NAME(ff_tx_fft524288_ns_def),
+-    &TX_NAME(ff_tx_fft1048576_ns_def),
+-    &TX_NAME(ff_tx_fft2097152_ns_def),
+ 
+     /* Prime factor codelets */
+     &TX_NAME(ff_tx_fft3_ns_def),

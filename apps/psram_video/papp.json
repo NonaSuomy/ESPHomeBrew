@@ -39,6 +39,9 @@
     "configure",
     "compat"
   ],
+  "patches": [
+    "local:ports/video/patches/*.patch"
+  ],
   "prebuild": [
     [
       "{python}",

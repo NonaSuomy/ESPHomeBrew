@@ -89,7 +89,7 @@ def validate_catalog_url(value):
 CATALOG_ACTION_SCHEMA = cv.Schema(
     {
         cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(CatalogActionTrigger),
-        cv.GenerateID(CONF_AUTOMATION_ID): cv.declare_id(automation.Automation.template()),
+        cv.GenerateID(CONF_AUTOMATION_ID): cv.declare_id(automation.Automation),
         cv.Required(CONF_LABEL): cv.All(cv.string_strict, cv.Length(min=1, max=32)),
         cv.Required(CONF_THEN): automation.validate_action_list,
     }

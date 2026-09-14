@@ -195,6 +195,17 @@ static bool poll_input(long long now)
     for (const auto &m : PAD_MAP) {
         Input::setJoyDown(0, m.joy, pad.values[m.input] != 0);
     }
+    // Temporary diagnostics: which buttons arrive, and what the inventory sees.
+    static unsigned s_logged_mask = 0;
+    unsigned mask = 0;
+    for (int i = 0; i < PAPP_INPUT_MAX && i < 16; i++) {
+        mask |= (pad.values[i] != 0 ? 1u : 0u) << i;
+    }
+    if (mask != s_logged_mask) {
+        s_logged_mask = mask;
+        papp_svc->log_printf("OL: pad %04x (up/right/down/left=bits 0-3, a=6, b=7, start=5) joyIndex=%d lastState=%d\n",
+                             mask, int(Core::settings.controls[0].joyIndex), int(Input::lastState[0]));
+    }
     s_pad = pad;
     return true;
 }

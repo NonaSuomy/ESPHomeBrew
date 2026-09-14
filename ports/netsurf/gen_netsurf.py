@@ -51,6 +51,12 @@ def run(cmd: list[str], **kwargs) -> None:
     subprocess.run([str(c) for c in cmd], check=True, **kwargs)
 
 
+# make-entities.pl walks a Perl hash, whose order changes from run to run
+# unless the hash seed is fixed: entities.inc (and so the .papp) came out
+# different every build.
+PERL_ENV = {**os.environ, "PERL_HASH_SEED": "0", "PERL_PERTURB_KEYS": "0"}
+
+
 def need(tool: str, package: str) -> str:
     """Path of a host tool; installs its Debian package if it is missing (CI container)."""
     found = shutil.which(tool)

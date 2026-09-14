@@ -26,7 +26,8 @@
     "project": "OpenLara",
     "url": "https://github.com/XProger/OpenLara"
   },
-  "publish": false,
+  "icon": "icon.png",
+  "publish": true,
   "build": "custom",
   "source": {
     "repo": "https://github.com/alexkid77/openlara_esp32p4",

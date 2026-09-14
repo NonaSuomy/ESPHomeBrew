@@ -80,7 +80,17 @@ display:
 
 external_components:
   - source: {type: local, path: ../components}
-    components: [papp_loader]
+    components: [papp_loader, usb_msc, usb_midi]
+
+# USB sticks and USB-MIDI devices next to the other usb_host clients.
+usb_host:
+  enable_hubs: true
+
+usb_msc:
+  id: usb_storage
+
+usb_midi:
+  id: usb_midi_port
 
 papp_loader:
   id: papp_runtime

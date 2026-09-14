@@ -741,7 +741,6 @@ static void video_task(void *arg)
                 if (lag > LATE_DROP_US && now_us() - p->last_convert_us < SHOW_AT_LEAST_US) {
                     p->dropped_early++;
                     av_frame_unref(fr);
-                    papp_yield_if_due();
                     continue;
                 }
             }
@@ -764,8 +763,9 @@ static void video_task(void *arg)
                     held = slot;
                 }
             }
+            // (No forced sleeps: at priority 0 this task shares core 1 with
+            // its idle task, and everything else there comes first.)
             av_frame_unref(fr);
-            papp_yield_if_due();
         }
     }
     av_frame_free(&fr);
@@ -795,6 +795,8 @@ static void audio_task(void *arg)
     p->lat_us = 250000;  // until measured
     while (!p->stop && fr != NULL) {
         if (p->paused) {
+            t_first = 0;
+            submitted_us = 0;
             papp_sleep_ms(10);
             continue;
         }
@@ -811,6 +813,8 @@ static void audio_task(void *arg)
             }
             serial = it.serial;
             next_pts = AV_NOPTS_VALUE;
+            t_first = 0;  // the speaker's buffer is measured again (until known)
+            submitted_us = 0;
             continue;
         }
         if (it.serial != p->serial) {
@@ -1070,6 +1074,16 @@ static void draw_overlay(player_t *p, const papp_canvas_t *c, const layout_t *L,
 
 // ── papp_play ─────────────────────────────────────────────────────────────
 
+// The scale that fits a w x h picture in the canvas, in the 1/16 steps the
+// PPA scales in (a finer one is rounded down by the driver, and the picture
+// would not be centred).
+static float fit_scale(int w, int h, int cw, int ch)
+{
+    const float fit = fminf((float)cw / w, (float)ch / h);
+    const float q = floorf(fit * 16.0f) / 16.0f;
+    return q > 0.0f ? q : fit;
+}
+
 static void player_free(player_t *p)
 {
     p->stop = 1;
@@ -1293,7 +1307,7 @@ enum papp_play_result papp_play(const char *location, int cw, int ch, papp_input
                 const slot_t *s = &p->slots[shown];
                 vw = s->w;
                 vh = s->h;
-                sc = fminf((float)cw / vw, (float)ch / vh);
+                sc = fit_scale(vw, vh, cw, ch);
                 int out_w = (int)(vw * sc + 0.5f), out_h = (int)(vh * sc + 0.5f);
                 out_w = out_w > cw ? cw : out_w;
                 out_h = out_h > ch ? ch : out_h;
@@ -1422,7 +1436,7 @@ enum papp_play_result papp_play(const char *location, int cw, int ch, papp_input
         // ── Drawing ──
         if (has_video && shown >= 0 && (presented || (redraw && t - last_redraw > 30000))) {
             const slot_t *s = &p->slots[shown];
-            const float sc = fminf((float)cw / s->w, (float)ch / s->h);
+            const float sc = fit_scale(s->w, s->h, cw, ch);
             const uint16_t *out = s->px;
             if (overlay) {
                 const size_t bytes = (size_t)s->w * s->h * 2;

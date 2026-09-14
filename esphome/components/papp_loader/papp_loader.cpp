@@ -319,6 +319,7 @@ void PappLoader::setup() {
   this->display_mutex_ = xSemaphoreCreateRecursiveMutex();
   this->keyboard_mutex_ = xSemaphoreCreateMutex();
   this->report_mutex_ = xSemaphoreCreateMutex();
+  this->handoff_mutex_ = xSemaphoreCreateMutex();
   this->clear_mouse_delta_();
 
   if (this->framebuffer_ == nullptr || this->rotated_framebuffer_ == nullptr || this->ppa_framebuffer_ == nullptr || this->emu_buffer_ == nullptr ||
@@ -742,6 +743,7 @@ void PappLoader::loop() {
         this->begin_report_(this->papp_load_source_);
         this->send_report_(data_failed ? "data_failed" : "load_failed", this->papp_load_result_,
                            this->papp_load_source_);
+        this->continue_chain_();  // an app handed over to that could not load: back to its caller
         return;
       }
 
@@ -749,8 +751,10 @@ void PappLoader::loop() {
       psram_app_handle_t app = this->papp_load_handle_;
       this->papp_load_handle_ = nullptr;
       const std::string source = this->papp_load_source_;
-      if (!this->start_loaded_app_(app, source))
+      if (!this->start_loaded_app_(app, source)) {
         this->launched_ = false;
+        this->continue_chain_();
+      }
       return;
     }
     if (this->papp_task_done_)
@@ -763,12 +767,30 @@ void PappLoader::loop() {
   ESP_LOGI(TAG, "Processing launch request: %s", this->path_.c_str());
   this->launch_pending_ = false;
   this->set_progress_(false, 0, 0, "%s", "");  // drop the previous launch's status
+  // app_get_arg: what an app hand-off passed along; nothing for a launch from
+  // the menu, a button or remotely, which also forgets the hand-off chain.
+  if (this->handoff_mutex_ != nullptr)
+    xSemaphoreTake(this->handoff_mutex_, portMAX_DELAY);
+  if (!this->chain_launch_) {
+    this->chain_.reset();
+    this->next_arg_.clear();
+  }
+  this->launch_arg_ = this->next_arg_;
+  this->resume_arg_ = this->next_arg_;
+  this->running_source_ = this->path_;
+  if (this->handoff_mutex_ != nullptr)
+    xSemaphoreGive(this->handoff_mutex_);
+  this->next_arg_.clear();
+  this->chain_launch_ = false;
   this->launched_ = true;
   this->toggle_close_requested_ = false;
   this->global_close_requested_ = false;
   this->clear_keyboard_queue_();
   this->clear_mouse_delta_();
-  this->launch_();
+  if (!this->launch_()) {
+    this->launched_ = false;
+    this->continue_chain_();
+  }
 }
 
 void PappLoader::dump_config() {
@@ -826,9 +848,9 @@ void PappLoader::next_catalog(int step) {
 // A folder catalog (a URL starting with '/', such as /sd/roms/papp/): the
 // .papp files in that folder under every data search root, so the same folder
 // on the SD card and a USB stick are listed together.
-void PappLoader::list_catalog_folder_() {
-  std::string folder = this->catalog_url_;
-  if (folder.back() != '/')
+std::vector<std::pair<std::string, std::string>> PappLoader::catalog_folders_(const std::string &path) const {
+  std::string folder = path;
+  if (folder.empty() || folder.back() != '/')
     folder += '/';
   std::vector<std::pair<std::string, std::string>> folders;  // root label, folder
   for (const auto &root : this->data_search_) {
@@ -841,6 +863,14 @@ void PappLoader::list_catalog_folder_() {
   }
   if (folders.empty())
     folders.emplace_back("", folder);
+  return folders;
+}
+
+void PappLoader::list_catalog_folder_() {
+  std::string folder = this->catalog_url_;
+  if (folder.back() != '/')
+    folder += '/';
+  const std::vector<std::pair<std::string, std::string>> folders = this->catalog_folders_(folder);
 
   std::vector<std::pair<std::string, std::string>> entries;
   for (size_t i = 0; i < folders.size(); i++) {
@@ -1535,6 +1565,24 @@ void PappLoader::finish_app_() {
   // visible while the close path waits for a second display transaction.
   this->restore_lvgl_();
   this->send_report_(closed_by_user ? "closed" : "exited", result, this->report_source_);
+  // An app it handed over to (app_open), or the app to go back to.
+  this->continue_chain_();
+}
+
+void PappLoader::continue_chain_() {
+  handoff::Frame next;
+  bool have = false;
+  if (this->handoff_mutex_ != nullptr && xSemaphoreTake(this->handoff_mutex_, portMAX_DELAY) == pdTRUE) {
+    have = this->chain_.next(&next);
+    xSemaphoreGive(this->handoff_mutex_);
+  }
+  if (!have || next.source.empty())
+    return;
+  ESP_LOGI(TAG, "App hand-off: starting %s%s", next.source.c_str(), next.arg.empty() ? "" : " with an argument");
+  this->path_ = next.source;
+  this->next_arg_ = next.arg;
+  this->chain_launch_ = true;
+  this->launch_pending_ = true;
 }
 
 void PappLoader::clear_(uint16_t color) {
@@ -3452,6 +3500,209 @@ void PappLoader::close_app_tls_() {
   }
 }
 
+// ── App hand-off (app_open, app_get_arg, app_set_resume_arg) ────────────────
+// app_open runs on the calling app's task: it finds the target, queues the
+// request in chain_ and asks the app to close. finish_app_ (the main loop)
+// then takes the next launch from chain_ (continue_chain_).
+
+// An HTTP catalog page fetched for app_open on a task of the loader's own (the
+// calling app's stack may be small or in PSRAM). The job outlives a caller
+// that stops waiting.
+struct CatalogLookup {
+  std::string url;
+  std::string html;
+  esp_err_t result{ESP_FAIL};
+  volatile bool done{false};
+};
+
+static void catalog_lookup_task(void *arg) {
+  auto *slot = static_cast<std::shared_ptr<CatalogLookup> *>(arg);
+  std::shared_ptr<CatalogLookup> job = std::move(*slot);
+  delete slot;
+  job->result = fetch_http_text(job->url.c_str(), &job->html);
+  job->done = true;
+  job.reset();
+  vTaskDelete(nullptr);
+}
+
+static constexpr int64_t CATALOG_LOOKUP_TIMEOUT_US = 20000000;
+
+std::vector<std::string> PappLoader::folder_papps_(const std::string &folder) const {
+  std::vector<std::string> papps;
+  for (const auto &place : this->catalog_folders_(folder)) {
+    DIR *dir = opendir(runtime_path(place.second.c_str()).c_str());
+    if (dir == nullptr)
+      continue;
+    while (dirent *entry = readdir(dir)) {
+      const std::string file = entry->d_name;
+      if (handoff::is_papp_file(file))
+        papps.push_back(place.second + file);
+    }
+    closedir(dir);
+  }
+  return papps;
+}
+
+std::string PappLoader::resolve_app_(const std::string &name) {
+  // The installed copy, as the store's Launch button prefers it.
+  const std::string installed = this->install_dir_ + "/" + name + ".papp";
+  struct stat st{};
+  if (stat(runtime_path(installed.c_str()).c_str(), &st) == 0 && S_ISREG(st.st_mode))
+    return installed;
+  // Then the library sources in order. catalogs_ and a lone catalog_url_ are
+  // only set up from YAML, so they are safe to read from the app's task.
+  std::vector<std::string> sources;
+  for (const auto &catalog : this->catalogs_)
+    sources.push_back(catalog.url);
+  if (sources.empty() && !this->catalog_url_.empty())
+    sources.push_back(this->catalog_url_);
+  for (const auto &source : sources) {
+    std::vector<std::string> candidates;
+    if (!source.empty() && source[0] == '/') {
+      candidates = this->folder_papps_(source);
+    } else if (is_network_url(source.c_str()) && network::is_connected()) {
+      auto job = std::make_shared<CatalogLookup>();
+      job->url = source;
+      auto *slot = new std::shared_ptr<CatalogLookup>(job);
+      if (xTaskCreatePinnedToCore(&catalog_lookup_task, "papp_lookup", 8192, slot, 4, nullptr, 0) != pdPASS) {
+        delete slot;
+        ESP_LOGW(TAG, "App hand-off: could not start the catalog lookup for %s", source.c_str());
+        continue;
+      }
+      const int64_t start = esp_timer_get_time();
+      while (!job->done && esp_timer_get_time() - start < CATALOG_LOOKUP_TIMEOUT_US)
+        vTaskDelay(pdMS_TO_TICKS(20));
+      if (!job->done) {
+        ESP_LOGW(TAG, "App hand-off: catalog %s did not answer in time", source.c_str());
+        continue;
+      }
+      if (job->result != ESP_OK) {
+        ESP_LOGW(TAG, "App hand-off: catalog %s failed: %s", source.c_str(), esp_err_to_name(job->result));
+        continue;
+      }
+      for (const auto &entry : parse_papp_catalog(job->html, source))
+        candidates.push_back(entry.second);
+    }
+    const std::string found = handoff::best_match(candidates, name);
+    if (!found.empty())
+      return found;
+  }
+  return {};
+}
+
+int PappLoader::svc_app_open(const char *target, const char *arg, int return_after) {
+  PappLoader *self = active_;
+  if (self == nullptr || !self->launched_ || self->handoff_mutex_ == nullptr || target == nullptr)
+    return -1;
+  const std::string wanted(target, strnlen(target, handoff::MAX_TARGET + 1));
+  const size_t arg_len = arg != nullptr ? strnlen(arg, handoff::MAX_ARG + 1) : 0;
+  if (arg_len > handoff::MAX_ARG) {
+    ESP_LOGW(TAG, "App hand-off to %.64s refused: the argument is longer than %u bytes", wanted.c_str(),
+             static_cast<unsigned>(handoff::MAX_ARG));
+    return -1;
+  }
+  if (self->global_close_requested_ || self->toggle_close_requested_) {
+    ESP_LOGW(TAG, "App hand-off to %.64s refused: the app is already closing", wanted.c_str());
+    return -1;
+  }
+  std::string source;
+  switch (handoff::classify(wanted)) {
+    case handoff::Target::URL:
+      if (network::is_connected())
+        source = wanted;
+      else
+        ESP_LOGW(TAG, "App hand-off to %s refused: the device is offline", wanted.c_str());
+      break;
+    case handoff::Target::PATH: {
+      struct stat st{};
+      if (stat(runtime_path(wanted.c_str()).c_str(), &st) == 0 && S_ISREG(st.st_mode))
+        source = wanted;
+      else
+        ESP_LOGW(TAG, "App hand-off: %s not found", wanted.c_str());
+      break;
+    }
+    case handoff::Target::NAME:
+      source = self->resolve_app_(wanted);
+      if (source.empty())
+        ESP_LOGW(TAG, "App hand-off: no app %s installed or in the library sources", wanted.c_str());
+      break;
+    default:
+      ESP_LOGW(TAG, "App hand-off refused: '%.64s' is not an app name, .papp URL or /sd path", wanted.c_str());
+      break;
+  }
+  if (source.empty())
+    return -1;
+
+  bool accepted = false;
+  if (xSemaphoreTake(self->handoff_mutex_, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    const handoff::Frame caller{self->running_source_, self->resume_arg_};
+    const handoff::Frame next{source, arg_len > 0 ? std::string(arg, arg_len) : std::string()};
+    accepted = self->chain_.request(caller, next, return_after != 0);
+    xSemaphoreGive(self->handoff_mutex_);
+  }
+  if (!accepted) {
+    ESP_LOGW(TAG, "App hand-off to %s refused: another one is under way, or %u apps already wait to be returned to",
+             source.c_str(), static_cast<unsigned>(handoff::MAX_DEPTH));
+    return -1;
+  }
+  ESP_LOGI(TAG, "App hand-off: %s opens %s%s; closing it", self->running_source_.c_str(), source.c_str(),
+           return_after != 0 ? " and comes back afterwards" : "");
+  self->begin_close_();
+  return 0;
+}
+
+int PappLoader::svc_app_get_arg(char *buf, int len) {
+  PappLoader *self = active_;
+  // launch_arg_ is set before the app starts and not changed while it runs.
+  return handoff::copy_arg(self != nullptr ? self->launch_arg_ : std::string(), buf, len);
+}
+
+int PappLoader::svc_app_set_resume_arg(const char *arg) {
+  PappLoader *self = active_;
+  const size_t len = arg != nullptr ? strnlen(arg, handoff::MAX_ARG + 1) : 0;
+  if (self == nullptr || self->handoff_mutex_ == nullptr || len > handoff::MAX_ARG)
+    return -1;
+  if (xSemaphoreTake(self->handoff_mutex_, pdMS_TO_TICKS(1000)) != pdTRUE)
+    return -1;
+  self->resume_arg_.assign(arg != nullptr ? arg : "", len);
+  xSemaphoreGive(self->handoff_mutex_);
+  return 0;
+}
+
+int PappLoader::svc_file_list_dir(const char *path, char *buf, int len) {
+  if (path == nullptr)
+    return -1;
+  const std::string folder = runtime_path(path);
+  DIR *dir = opendir(folder.c_str());
+  if (dir == nullptr)
+    return -1;
+  int count = 0;
+  size_t used = 0;
+  const size_t size = buf != nullptr && len > 0 ? static_cast<size_t>(len) : 0;
+  while (dirent *entry = readdir(dir)) {
+    const char *name = entry->d_name;
+    if (std::strcmp(name, ".") == 0 || std::strcmp(name, "..") == 0)
+      continue;
+    bool is_dir = entry->d_type == DT_DIR;
+    if (entry->d_type == DT_UNKNOWN) {
+      struct stat st{};
+      const std::string full = folder + (folder.empty() || folder.back() == '/' ? "" : "/") + name;
+      is_dir = stat(full.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+    }
+    const size_t need = std::strlen(name) + (is_dir ? 1 : 0) + 1;
+    if (used + need > size)
+      continue;  // does not fit; a shorter name later might
+    std::memcpy(buf + used, name, need - 1 - (is_dir ? 1 : 0));
+    used += need - 1 - (is_dir ? 1 : 0);
+    if (is_dir)
+      buf[used++] = '/';
+    buf[used++] = '\0';
+    count++;
+  }
+  closedir(dir);
+  return count;
+}
+
 void *PappLoader::svc_file_open(const char *path, const char *mode) {
   const std::string mapped = runtime_path(path);
   FILE *file = std::fopen(mapped.c_str(), mode);
@@ -3674,6 +3925,10 @@ void PappLoader::populate_services(app_services_t *services) {
   services->net_tls_send = &PappLoader::svc_net_tls_send;
   services->net_tls_recv = &PappLoader::svc_net_tls_recv;
   services->net_tls_close = &PappLoader::svc_net_tls_close;
+  services->app_open = &PappLoader::svc_app_open;
+  services->app_get_arg = &PappLoader::svc_app_get_arg;
+  services->app_set_resume_arg = &PappLoader::svc_app_set_resume_arg;
+  services->file_list_dir = &PappLoader::svc_file_list_dir;
 }
 
 esp_err_t psram_app_load(const char *path, psram_app_handle_t *out_handle) {

@@ -28,6 +28,7 @@
 
 #include "papp_canvas.h"
 #include "papp_data.h"
+#include "papp_handoff.h"
 #include "psram_app.h"
 
 namespace esphome {
@@ -111,6 +112,7 @@ class PappLoader : public Component {
       return;
     }
     this->path_ = path;
+    this->chain_launch_ = false;  // no argument; an app hand-off chain is forgotten
     this->launch_pending_ = true;
     ESP_LOGI("papp_loader", "Launch requested from menu: %s", path.c_str());
   }
@@ -282,6 +284,11 @@ class PappLoader : public Component {
   static int svc_net_tls_recv(int handle, void *buf, int len);
   static void svc_net_tls_close(int handle);
   static void close_app_tls_();
+  // App hand-off (psram_app.h app_open / app_get_arg / app_set_resume_arg).
+  static int svc_app_open(const char *target, const char *arg, int return_after);
+  static int svc_app_get_arg(char *buf, int len);
+  static int svc_app_set_resume_arg(const char *arg);
+  static int svc_file_list_dir(const char *path, char *buf, int len);
   static void *svc_file_open(const char *path, const char *mode);
   static int svc_file_close(void *stream);
   static size_t svc_file_read(void *ptr, size_t size, size_t nmemb, void *stream);
@@ -321,6 +328,26 @@ class PappLoader : public Component {
   esp_err_t download_data_file_(const data::DataFile &file, const std::string &path, uint32_t done_before,
                                 uint32_t total, size_t index, size_t count);
   void finish_app_();
+  // ── App hand-off (papp_handoff.h) ──
+  // The .papp for an app name: the installed copy, then each library source
+  // (folder or HTTP catalog) in order; "" when none has it. Runs on the
+  // calling app's task and may block while an HTTP catalog is fetched.
+  std::string resolve_app_(const std::string &name);
+  // The .papp files of a folder library source, under every data search root.
+  std::vector<std::string> folder_papps_(const std::string &folder) const;
+  // Where a folder library source is looked for: (root label, folder) pairs,
+  // the folder under every data search root, the configured one first.
+  std::vector<std::pair<std::string, std::string>> catalog_folders_(const std::string &folder) const;
+  // After an app ends or a launch fails: queue the next app of the hand-off
+  // chain (the one asked for, or the one to go back to), if any.
+  void continue_chain_();
+  handoff::Chain chain_;        // guarded by handoff_mutex_
+  SemaphoreHandle_t handoff_mutex_{nullptr};
+  std::string running_source_;  // the running app's .papp, as it was launched
+  std::string launch_arg_;      // what app_get_arg gives the running app
+  std::string resume_arg_;      // what it gets back after an app it opened (handoff_mutex_)
+  std::string next_arg_;        // the argument for the queued launch
+  bool chain_launch_{false};    // the queued launch comes from chain_
   void update_catalog_ui_();
   void update_progress_ui_();
   void flush_framebuffer_();

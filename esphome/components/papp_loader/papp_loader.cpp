@@ -1858,8 +1858,10 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
                                static_cast<uint16_t>(out_h)};
     if (std::memcmp(place, this->direct_frame_, sizeof(place)) != 0) {
       std::memset(this->rotated_framebuffer_, 0, frame_bytes);
-      // Written back now so no dirty border line can later land on PPA output.
-      esp_cache_msync(this->rotated_framebuffer_, frame_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+      // Written back now so no dirty border line can later land on PPA output,
+      // and dropped from the cache so reads see what the PPA writes.
+      esp_cache_msync(this->rotated_framebuffer_, frame_bytes,
+                      ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE);
       std::memcpy(this->direct_frame_, place, sizeof(place));
     }
     esp_cache_msync(const_cast<uint16_t *>(buffer), static_cast<size_t>(in_w) * in_h * sizeof(uint16_t),
@@ -1887,10 +1889,14 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
     };
     const bool sent =
         ppa_do_scale_rotate_mirror(reinterpret_cast<ppa_client_handle_t>(this->ppa_srm_client_), &cfg) == ESP_OK;
-    if (sent)
+    if (sent) {
+      // The PPA wrote memory behind the CPU cache: invalidate so the remote
+      // view sample (read by the CPU) sees this frame, not a stale one.
+      esp_cache_msync(this->rotated_framebuffer_, frame_bytes, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
       this->send_display_buffer_(this->rotated_framebuffer_, render_start_us);
-    else
+    } else {
       this->direct_frame_[2] = 0;
+    }
     if (this->display_mutex_ != nullptr)
       xSemaphoreGiveRecursive(this->display_mutex_);
     if (sent) {

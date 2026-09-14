@@ -276,6 +276,12 @@ class PappLoader : public Component {
   static int svc_net_poll(int handle);
   static int svc_net_resolve(const char *host, uint32_t *ip);
   static void close_app_sockets_();
+  static int svc_net_tls_connect(const char *host, uint16_t port);
+  static int svc_net_tls_status(int handle);
+  static int svc_net_tls_send(int handle, const void *buf, int len);
+  static int svc_net_tls_recv(int handle, void *buf, int len);
+  static void svc_net_tls_close(int handle);
+  static void close_app_tls_();
   static void *svc_file_open(const char *path, const char *mode);
   static int svc_file_close(void *stream);
   static size_t svc_file_read(void *ptr, size_t size, size_t nmemb, void *stream);

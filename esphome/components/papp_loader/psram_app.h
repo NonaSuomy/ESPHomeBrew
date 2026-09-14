@@ -350,6 +350,49 @@ typedef struct {
      * Appended after midi_write: NULL on older loaders. */
     int  (*touch_read_points)(papp_touch_point_t *points, int max);
 
+    /* ── TLS (HTTPS) connections (ESP-IDF esp-tls, mbedTLS) ─────────────
+     * A TLS client connection made and verified by the loader, so an app
+     * speaks HTTPS without its own mbedTLS. The server's certificate is
+     * checked against the firmware's CA bundle and must name `host`, which
+     * is also sent as SNI; a connection that fails either check fails.
+     * Nothing here blocks the calling task.
+     *   net_tls_connect  Start a connection to host:port (a name or a dotted
+     *                    quad). Name lookup, the TCP connect and the TLS
+     *                    handshake run on a loader task in the background
+     *                    (up to 15 s each). Returns a handle >= 0 (a TLS
+     *                    handle, not a UDP/TCP one), or -1 when the loader
+     *                    has no CA bundle or all sessions are in use.
+     *   net_tls_status   1 ready, 0 still connecting, -1 failed (name lookup,
+     *                    network, certificate or handshake; the loader logs
+     *                    which). After net_tls_recv returns -1 it tells a
+     *                    close (1) from an error (-1). -1 for a bad handle.
+     *   net_tls_send     Send up to `len` bytes. Returns the bytes taken, 0
+     *                    when the socket would block (and while connecting),
+     *                    -1 on error or a closed connection. After 0, call
+     *                    again with the same bytes: mbedTLS may already hold
+     *                    them in its output record.
+     *   net_tls_recv     Read up to `len` decrypted bytes. Returns the bytes
+     *                    read, 0 when nothing is waiting (and while
+     *                    connecting), -1 when the peer closed the connection
+     *                    or it failed (see net_tls_status).
+     *   net_tls_close    Close a handle, including one still connecting. The
+     *                    loader closes any the app leaves open when it exits.
+     * net_poll also takes a TLS handle: bit 0 when decrypted bytes wait or
+     * the socket has input (possibly part of a record, so net_tls_recv may
+     * still return 0), bit 1 when the session is ready and the socket can
+     * take data, bit 2 when it failed; 0 while connecting.
+     * At most 4 sessions are open at once (connecting ones included). Each
+     * takes about 25 KB of the loader's internal RAM while open (mbedTLS's
+     * 16 KB input and 4 KB output record buffers plus its context), plus up
+     * to about 20 KB more and an 8 KB task stack during the handshake. Use a
+     * handle from one task at a time.
+     * Appended after touch_read_points: NULL on older loaders. */
+    int  (*net_tls_connect)(const char *host, uint16_t port);
+    int  (*net_tls_status)(int handle);
+    int  (*net_tls_send)(int handle, const void *buf, int len);
+    int  (*net_tls_recv)(int handle, void *buf, int len);
+    void (*net_tls_close)(int handle);
+
 } app_services_t;
 
 /* ── Entry Point Signature ───────────────────────────────────────────── */

@@ -1,0 +1,16 @@
+diff --git a/components/openlara/src/gapi/sw.h b/components/openlara/src/gapi/sw.h
+index c2af334..9ec9ba4 100644
+--- a/components/openlara/src/gapi/sw.h
++++ b/components/openlara/src/gapi/sw.h
+@@ -269,6 +269,11 @@ namespace GAPI {
+         LOG("Renderer : %s\n", "Software");
+         LOG("Version  : %s\n", "0.1");
+         swDepth = NULL;
++        // RGBA textures are never rasterized here, only blitted with their own
++        // stride, so they need no power-of-two padding. Without this, video
++        // frames (packed at the decoder width) were copied into a padded
++        // texture and shown with every row shifted.
++        Core::support.texNPOT = true;
+     }
+ 
+     void deinit() {

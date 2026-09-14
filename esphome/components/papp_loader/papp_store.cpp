@@ -233,6 +233,13 @@ void PappLoader::start_info_fetch_() {
   this->app_info_.assign(this->catalog_entries_.size(), AppInfo{});
   if (!this->store_ui_ || this->info_loading_ || this->catalog_entries_.empty())
     return;  // a running fetch notices the new generation and starts again
+  if (this->launched_) {
+    // Nobody sees the store while an app runs, and nine TLS fetches then took
+    // the internal DMA memory the app's SD reads and I2S needed (OpenLara's
+    // intro video failed to load). loop() starts this when the app ends.
+    this->info_deferred_ = true;
+    return;
+  }
   this->info_urls_.clear();
   for (const auto &entry : this->catalog_entries_)
     this->info_urls_.push_back(entry.second);
@@ -252,7 +259,12 @@ void PappLoader::papp_info_task_entry_(void *arg) {
   const std::vector<std::string> urls = self->info_urls_;
   std::vector<AppInfo> infos(urls.size());
   size_t found = 0;
+  self->info_interrupted_ = false;
   for (size_t i = 0; i < urls.size(); i++) {
+    if (self->launched_) {
+      self->info_interrupted_ = true;  // an app started: stop between fetches
+      break;
+    }
     const std::string sidecar = sidecar_for(urls[i]);
     if (sidecar.empty())
       continue;
@@ -283,6 +295,12 @@ void PappLoader::poll_info_fetch_() {
     this->info_task_handle_ = nullptr;
   }
   this->info_loading_ = false;
+  if (this->info_interrupted_) {
+    // Stopped early because an app started: fetch them all once it ends.
+    this->info_interrupted_ = false;
+    this->info_deferred_ = true;
+    return;
+  }
   if (this->info_generation_ != this->catalog_generation_) {
     // The catalog changed while this ran: fetch the current one.
     this->catalog_generation_--;

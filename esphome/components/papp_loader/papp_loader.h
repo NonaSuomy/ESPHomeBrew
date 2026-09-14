@@ -627,6 +627,11 @@ class PappLoader : public Component {
   TaskHandle_t info_task_handle_{nullptr};
   volatile bool info_loading_{false};
   volatile bool info_done_{false};
+  // Store network work waits while a PAPP loads or runs: TLS takes internal
+  // DMA-capable RAM that the SD card and I2S drivers need at app start.
+  volatile bool info_interrupted_{false};  // the info task stopped early for an app
+  bool info_deferred_{false};              // listings to fetch once the app ends
+  bool catalog_deferred_{false};           // a catalog refresh asked for during an app
   void start_info_fetch_();
   void poll_info_fetch_();
   // name -> installed version, from <install_dir>/*.json.

@@ -629,6 +629,18 @@ void PappLoader::loop() {
   }
   this->update_progress_ui_();
   this->poll_info_fetch_();
+  if (!this->launched_ && (this->catalog_deferred_ || this->info_deferred_)) {
+    // Store fetches held back while an app ran (refresh_catalog, start_info_fetch_).
+    const bool catalog = this->catalog_deferred_;
+    this->catalog_deferred_ = false;
+    this->info_deferred_ = false;
+    if (catalog) {
+      this->refresh_catalog();  // fetches the listings again when it finishes
+    } else {
+      this->catalog_generation_--;  // same catalog: keep its generation
+      this->start_info_fetch_();
+    }
+  }
   this->poll_install_();
   if (this->catalog_loading_ && this->catalog_done_) {
     if (this->papp_catalog_task_handle_ != nullptr) {
@@ -918,6 +930,13 @@ void PappLoader::refresh_catalog() {
   }
   if (!network::is_connected()) {
     ESP_LOGW(TAG, "Cannot refresh PAPP catalog while the device is offline");
+    return;
+  }
+  if (this->launched_) {
+    // As with the listings (start_info_fetch_): no store TLS while an app
+    // loads or runs. loop() refreshes once it has ended.
+    this->catalog_deferred_ = true;
+    ESP_LOGI(TAG, "PAPP catalog refresh waits until the running app ends");
     return;
   }
 

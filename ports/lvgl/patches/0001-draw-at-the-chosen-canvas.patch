@@ -1,0 +1,185 @@
+diff --git a/apps/psram_lvgl/main.c b/apps/psram_lvgl/main.c
+index 4981603..705f522 100644
+--- a/apps/psram_lvgl/main.c
++++ b/apps/psram_lvgl/main.c
+@@ -11,18 +11,21 @@
+  *    2. AN INPUT    — an LVGL "pointer" indev backed by svc->touch_read().
+  *    3. A TICK      — LVGL needs a millisecond clock; we use svc->get_time_us().
+  *
+- *  ── Why a 400x240 canvas (and not the native framebuffer)? ─────────────────
+- *  The native framebuffer is 800x480 on the LCD build but 640x480 on the HDMI
+- *  build, and the service table has no "get framebuffer size" call. So a PAPP
+- *  that wants to run unmodified on BOTH targets should render a fixed-size
+- *  canvas and let display_write_frame_custom() scale it. 400x240 at scale 2.0
+- *  maps exactly onto 800x480 and is letterboxed sensibly on HDMI. It is also
+- *  4x less pixel work than native, which keeps LVGL's software renderer smooth.
++ *  ── Canvas size: half the loader's canvas, scaled 2x ───────────────────────
++ *  The ESPHome papp_loader offers a canvas size (display_get_size: the
++ *  store's Screen setting, else the listing's recommended size, else the
++ *  device default) and switches to it with display_set_canvas. LVGL renders
++ *  at half that size in each direction and display_write_frame_custom()
++ *  scales it 2x to fill the canvas exactly: 512x300 on a 1024x600 canvas,
++ *  400x240 on the 800x480 one. That is 4x less pixel work than drawing at
++ *  the canvas size, which keeps LVGL's software renderer smooth. The layout
++ *  below follows the size and needs at least 400x240, so a smaller offer (or
++ *  a launcher without display_set_canvas) keeps the 800x480 canvas.
+  *
+  *  ── Touch coordinate mapping ───────────────────────────────────────────────
+- *  svc->touch_read() reports 180-degree-corrected LANDSCAPE NATIVE coordinates
+- *  (x:0..799, y:0..479).
+- *  Our canvas is half that in each axis, so canvas = native / 2.
++ *  svc->touch_read() reports 180-degree-corrected LANDSCAPE canvas
++ *  coordinates (x:0..w-1, y:0..h-1).
++ *  Our LVGL display is half that in each axis, so LVGL = canvas / 2.
+  *
+  *  ── Exiting ────────────────────────────────────────────────────────────────
+  *  We exit on the PHYSICAL X button, never on MENU: on the LCD board the
+@@ -40,15 +43,18 @@
+ #include "lvgl.h"
+ 
+ /* ── Canvas geometry ─────────────────────────────────────────────────────── */
+-#define CANVAS_W      400
+-#define CANVAS_H      240
+-#define CANVAS_SCALE  2.0f                 /* 400x240 * 2 -> 800x480          */
+-#define TOUCH_DIV     2                    /* native -> canvas divisor        */
++/* LVGL's display: half the loader's canvas, set in app_entry(). */
++static int g_lv_w = 400;
++static int g_lv_h = 240;
++#define CANVAS_SCALE  2.0f                 /* e.g. 512x300 * 2 -> 1024x600    */
++#define TOUCH_DIV     2                    /* canvas -> LVGL divisor          */
++#define MIN_CANVAS_W  800                  /* the layout needs 400x240        */
++#define MIN_CANVAS_H  480
+ 
+ /* Analog-wheel detection, matching the Atari cores' constants */
+ #define PADDLE_SAMPLES        4
+ #define PADDLE_DETECT_SPREAD  300          /* max ADC spread for a real pot   */
+-#define CANVAS_PIXELS (CANVAS_W * CANVAS_H)
++#define CANVAS_PIXELS (g_lv_w * g_lv_h)
+ #define CANVAS_BYTES  (CANVAS_PIXELS * (int)sizeof(uint16_t))
+ 
+ /* ── Palette (kept close to the launcher's own dark look) ────────────────── */
+@@ -88,7 +94,7 @@ static void disp_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
+ {
+     (void)area;
+     g_svc->display_write_frame_custom((const uint16_t *)px_map,
+-                                      CANVAS_W, CANVAS_H, CANVAS_SCALE, false);
++                                      g_lv_w, g_lv_h, CANVAS_SCALE, false);
+     g_frames++;
+     lv_display_flush_ready(disp);          /* MUST be called, or LVGL stalls  */
+ }
+@@ -224,6 +230,17 @@ static lv_obj_t *make_card(lv_obj_t *parent, int x, int y, int w, int h)
+ /* ========================================================================== */
+ static void build_ui(void)
+ {
++    /* The layout was drawn for 400x240; on a bigger display the two cards
++     * share the extra width (in the same 182:194 ratio) and grow into the
++     * extra height, and the gauge and chart grow with them. */
++    const int card_y  = 36;                         /* below the header      */
++    const int card_h  = g_lv_h - 72;                /* 168 at 240 high       */
++    const int cards_w = g_lv_w - 24;                /* three 8 px gaps       */
++    const int left_w  = cards_w * 182 / 376;        /* 182 at 400 wide       */
++    const int right_w = cards_w - left_w;           /* 194 at 400 wide       */
++    int arc_d = card_h - 60;                        /* 108 at 240 high       */
++    if (arc_d > left_w - 24) arc_d = left_w - 24;
++
+     lv_obj_t *scr = lv_screen_active();
+     lv_obj_set_style_bg_color(scr, lv_color_hex(COL_BG), LV_PART_MAIN);
+     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+@@ -246,10 +263,10 @@ static void build_ui(void)
+     lv_obj_align(g_stats, LV_ALIGN_TOP_RIGHT, -10, 10);
+ 
+     /* ── Left card: interactive arc gauge + slider ───────────────────────── */
+-    lv_obj_t *left = make_card(scr, 8, 36, 182, 168);
++    lv_obj_t *left = make_card(scr, 8, card_y, left_w, card_h);
+ 
+     g_arc = lv_arc_create(left);
+-    lv_obj_set_size(g_arc, 108, 108);
++    lv_obj_set_size(g_arc, arc_d, arc_d);
+     lv_obj_align(g_arc, LV_ALIGN_TOP_MID, 0, 0);
+     lv_arc_set_rotation(g_arc, 135);
+     lv_arc_set_bg_angles(g_arc, 0, 270);
+@@ -276,15 +293,15 @@ static void build_ui(void)
+     g_arc_cap = lv_label_create(left);
+     lv_label_set_text(g_arc_cap, g_have_wheel ? "PHYSICAL WHEEL" : "DIAL (touch)");
+     lv_obj_set_style_text_color(g_arc_cap, lv_color_hex(COL_MUTED), LV_PART_MAIN);
+-    lv_obj_align(g_arc_cap, LV_ALIGN_TOP_MID, 0, 110);
++    lv_obj_align(g_arc_cap, LV_ALIGN_TOP_MID, 0, arc_d + 2);
+ 
+     g_raw = lv_label_create(left);
+     lv_label_set_text(g_raw, g_have_wheel ? "raw --" : "no wheel");
+     lv_obj_set_style_text_color(g_raw, lv_color_hex(COL_ACCENT2), LV_PART_MAIN);
+-    lv_obj_align(g_raw, LV_ALIGN_TOP_MID, 0, 126);
++    lv_obj_align(g_raw, LV_ALIGN_TOP_MID, 0, arc_d + 18);
+ 
+     lv_obj_t *sl = lv_slider_create(left);
+-    lv_obj_set_size(sl, 150, 10);
++    lv_obj_set_size(sl, left_w - 32, 10);
+     lv_obj_align(sl, LV_ALIGN_BOTTOM_MID, 0, -4);
+     lv_slider_set_range(sl, 0, 100);
+     lv_slider_set_value(sl, 50, LV_ANIM_OFF);
+@@ -293,10 +310,10 @@ static void build_ui(void)
+     lv_obj_add_event_cb(sl, slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
+ 
+     /* ── Right card: live chart + a bar + a switch ───────────────────────── */
+-    lv_obj_t *right = make_card(scr, 198, 36, 194, 168);
++    lv_obj_t *right = make_card(scr, 16 + left_w, card_y, right_w, card_h);
+ 
+     g_chart = lv_chart_create(right);
+-    lv_obj_set_size(g_chart, 178, 92);
++    lv_obj_set_size(g_chart, right_w - 16, card_h - 76);
+     lv_obj_align(g_chart, LV_ALIGN_TOP_MID, 0, 0);
+     lv_chart_set_type(g_chart, LV_CHART_TYPE_LINE);
+     lv_chart_set_point_count(g_chart, 32);
+@@ -309,7 +326,7 @@ static void build_ui(void)
+                                 LV_CHART_AXIS_PRIMARY_Y);
+ 
+     g_bar = lv_bar_create(right);
+-    lv_obj_set_size(g_bar, 120, 8);
++    lv_obj_set_size(g_bar, right_w - 74, 8);
+     lv_obj_align(g_bar, LV_ALIGN_BOTTOM_LEFT, 2, -6);
+     lv_bar_set_range(g_bar, 0, 100);
+     lv_bar_set_value(g_bar, 50, LV_ANIM_OFF);
+@@ -361,6 +378,21 @@ int app_entry(const app_services_t *svc)
+         return -1;
+     }
+ 
++    /* The loader's canvas, from this task (which draws); LVGL gets half. */
++    int canvas_w = 800, canvas_h = 480;
++    if (svc->display_get_size && svc->display_set_canvas) {
++        int w = 0, h = 0;
++        svc->display_get_size(&w, &h);
++        if (w >= MIN_CANVAS_W && h >= MIN_CANVAS_H && svc->display_set_canvas(w, h) == 0) {
++            canvas_w = w;
++            canvas_h = h;
++        } else {
++            svc->log_printf("canvas %dx%d not used: keeping 800x480\n", w, h);
++        }
++    }
++    g_lv_w = canvas_w / 2;
++    g_lv_h = canvas_h / 2;
++
+     /* LVGL renders into this canvas; DMA-capable so the scaler can read it. */
+     g_canvas = (uint16_t *)svc->mem_caps_alloc(CANVAS_BYTES,
+                                                PAPP_MEM_CAP_SPIRAM | PAPP_MEM_CAP_DMA);
+@@ -373,7 +405,7 @@ int app_entry(const app_services_t *svc)
+     lv_init();
+     lv_tick_set_cb(tick_cb);               /* do this BEFORE creating timers */
+ 
+-    lv_display_t *disp = lv_display_create(CANVAS_W, CANVAS_H);
++    lv_display_t *disp = lv_display_create(g_lv_w, g_lv_h);
+     lv_display_set_flush_cb(disp, disp_flush_cb);
+     lv_display_set_buffers(disp, g_canvas, NULL, CANVAS_BYTES,
+                            LV_DISPLAY_RENDER_MODE_FULL);
+@@ -426,9 +458,9 @@ int app_entry(const app_services_t *svc)
+     build_ui();
+     lv_timer_create(tick_timer_cb, 100, NULL);
+ 
+-    svc->log_printf("LVGL up: %dx%d canvas, %d KB heap\n",
+-                    CANVAS_W, CANVAS_H, (int)(LV_MEM_SIZE / 1024));
+-    svc->log_printf("BUILD MARKER: v4 chart-follows-physical-wheel\n");
++    svc->log_printf("LVGL up: %dx%d display scaled 2x on a %dx%d canvas, %d KB heap\n",
++                    g_lv_w, g_lv_h, canvas_w, canvas_h, (int)(LV_MEM_SIZE / 1024));
++    svc->log_printf("BUILD MARKER: v5 canvas-follows-screen-setting\n");
+ 
+     /* ── Main loop ───────────────────────────────────────────────────────── */
+     papp_gamepad_state_t pad;

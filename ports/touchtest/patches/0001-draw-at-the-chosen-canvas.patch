@@ -1,0 +1,139 @@
+diff --git a/apps/psram_touchtest/main.c b/apps/psram_touchtest/main.c
+index f6305b4..743ea31 100644
+--- a/apps/psram_touchtest/main.c
++++ b/apps/psram_touchtest/main.c
+@@ -2,9 +2,13 @@
+  * PAPP Touch Test — verify the touch_read service and its coordinate mapping.
+  *
+  * Draws four colored corner markers (to confirm canvas orientation) and a
+- * white crosshair wherever you touch. touch_read reports 180-degree-corrected LANDSCAPE
+- * native-framebuffer space (x:0..799, y:0..479); this app draws into a
+- * 400x240 canvas scaled x2.0 -> 480x800, so canvas = touch / 2.
++ * white crosshair wherever you touch. The app uses the canvas the loader
++ * offers (display_get_size: the store's Screen setting, else the listing's
++ * recommended size, else the device default) and falls back to the 800x480
++ * canvas on a loader without display_set_canvas. touch_read reports
++ * 180-degree-corrected LANDSCAPE canvas coordinates (x:0..w-1, y:0..h-1);
++ * this app draws into a canvas of half that size scaled x2.0 to fill it, so
++ * drawing = touch / 2 and the markers sit in the canvas's own corners.
+  *
+  * Controls:  touch = move crosshair   |   X button = exit
+  *
+@@ -25,9 +29,9 @@ void *memset(void *s, int c, unsigned int n)
+     return s;
+ }
+ 
+-#define FB_W  400
+-#define FB_H  240
+-#define FB_BYTES (FB_W * FB_H * sizeof(uint16_t))
++/* The drawing buffer: half the canvas in each direction, scaled x2.0. */
++#define SCALE     2
++static int fb_w = 400, fb_h = 240;
+ 
+ #define C_BG      0x18E3   /* dark grey  */
+ #define C_WHITE   0xFFFF
+@@ -39,20 +43,35 @@ void *memset(void *s, int c, unsigned int n)
+ #define MARK 28   /* corner marker size (px) */
+ #define CROSS 12  /* crosshair half-length    */
+ 
+-/* Filled rectangle with clipping to the canvas bounds. */
++/* Filled rectangle with clipping to the drawing buffer. */
+ static void fill_rect(uint16_t *fb, int x, int y, int w, int h, uint16_t color)
+ {
+     int x0 = x, y0 = y, x1 = x + w, y1 = y + h;
+     if (x0 < 0) x0 = 0;
+     if (y0 < 0) y0 = 0;
+-    if (x1 > FB_W) x1 = FB_W;
+-    if (y1 > FB_H) y1 = FB_H;
++    if (x1 > fb_w) x1 = fb_w;
++    if (y1 > fb_h) y1 = fb_h;
+     for (int yy = y0; yy < y1; yy++) {
+-        uint16_t *row = &fb[yy * FB_W];
++        uint16_t *row = &fb[yy * fb_w];
+         for (int xx = x0; xx < x1; xx++) row[xx] = color;
+     }
+ }
+ 
++/* The canvas this app draws: what the loader offers, else 800x480. */
++static void choose_canvas(const app_services_t *svc, int *w, int *h)
++{
++    *w = 800;
++    *h = 480;
++    if (svc->display_get_size && svc->display_set_canvas) {
++        int cw = 0, ch = 0;
++        svc->display_get_size(&cw, &ch);
++        if (cw >= 320 && ch >= 240 && svc->display_set_canvas(cw, ch) == 0) {
++            *w = cw;
++            *h = ch;
++        }
++    }
++}
++
+ __attribute__((section(".text.entry")))
+ int app_entry(const app_services_t *svc)
+ {
+@@ -71,14 +90,21 @@ int app_entry(const app_services_t *svc)
+         return -1;
+     }
+ 
++    int canvas_w, canvas_h;
++    choose_canvas(svc, &canvas_w, &canvas_h);
++    fb_w = canvas_w / SCALE;
++    fb_h = canvas_h / SCALE;
++    svc->log_printf("canvas %dx%d, drawn at %dx%d scaled x%d\n",
++                    canvas_w, canvas_h, fb_w, fb_h, SCALE);
++
+     uint16_t *fb = (uint16_t *)svc->mem_caps_alloc(
+-        FB_BYTES, PAPP_MEM_CAP_SPIRAM | PAPP_MEM_CAP_DMA);
++        (size_t)fb_w * fb_h * sizeof(uint16_t), PAPP_MEM_CAP_SPIRAM | PAPP_MEM_CAP_DMA);
+     if (!fb) {
+         svc->log_printf("ERROR: framebuffer alloc failed\n");
+         return -1;
+     }
+ 
+-    int cx = FB_W / 2, cy = FB_H / 2;   /* current crosshair (canvas coords) */
++    int cx = fb_w / 2, cy = fb_h / 2;   /* current crosshair (drawing coords) */
+     int have_touch = 0;
+     int last_tx = -1, last_ty = -1;     /* for throttled logging */
+ 
+@@ -91,23 +117,23 @@ int app_entry(const app_services_t *svc)
+         int tx, ty;
+         if (svc->touch_read(&tx, &ty)) {
+             have_touch = 1;
+-            cx = tx / 2;                 /* 800x480 native -> 400x240 canvas */
+-            cy = ty / 2;
++            cx = tx / SCALE;             /* canvas -> half-size drawing buffer */
++            cy = ty / SCALE;
+             if (tx != last_tx || ty != last_ty) {
+-                svc->log_printf("touch  native=(%d,%d)  canvas=(%d,%d)\n",
++                svc->log_printf("touch  canvas=(%d,%d)  drawn=(%d,%d)\n",
+                                 tx, ty, cx, cy);
+                 last_tx = tx; last_ty = ty;
+             }
+         }
+ 
+         /* ── Draw ─────────────────────────────────────────────────────── */
+-        fill_rect(fb, 0, 0, FB_W, FB_H, C_BG);
++        fill_rect(fb, 0, 0, fb_w, fb_h, C_BG);
+ 
+         /* Corner markers: TL red, TR green, BL blue, BR yellow */
+-        fill_rect(fb, 0,          0,          MARK, MARK, C_RED);
+-        fill_rect(fb, FB_W - MARK, 0,         MARK, MARK, C_GREEN);
+-        fill_rect(fb, 0,          FB_H - MARK, MARK, MARK, C_BLUE);
+-        fill_rect(fb, FB_W - MARK, FB_H - MARK, MARK, MARK, C_YELLOW);
++        fill_rect(fb, 0,           0,           MARK, MARK, C_RED);
++        fill_rect(fb, fb_w - MARK, 0,           MARK, MARK, C_GREEN);
++        fill_rect(fb, 0,           fb_h - MARK, MARK, MARK, C_BLUE);
++        fill_rect(fb, fb_w - MARK, fb_h - MARK, MARK, MARK, C_YELLOW);
+ 
+         /* Crosshair at the last touch point */
+         if (have_touch) {
+@@ -116,7 +142,7 @@ int app_entry(const app_services_t *svc)
+             fill_rect(fb, cx - 3, cy - 3, 6, 6, C_RED);                /* center dot */
+         }
+ 
+-        svc->display_write_frame_custom(fb, FB_W, FB_H, 2.0f, false);
++        svc->display_write_frame_custom(fb, fb_w, fb_h, (float)SCALE, false);
+         svc->delay_ms(10);
+     }
+ 

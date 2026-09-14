@@ -27,7 +27,8 @@
   },
   "canvas": true,
   "icon": "icon.png",
-  "publish": false,
+  "publish": true,
+  "dev_build": true,
   "build": "custom",
   "source": {
     "repo": "https://github.com/netsurf-browser/netsurf",

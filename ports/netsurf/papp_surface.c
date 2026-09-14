@@ -6,7 +6,8 @@
 // Display: libnsfb's 16 bpp plotters write into the canvas the loader
 // returns from display_get_framebuffer(). update() only marks it dirty;
 // input(), which NetSurf's main loop calls between redraws, pushes the canvas
-// to the panel with display_flush() at most every FRAME_US. The mouse pointer
+// to the panel with display_flush() at most every FRAME_US, and every
+// REFRESH_US even when nothing changed. The mouse pointer
 // is drawn into the canvas like libnsfb's SDL surface does (claim() lifts it
 // before a redraw, update() puts it back); touch input hides it.
 //
@@ -20,9 +21,11 @@
 //             typed around then (as the Tulip port does).
 //   mouse     relative moves, left/right buttons; the middle button held
 //             turns movement into scrolling.
-//   touch     a tap is a click where the finger went down; a drag in the page
-//             scrolls it (a wheel event carrying the distance, patches/0003);
-//             on the scroll bars it drags them; the toolbar only takes taps.
+//   touch     a tap is a click where the finger went down, on the release or
+//             once the finger has been still for TOUCH_HOLD_CLICK_US; a drag
+//             in the page scrolls it (a wheel event carrying the distance,
+//             patches/0003); on the scroll bars it drags them; the toolbar
+//             only takes taps. Every touch is logged (down, click, up).
 //   gamepad   A click, B back, Y reload, Select URL bar, Start Enter, L/R page
 //             up/down, while no USB keyboard is in use (the loader also
 //             reports some keyboard keys and mouse buttons as these buttons).
@@ -118,17 +121,24 @@ static void push_scroll(int dx, int dy)
 
 // ── Display ─────────────────────────────────────────────────────────────────
 
+static bool s_live = false;   // the canvas is NetSurf's (between initialise and finalise)
 static bool s_dirty = false;
 static int64_t s_last_flush = 0;
 static bool s_cursor_visible = true;  // off after touch input, on after mouse movement
 
+// The canvas goes to the panel when NetSurf drew into it, and every
+// REFRESH_US even when nothing changed. NetSurf can sit idle for a long time
+// (waiting for the network, say); if anything else painted the panel meanwhile
+// (the loader's own LVGL layer is black), the page must come back by itself.
+#define REFRESH_US 500000
+
 static void flush(bool force)
 {
-    if (!s_dirty) {
+    if (!s_live) {
         return;
     }
     const int64_t now = papp_time_us();
-    if (!force && now - s_last_flush < FRAME_US) {
+    if (s_dirty ? (!force && now - s_last_flush < FRAME_US) : (!force && now - s_last_flush < REFRESH_US)) {
         return;
     }
     papp_svc->display_flush();
@@ -169,6 +179,7 @@ static int papp_initialise(nsfb_t *nsfb)
     nsfb->ptr = (uint8_t *)canvas;
     nsfb->linelen = FB_W * 2;
     memset(canvas, 0, FB_W * FB_H * 2);
+    s_live = true;
     s_dirty = true;
     flush(true);
     return 0;
@@ -181,6 +192,7 @@ static int papp_finalise(nsfb_t *nsfb)
         s_dirty = true;
         flush(true);
     }
+    s_live = false;
     nsfb->ptr = NULL;
     return 0;
 }
@@ -573,18 +585,33 @@ static void poll_mouse(nsfb_t *nsfb)
 
 // ── Touch ───────────────────────────────────────────────────────────────────
 
-#define TOUCH_SLOP 12  // pixels a finger may wander before a tap becomes a scroll
+#define TOUCH_SLOP 12             // pixels a finger may wander before a tap becomes a scroll
+#define TOUCH_HOLD_CLICK_US 700000  // a finger held still this long clicks without waiting for the release
 
 enum { TOUCH_PAGE, TOUCH_DRAG, TOUCH_TAP };
+static const char *const s_touch_mode_name[] = {"page", "scroll bar", "toolbar"};
 
 static struct {
     bool down;
     int mode;
     int x0, y0;  // where the finger went down
     int x, y;    // where it was last seen
+    int64_t since;
     bool scrolling;
+    bool clicked;            // the click went out while the finger was still down
+    bool long_logged;
     int scroll_x, scroll_y;  // distance not yet sent
+    int scrolled_x, scrolled_y;
 } s_touch;
+
+// A tap: the pointer to where the finger went down, then a click there.
+static void touch_click(const char *why)
+{
+    push_move(true, s_touch.x0, s_touch.y0);
+    push_tap(NSFB_KEY_MOUSE_1);
+    s_touch.clicked = true;
+    papp_svc->log_printf("NETSURF: touch %s: click at (%d,%d)\n", why, s_touch.x0, s_touch.y0);
+}
 
 // The frontend's layout: toolbar on top, vertical scroll bar on the right,
 // status line and horizontal scroll bar at the bottom.
@@ -612,12 +639,15 @@ static void poll_touch(nsfb_t *nsfb)
         x = x < 0 ? 0 : (x >= FB_W ? FB_W - 1 : x);
         y = y < 0 ? 0 : (y >= FB_H ? FB_H - 1 : y);
     }
+    const int64_t now = papp_time_us();
     if (down && !s_touch.down) {
         memset(&s_touch, 0, sizeof(s_touch));
         s_touch.down = true;
         s_touch.mode = touch_mode(x, y);
         s_touch.x0 = s_touch.x = x;
         s_touch.y0 = s_touch.y = y;
+        s_touch.since = now;
+        papp_svc->log_printf("NETSURF: touch down at (%d,%d), %s\n", x, y, s_touch_mode_name[s_touch.mode]);
         show_cursor(nsfb, false);
         push_move(true, x, y);
         if (s_touch.mode == TOUCH_DRAG) {
@@ -629,8 +659,9 @@ static void poll_touch(nsfb_t *nsfb)
             if (dx != 0 || dy != 0) {
                 push_move(true, x, y);
             }
-        } else if (s_touch.mode == TOUCH_PAGE) {
-            if (!s_touch.scrolling && (abs(x - s_touch.x0) > TOUCH_SLOP || abs(y - s_touch.y0) > TOUCH_SLOP)) {
+        } else if (!s_touch.clicked) {
+            if (s_touch.mode == TOUCH_PAGE && !s_touch.scrolling &&
+                (abs(x - s_touch.x0) > TOUCH_SLOP || abs(y - s_touch.y0) > TOUCH_SLOP)) {
                 s_touch.scrolling = true;
                 dx = x - s_touch.x0;
                 dy = y - s_touch.y0;
@@ -639,22 +670,36 @@ static void poll_touch(nsfb_t *nsfb)
                 // Finger up: the page moves up, i.e. scrolls down.
                 s_touch.scroll_x -= dx;
                 s_touch.scroll_y -= dy;
+            } else if (now - s_touch.since >= TOUCH_HOLD_CLICK_US) {
+                // Held still: click now rather than waiting for a release
+                // that the touch panel may report late or not at all.
+                touch_click("held");
             }
         }
         s_touch.x = x;
         s_touch.y = y;
+        if (!s_touch.long_logged && now - s_touch.since > 5000000) {
+            s_touch.long_logged = true;  // a panel that never reports the release shows up here
+            papp_svc->log_printf("NETSURF: touch still down after 5 s at (%d,%d)\n", x, y);
+        }
     } else if (s_touch.down) {
         s_touch.down = false;
         if (s_touch.mode == TOUCH_DRAG) {
             push_key(false, NSFB_KEY_MOUSE_1);
-        } else if (!s_touch.scrolling) {
-            push_move(true, s_touch.x0, s_touch.y0);
-            push_tap(NSFB_KEY_MOUSE_1);
+            papp_svc->log_printf("NETSURF: touch up: scroll bar released\n");
+        } else if (s_touch.scrolling) {
+            papp_svc->log_printf("NETSURF: touch up: scrolled by (%d,%d)\n", s_touch.scrolled_x, s_touch.scrolled_y);
+        } else if (!s_touch.clicked) {
+            touch_click("tap");
+        } else {
+            papp_svc->log_printf("NETSURF: touch up\n");
         }
     }
     // One scroll event per poll carries everything the finger moved since.
     if (s_touch.scroll_x != 0 || s_touch.scroll_y != 0) {
         push_scroll(s_touch.scroll_x, s_touch.scroll_y);
+        s_touch.scrolled_x += s_touch.scroll_x;
+        s_touch.scrolled_y += s_touch.scroll_y;
         s_touch.scroll_x = 0;
         s_touch.scroll_y = 0;
     }
@@ -677,27 +722,40 @@ static void poll_devices(nsfb_t *nsfb)
     poll_gamepad(now);
 }
 
+static int64_t s_last_input_return = 0;
+
+static bool input_done(bool got)
+{
+    papp_yield_if_due();
+    s_last_input_return = papp_time_us();
+    return got;
+}
+
 static bool papp_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
 {
     const int64_t start = papp_time_us();
+    // NetSurf works between these calls (layout, redraw, fetch callbacks);
+    // a long gap is worth a line in the log.
+    if (s_last_input_return != 0 && start - s_last_input_return > 1500000) {
+        papp_svc->log_printf("NETSURF: busy for %d ms without reading input\n",
+                             (int)((start - s_last_input_return) / 1000));
+    }
     const int64_t deadline = timeout < 0 ? INT64_MAX : start + (int64_t)timeout * 1000;
     for (;;) {
         if (papp_quit_requested()) {
             flush(true);
             event->type = NSFB_EVENT_CONTROL;
             event->value.controlcode = NSFB_CONTROL_QUIT;
-            return true;
+            return input_done(true);
         }
         poll_devices(nsfb);
         const bool got = pop(event);
         flush(false);
         if (got) {
-            papp_yield_if_due();
-            return true;
+            return input_done(true);
         }
         if (papp_time_us() >= deadline) {
-            papp_yield_if_due();
-            return false;
+            return input_done(false);
         }
         // One scheduler tick; the next scheduled NetSurf job or input ends the wait.
         papp_sleep_ms(10);

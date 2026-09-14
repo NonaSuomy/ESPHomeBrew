@@ -62,6 +62,7 @@ int papp_have_tls(void);
 #define IDLE_TIMEOUT_US 60000000             // no data for this long: timed out
 #define KEEP_IDLE_US 15000000                // a kept connection is closed after this long unused
 #define TLS_MAX 3                            // TLS handles this app holds at once (the loader has 4)
+#define DNS_TIMEOUT_US 20000000              // a host name lookup that takes longer fails
 
 enum state { ST_RESOLVE, ST_CONNECT, ST_CONNECTING, ST_SEND, ST_STATUS, ST_HEADERS, ST_BODY };
 enum body_mode { BODY_NONE, BODY_LENGTH, BODY_CHUNKED, BODY_TO_CLOSE };
@@ -118,7 +119,30 @@ struct http_ctx {
     char *location;
     char *realm;
     char message[200];  // error/progress text handed to NetSurf
+    // for the device log
+    unsigned id;
+    int64_t started;
+    int64_t dns_started;
+    long long bytes;
 };
+
+// One line per step of a fetch in the loader's log: which fetch (a number),
+// never a path, query or form data.
+static void flog(const struct http_ctx *c, const char *fmt, ...)
+{
+    char text[200];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+    papp_svc->log_printf("NETSURF: fetch %u %s\n", c->id, text);
+}
+
+static void ip_text(uint32_t ip, char *out, size_t len)
+{
+    snprintf(out, len, "%u.%u.%u.%u", (unsigned)(ip >> 24), (unsigned)((ip >> 16) & 0xFF),
+             (unsigned)((ip >> 8) & 0xFF), (unsigned)(ip & 0xFF));
+}
 
 static struct http_ctx *s_list = NULL;
 static bool s_polling = false;
@@ -238,10 +262,15 @@ static int dns_start(const char *host)
 {
     if (s_dns_task == NULL) {
         s_dns_stop = 0;
-        if (papp_svc->task_create(dns_worker, "ns_dns", 6144, NULL, 3, &s_dns_task, -1) != 0) {
+        // 8 KiB of internal RAM (lwIP's getaddrinfo, as the loader's own TLS
+        // task has), on core 1, away from the NetSurf task; it sleeps a tick
+        // between checks for work.
+        if (papp_svc->task_create(dns_worker, "ns_dns", 8192, NULL, 3, &s_dns_task, 1) != 0) {
             s_dns_task = NULL;
+            papp_svc->log_printf("NETSURF: could not start the host name lookup task\n");
             return -1;
         }
+        papp_svc->log_printf("NETSURF: host name lookup task started\n");
     }
     dns_reap();
     for (int i = 0; i < DNS_JOBS; i++) {
@@ -509,6 +538,27 @@ static void finish_with(struct http_ctx *c, fetch_msg_type type, const char *tex
     } else if (type == FETCH_AUTH) {
         msg.data.auth.realm = text;
     }
+    const int ms = (int)((papp_time_us() - c->started) / 1000);
+    switch (type) {
+    case FETCH_FINISHED:
+        flog(c, "done: %lld bytes in %d ms", c->bytes, ms);
+        break;
+    case FETCH_NOTMODIFIED:
+        flog(c, "done: not modified (%d ms)", ms);
+        break;
+    case FETCH_REDIRECT:
+        flog(c, "done: redirect (HTTP %ld, %d ms)", c->http_code, ms);
+        break;
+    case FETCH_AUTH:
+        flog(c, "done: needs a login (HTTP 401)");
+        break;
+    case FETCH_CERT_ERR:
+        flog(c, "failed: no secure connection to %s (see the PAPP TLS lines)", c->host);
+        break;
+    default:
+        flog(c, "failed: %s", text != NULL ? text : "?");
+        break;
+    }
     close_conn(c);
     send_msg(c, &msg);
     c->dead = true;
@@ -550,6 +600,7 @@ static bool send_data(struct http_ctx *c, const uint8_t *data, size_t len)
     msg.type = FETCH_DATA;
     msg.data.header_or_data.buf = data;
     msg.data.header_or_data.len = len;
+    c->bytes += (long long)len;
     return send_msg(c, &msg);
 }
 
@@ -871,6 +922,7 @@ static void header_line(struct http_ctx *c, char *line, size_t len)
         }
         c->http10 = strncmp(line, "HTTP/1.0", 8) == 0;
         c->conn_close = c->http10;  // HTTP/1.0 closes unless it says keep-alive
+        flog(c, "HTTP %ld (%d ms)", c->http_code, (int)((papp_time_us() - c->started) / 1000));
         fetch_set_http_code(c->fetch, (http_response_code)c->http_code);
         c->state = ST_HEADERS;
         return;
@@ -1081,11 +1133,12 @@ static bool retry_fresh(struct http_ctx *c)
     if (!c->reused || c->got_bytes) {
         return false;
     }
-    NSLOG(fetch, INFO, "kept connection to %s was closed, reconnecting", c->host);
+    flog(c, "kept connection was closed, reconnecting");
     close_conn(c);
     c->reused = false;
     c->req_sent = 0;
     c->line_len = 0;
+    c->dns_started = 0;
     c->state = ST_RESOLVE;
     return true;
 }
@@ -1140,6 +1193,7 @@ static void step(struct http_ctx *c, int64_t now)
         if (!c->post && !c->proxy) {
             const int h = keep_take(c->tp, c->host, c->port);
             if (h >= 0) {
+                flog(c, "reusing a kept connection");
                 c->sock = h;
                 c->reused = true;
                 c->state = ST_SEND;
@@ -1149,24 +1203,43 @@ static void step(struct http_ctx *c, int64_t now)
         }
         if (c->dns < 0) {
             if (parse_ipv4(c->host, &c->ip) || dns_cached(c->host, &c->ip)) {
+                char ip[16];
+                ip_text(c->ip, ip, sizeof(ip));
+                flog(c, "address %s (cached)", ip);
                 c->state = ST_CONNECT;
             } else {
+                if (c->dns_started == 0) {
+                    c->dns_started = now;
+                }
                 c->dns = dns_start(c->host);
                 if (c->dns >= 0) {
+                    flog(c, "looking up %s", c->host);
                     progress(c, "Looking up %s", c->host);
+                } else if (now - c->dns_started > DNS_TIMEOUT_US) {
+                    fail(c, "Could not look up %s: the lookup task did not start", c->host);
                 }
                 return;
             }
         } else {
             const int r = dns_result(c->dns, &c->ip);
             if (r == 0) {
+                if (now - c->dns_started > DNS_TIMEOUT_US) {
+                    dns_abandon(c->dns);
+                    c->dns = -1;
+                    timed_out(c, "Looking up %s timed out");
+                }
                 return;
             }
             c->dns = -1;
+            const int ms = (int)((now - c->dns_started) / 1000);
             if (r < 0) {
+                flog(c, "lookup of %s failed (%d ms)", c->host, ms);
                 fail(c, "Could not find the server %s", c->host);
                 return;
             }
+            char ip[16];
+            ip_text(c->ip, ip, sizeof(ip));
+            flog(c, "address %s (%d ms)", ip, ms);
             dns_remember(c->host, c->ip);
             c->state = ST_CONNECT;
         }
@@ -1199,6 +1272,13 @@ static void step(struct http_ctx *c, int64_t now)
         c->state = ST_CONNECTING;
         c->deadline = now + (c->tp->tls ? TLS_CONNECT_TIMEOUT_US
                                         : (int64_t)nsoption_uint(curl_fetch_timeout) * 1000000);
+        if (c->tp->tls) {
+            flog(c, "TLS to %s:%u", c->host, (unsigned)c->port);
+        } else {
+            char ip[16];
+            ip_text(c->ip, ip, sizeof(ip));
+            flog(c, "connecting to %s:%u", ip, (unsigned)c->port);
+        }
         progress(c, c->https ? "Securely connecting to %s" : "Connecting to %s", c->host);
         if (c->dead) {
             return;
@@ -1317,6 +1397,11 @@ static void *http_setup(struct fetch *parent, nsurl *url, bool only_2xx, bool do
         free(c);
         return NULL;
     }
+    static unsigned next_id = 0;
+    c->id = ++next_id;
+    c->started = papp_time_us();
+    flog(c, "%s %s %s%s", c->post ? "POST" : "GET", c->https ? "https" : "http", c->host,
+         c->proxy ? " (proxy)" : "");
     // Keep fetches in the order NetSurf started them.
     struct http_ctx **tail = &s_list;
     while (*tail != NULL) {
@@ -1343,6 +1428,9 @@ static void release(struct http_ctx *c)
 static void http_abort(void *vctx)
 {
     struct http_ctx *c = vctx;
+    if (!c->dead && !c->aborted) {
+        flog(c, "stopped by NetSurf");
+    }
     if (s_polling || c->locked) {
         c->aborted = true;  // the poll loop cleans up after itself
         return;
@@ -1379,6 +1467,7 @@ static void http_poll(lwc_string *scheme)
     if (lwc_string_isequal(scheme, corestring_lwc_http, &match) != lwc_error_ok || !match) {
         return;
     }
+    papp_yield_if_due();  // big pages keep NetSurf busy between input polls
     s_polling = true;
     const int64_t now = papp_time_us();
     keep_check(now);

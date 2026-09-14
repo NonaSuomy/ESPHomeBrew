@@ -19,7 +19,8 @@
     "project": "Tulip Creative Computer",
     "url": "https://github.com/shorepine/tulipcc"
   },
-  "publish": false,
+  "icon": "icon.png",
+  "publish": true,
   "build": "custom",
   "source": {
     "repo": "https://github.com/NonaSuomy/tulipcc",

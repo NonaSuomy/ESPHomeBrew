@@ -112,7 +112,9 @@
       "--src",
       "{src}",
       "--gen",
-      "{gen}"
+      "{gen}",
+      "--units",
+      "{units}"
     ]
   ],
   "linker_script": "local:ports/redalert/papp_cpp.ld",

@@ -16,6 +16,9 @@ checkout that tools/build_papp.py prepared:
   compiled in (papp_resources.c), so the app runs with nothing on the card
 - libdom's hubbub binding headers as <dom/bindings/hubbub/...>
 
+With --units it then prints the compiler's warnings for the port's own
+files and the patched NetSurf files (the build itself only shows errors).
+
 Everything is reproducible: no timestamps, host names or paths end up in the
 output except what SOURCE_DATE_EPOCH gives.
 """
@@ -388,10 +391,35 @@ def gen_resources(src: Path, gen: Path) -> None:
     log(f"resources: {len(RESOURCES)} files, Messages {len(messages)} bytes")
 
 
+def lint(units_path: Path) -> None:
+    """Show the compiler's warnings for the port's own code and the patched
+    NetSurf files (the build only reports errors). Never fails the build."""
+    import json
+    units = json.loads(units_path.read_text())
+    patched = ("frontends/framebuffer/gui.c", "frontends/framebuffer/fetch.c", "content/fetch.c",
+               "frontends/framebuffer/fbtk/text.c", "frontends/framebuffer/fbtk/event.c")
+    serious = re.compile(r"implicit|incompatible|int-conversion|return-mismatch|uninitialized|overflow|"
+                         r"array-bounds|format|sign-compare|unused-variable")
+    for unit in units:
+        src = unit["src"].replace("\\", "/")
+        own = "/ports/netsurf/" in src
+        if not own and not src.endswith(patched):
+            continue
+        result = subprocess.run([unit["compiler"], *unit["flags"], "-Wall", "-Wextra", "-Wno-unused-parameter",
+                                 "-Wno-sign-compare", "-fsyntax-only", unit["src"]],
+                                capture_output=True, text=True)
+        lines = [l for l in result.stderr.splitlines() if "warning:" in l or "error:" in l]
+        if not own:
+            lines = [l for l in lines if serious.search(l) and "/ports/netsurf/" not in l]
+        for line in lines[:20]:
+            log("lint: " + re.sub(r"^\S*/(ports/netsurf/|src-[^/]+/)", "", line)[:240])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--src", type=Path, required=True)
     parser.add_argument("--gen", type=Path, required=True)
+    parser.add_argument("--units", type=Path)
     args = parser.parse_args()
     src, gen = args.src.resolve(), args.gen.resolve()
     gen.mkdir(parents=True, exist_ok=True)
@@ -406,6 +434,8 @@ def main() -> int:
     gen_testament(src, gen)
     gen_resources(src, gen)
     shutil.rmtree(gen / "tools", ignore_errors=True)
+    if args.units is not None:
+        lint(args.units)
     return 0
 
 

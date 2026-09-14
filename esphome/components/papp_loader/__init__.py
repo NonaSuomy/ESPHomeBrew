@@ -3,7 +3,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import binary_sensor, display, esp32, lvgl, sensor, speaker, touchscreen
 
-from esphome.const import CONF_ID, CONF_NAME, CONF_PATH, CONF_THEN, CONF_TRIGGER_ID, CONF_URL
+from esphome.const import CONF_AUTOMATION_ID, CONF_ID, CONF_NAME, CONF_PATH, CONF_THEN, CONF_TRIGGER_ID, CONF_URL
 
 DEPENDENCIES = ["network"]
 AUTO_LOAD = ["binary_sensor", "json", "sensor", "speaker", "touchscreen"]
@@ -89,6 +89,7 @@ def validate_catalog_url(value):
 CATALOG_ACTION_SCHEMA = cv.Schema(
     {
         cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(CatalogActionTrigger),
+        cv.GenerateID(CONF_AUTOMATION_ID): cv.declare_id(automation.Automation.template()),
         cv.Required(CONF_LABEL): cv.All(cv.string_strict, cv.Length(min=1, max=32)),
         cv.Required(CONF_THEN): automation.validate_action_list,
     }

@@ -209,6 +209,22 @@ CONFIG_SCHEMA = cv.Schema(
 CONFIG_SCHEMA = cv.All(
     CONFIG_SCHEMA, cv.has_at_most_one_key(CONF_CATALOG_URL, CONF_CATALOGS), validate_catalogs, validate_canvas
 )
+
+
+def _require_tls_hashes(config):
+    # ESPHome turns SHA-384/512 off on ESP-IDF 6 in the esp32 component's own
+    # to_code, which runs before ours: asking from our to_code is too late.
+    # Ask while validating. Let's Encrypt's current ECDSA chains (YE1, Root YE,
+    # ISRG Root X2) are all signed ecdsa-with-SHA384.
+    if hasattr(esp32, "require_mbedtls_sha512"):
+        try:
+            esp32.require_mbedtls_sha512()
+        except KeyError:
+            pass  # esp32 data not set up yet; to_code sets the options itself
+    return config
+
+
+CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, _require_tls_hashes)
 # Room in lwIP's socket pool for the apps' TLS sessions (net_tls_*, at most
 # APP_TLS_MAX in papp_loader.cpp).
 APP_TLS_SESSIONS = 4
@@ -230,10 +246,12 @@ async def to_code(config):
         esp32.require_full_certificate_bundle()
     # Apps' TLS connections (net_tls_*) verify servers against the same bundle.
     esp32.add_idf_sdkconfig_option("CONFIG_MBEDTLS_CERTIFICATE_BUNDLE", True)
-    # ESPHome turns SHA-384/512 off on ESP-IDF 6, but many certificate chains
-    # need them: Let's Encrypt's ECDSA certificates are signed ecdsa-with-SHA384.
-    if hasattr(esp32, "require_mbedtls_sha512"):
-        esp32.require_mbedtls_sha512()
+    # And set them here as well: this runs after the esp32 component's to_code,
+    # so it wins over its "off" even on ESPHome versions whose require helper
+    # is missing or read too early (_require_tls_hashes). Without SHA-384 the
+    # handshake fails with X509 verify errors (-0x2700) on those chains.
+    esp32.add_idf_sdkconfig_option("CONFIG_MBEDTLS_SHA384_C", True)
+    esp32.add_idf_sdkconfig_option("CONFIG_MBEDTLS_SHA512_C", True)
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)

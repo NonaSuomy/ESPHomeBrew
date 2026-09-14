@@ -320,11 +320,13 @@ void PappLoader::setup() {
       this->stream_audio_buffer_ != nullptr && this->stream_audio_packet_ != nullptr && this->stream_mutex_ != nullptr) {
     // PAPP games such as Quake run their main loop at priority 5 on core 0.
     // A lower-priority stream task can be starved indefinitely even though it
-    // deliberately sleeps between packets. Match that priority so FreeRTOS
-    // time-slices it, then yield for 200 ms after every packet batch.
+    // deliberately sleeps between packets, and at the same priority a game
+    // that never blocks (OpenLara at ~35 FPS once the present got fast) still
+    // kept screenshots from arriving. One above lets it preempt: it only runs
+    // when the network needs it, then yields for 200 ms after every batch.
     // 16 KiB: `readfile` runs FATFS (long-file-name buffers) and stat() here.
     const BaseType_t result = xTaskCreatePinnedToCore(
-        &PappLoader::screen_stream_task_entry_, "papp_stream", 16384, this, 5,
+        &PappLoader::screen_stream_task_entry_, "papp_stream", 16384, this, 6,
         &this->stream_task_handle_, 0);
     if (result != pdPASS)
       ESP_LOGW(TAG, "Could not start optional screen stream task");
@@ -1359,6 +1361,7 @@ void PappLoader::flush_framebuffer_() {
     xSemaphoreTakeRecursive(this->display_mutex_, portMAX_DELAY);
 
   const uint16_t *display_buffer = this->rotated_framebuffer_;
+  this->last_frame_direct_ = false;
   bool ppa_ok = false;
   if (this->ppa_srm_client_ != nullptr && this->ppa_framebuffer_ != nullptr) {
     const size_t frame_bytes = VIRTUAL_WIDTH * VIRTUAL_HEIGHT * sizeof(uint16_t);
@@ -1394,7 +1397,15 @@ void PappLoader::flush_framebuffer_() {
       for (int x = 0; x < VIRTUAL_WIDTH; x++)
         dst[VIRTUAL_WIDTH - 1 - x] = src[x];
     }
+    this->direct_frame_[2] = 0;  // the direct path must clear its border again
   }
+  this->send_display_buffer_(display_buffer, flush_start_us);
+
+  if (this->display_mutex_ != nullptr)
+    xSemaphoreGiveRecursive(this->display_mutex_);
+}
+
+void PappLoader::send_display_buffer_(const uint16_t *display_buffer, int64_t flush_start_us) {
   // One motion sample per second is enough for remote diagnosis and keeps the
   // raw video traffic small enough that it cannot starve the audio stream.
   static int64_t last_stream_frame_us = 0;
@@ -1439,9 +1450,6 @@ void PappLoader::flush_framebuffer_() {
     flush_total_us = 0;
     flush_worst_us = 0;
   }
-
-  if (this->display_mutex_ != nullptr)
-    xSemaphoreGiveRecursive(this->display_mutex_);
 }
 
 void PappLoader::screen_stream_task_entry_(void *arg) {
@@ -1565,7 +1573,16 @@ bool PappLoader::send_screenshot_(int client_fd) {
     // rotation into the panel buffer) from running during the copy.
     const bool locked = this->display_mutex_ != nullptr &&
                         xSemaphoreTakeRecursive(this->display_mutex_, pdMS_TO_TICKS(200)) == pdTRUE;
-    std::memcpy(copy, this->framebuffer_, frame_bytes);
+    if (this->last_frame_direct_) {
+      // The frame went straight to the panel buffer, turned 180 degrees:
+      // reading it backwards turns it upright again.
+      const uint16_t *source = this->rotated_framebuffer_;
+      const size_t pixels = static_cast<size_t>(VIRTUAL_WIDTH) * VIRTUAL_HEIGHT;
+      for (size_t i = 0; i < pixels; i++)
+        copy[i] = source[pixels - 1 - i];
+    } else {
+      std::memcpy(copy, this->framebuffer_, frame_bytes);
+    }
     if (locked)
       xSemaphoreGiveRecursive(this->display_mutex_);
   }
@@ -1837,6 +1854,68 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
   const int x0 = (VIRTUAL_WIDTH - out_w) / 2;
   const int y0 = (VIRTUAL_HEIGHT - out_h) / 2;
 
+  // Fast path: one PPA pass scales the frame, turns it 180 degrees for the
+  // panel and writes it centred into rotated_framebuffer_, which goes straight
+  // to the display. Its black border is only cleared when the frame's place
+  // changes. This replaces scaling into a scratch buffer, clearing and copying
+  // into the canvas, then a second PPA pass to rotate the whole canvas (about
+  // 3 MB of memory traffic per frame at 320x240 x2).
+  if (!byte_swap && this->ppa_srm_client_ != nullptr && this->rotated_framebuffer_ != nullptr) {
+    if (this->display_mutex_ != nullptr)
+      xSemaphoreTakeRecursive(this->display_mutex_, portMAX_DELAY);
+    const size_t frame_bytes = static_cast<size_t>(VIRTUAL_WIDTH) * VIRTUAL_HEIGHT * sizeof(uint16_t);
+    const uint16_t place[4] = {static_cast<uint16_t>(x0), static_cast<uint16_t>(y0), static_cast<uint16_t>(out_w),
+                               static_cast<uint16_t>(out_h)};
+    if (std::memcmp(place, this->direct_frame_, sizeof(place)) != 0) {
+      std::memset(this->rotated_framebuffer_, 0, frame_bytes);
+      // Written back now so no dirty border line can later land on PPA output,
+      // and dropped from the cache so reads see what the PPA writes.
+      esp_cache_msync(this->rotated_framebuffer_, frame_bytes,
+                      ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+      std::memcpy(this->direct_frame_, place, sizeof(place));
+    }
+    esp_cache_msync(const_cast<uint16_t *>(buffer), static_cast<size_t>(in_w) * in_h * sizeof(uint16_t),
+                    ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    ppa_srm_oper_config_t cfg = {
+        .in = {
+            .buffer = const_cast<uint16_t *>(buffer), .pic_w = in_w, .pic_h = in_h,
+            .block_w = in_w, .block_h = in_h,
+            .block_offset_x = 0, .block_offset_y = 0, .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+        },
+        .out = {
+            .buffer = this->rotated_framebuffer_, .buffer_size = frame_bytes,
+            .pic_w = VIRTUAL_WIDTH, .pic_h = VIRTUAL_HEIGHT,
+            // Turned 180 degrees, the block lands mirrored in the frame.
+            .block_offset_x = static_cast<uint32_t>(VIRTUAL_WIDTH - x0 - out_w),
+            .block_offset_y = static_cast<uint32_t>(VIRTUAL_HEIGHT - y0 - out_h),
+            .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+        },
+        .rotation_angle = PPA_SRM_ROTATION_ANGLE_180,
+        .scale_x = static_cast<float>(out_w) / in_w,
+        .scale_y = static_cast<float>(out_h) / in_h,
+        .mirror_x = false, .mirror_y = false,
+        .rgb_swap = false, .byte_swap = false,
+        .mode = PPA_TRANS_MODE_BLOCKING,
+    };
+    const bool sent =
+        ppa_do_scale_rotate_mirror(reinterpret_cast<ppa_client_handle_t>(this->ppa_srm_client_), &cfg) == ESP_OK;
+    if (sent) {
+      // The PPA wrote memory behind the CPU cache: invalidate so the remote
+      // view sample (read by the CPU) sees this frame, not a stale one.
+      esp_cache_msync(this->rotated_framebuffer_, frame_bytes, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+      this->last_frame_direct_ = true;
+      this->send_display_buffer_(this->rotated_framebuffer_, render_start_us);
+    } else {
+      this->direct_frame_[2] = 0;
+    }
+    if (this->display_mutex_ != nullptr)
+      xSemaphoreGiveRecursive(this->display_mutex_);
+    if (sent) {
+      this->log_render_time_(render_start_us, in_w, in_h, scale);
+      return;
+    }
+  }
+
   bool ppa_scaled = false;
   // The common PAPP path is an exact 2x 400x240 -> 800x480 frame. Let the
   // P4 SRM unit do that copy/scale instead of touching 384,000 pixels on the
@@ -1925,7 +2004,10 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
     }
   }
   this->flush_framebuffer_();
+  this->log_render_time_(render_start_us, in_w, in_h, scale);
+}
 
+void PappLoader::log_render_time_(int64_t render_start_us, uint16_t in_w, uint16_t in_h, float scale) {
   const int64_t render_us = esp_timer_get_time() - render_start_us;
   static uint32_t render_frames = 0;
   static int64_t render_total_us = 0;

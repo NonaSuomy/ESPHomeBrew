@@ -1,18 +1,28 @@
 --- a/content/fetch.c
 +++ b/content/fetch.c
-@@ -85,6 +85,11 @@
+@@ -54,7 +54,9 @@
+ #include "content/fetchers.h"
+ #include "content/fetchers/resource.h"
+ #include "content/fetchers/about/about.h"
++#ifdef WITH_CURL
+ #include "content/fetchers/curl.h"
++#endif
+ #include "content/fetchers/data.h"
+ #include "content/fetchers/file/file.h"
+ #include "javascript/fetcher.h"
+@@ -84,6 +86,11 @@
+ } scheme_fetcher;
  
  static scheme_fetcher fetchers[MAX_FETCHERS];
- 
++
 +#ifdef PAPP_NETSURF
 +/* HTTP over the PAPP loader's TCP services (ports/netsurf/papp_http.c) */
 +nserror papp_fetch_http_register(void);
 +#endif
-+
+ 
  /** Information for a single fetch. */
  struct fetch {
- 	fetch_callback callback;/**< Callback function. */
-@@ -285,6 +290,13 @@
+@@ -285,6 +292,13 @@
  nserror fetcher_init(void)
  {
  	nserror ret;

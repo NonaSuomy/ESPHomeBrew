@@ -35,10 +35,10 @@
 #include <string.h>
 
 #include "libnsfb.h"
-#include "libnsfb_cursor.h"
-#include "libnsfb_event.h"
 #include "libnsfb_plot.h"
 #include "libnsfb_plot_util.h"
+#include "libnsfb_cursor.h"
+#include "libnsfb_event.h"
 
 #include "cursor.h"
 #include "nsfb.h"

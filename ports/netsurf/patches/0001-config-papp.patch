@@ -1,6 +1,6 @@
 --- a/utils/config.h
 +++ b/utils/config.h
-@@ -208,4 +208,30 @@
+@@ -208,4 +208,31 @@
  	#define NO_IPV6
  #endif
  
@@ -25,6 +25,7 @@
 +#ifndef NO_IPV6
 +#define NO_IPV6 1
 +#endif
++#include <errno.h>
 +#include <limits.h>
 +#ifndef PATH_MAX
 +#define PATH_MAX 1024

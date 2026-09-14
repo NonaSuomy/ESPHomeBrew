@@ -1,0 +1,43 @@
+diff --git a/components/openlara/src/gapi/sw.h b/components/openlara/src/gapi/sw.h
+index c2af334..3337c8b 100644
+--- a/components/openlara/src/gapi/sw.h
++++ b/components/openlara/src/gapi/sw.h
+@@ -179,11 +179,14 @@ namespace GAPI {
+ 
+     // Deferred full-RGBA background blit (title/loading screen), honored in
+     // endFrame() so it survives the mid-frame deferred target clear.
++    // Up to two per frame: a video frame is drawn as the current picture and
++    // then the next one faded in on top; keeping only the last made it flash.
+     struct PendingTitle {
+         Texture *tex;
+         float   sx, sy;
+         uint8   alpha;
+-    } pendingTitle;
++    } pendingTitles[2];
++    int pendingTitleCount = 0;
+ 
+     struct VertexSW {
+         int32 x, y, z, w;
+@@ -924,13 +927,22 @@ namespace GAPI {
+     // the mesh pipeline. We record it here and blit it into the framebuffer at
+     // the end of the frame (see doPendingTitleBlit) so it lands beneath the UI.
+     void blitTitleBG(Texture *tex, float sx, float sy, uint8 alpha) {
++        PendingTitle &pendingTitle = pendingTitles[pendingTitleCount < 2 ? pendingTitleCount++ : 1];
+         pendingTitle.tex    = tex;
+         pendingTitle.sx     = sx;
+         pendingTitle.sy     = sy;
+         pendingTitle.alpha  = alpha;
+     }
+ 
++    void doOneTitleBlit(PendingTitle &pendingTitle);
++
+     void doPendingTitleBlit() {
++        for (int i = 0; i < pendingTitleCount; i++)
++            doOneTitleBlit(pendingTitles[i]);
++        pendingTitleCount = 0;
++    }
++
++    void doOneTitleBlit(PendingTitle &pendingTitle) {
+         Texture *tex = pendingTitle.tex;
+         if (!tex || !tex->memory || !swColor)
+             return;

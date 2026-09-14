@@ -3,9 +3,9 @@ name: Python tools
 on:
   push:
     branches: [main]
-    paths: ["tools/esp_bridge/**", "tools/build_papp.py", "tools/make_catalog.py", "apps/**", "esphome/components/papp_loader/papp_data.h", "tests/**", ".github/workflows/python-tools.yml"]
+    paths: ["tools/esp_bridge/**", "tools/device_bridge/**", "tools/build_papp.py", "tools/make_catalog.py", "apps/**", "esphome/components/papp_loader/papp_data.h", "tests/**", ".github/workflows/python-tools.yml"]
   pull_request:
-    paths: ["tools/esp_bridge/**", "tools/build_papp.py", "tools/make_catalog.py", "apps/**", "esphome/components/papp_loader/papp_data.h", "tests/**", ".github/workflows/python-tools.yml"]
+    paths: ["tools/esp_bridge/**", "tools/device_bridge/**", "tools/build_papp.py", "tools/make_catalog.py", "apps/**", "esphome/components/papp_loader/papp_data.h", "tests/**", ".github/workflows/python-tools.yml"]
   workflow_dispatch:
 
 permissions:

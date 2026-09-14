@@ -101,7 +101,8 @@ static bool parse_app_info(const std::string &text, PappLoader::AppInfo *info) {
     if (root["canvas"].is<bool>()) {
       info->canvas_any = root["canvas"].as<bool>();
     } else {
-      for (JsonVariant entry : root["canvas"].as<JsonArray>()) {
+      JsonArray sizes = root["canvas"].as<JsonArray>();  // a named array: no dangling-reference warning
+      for (JsonVariant entry : sizes) {
         const char *value = entry | "";
         int w = 0, h = 0;
         if (canvas::parse_size(value, &w, &h))

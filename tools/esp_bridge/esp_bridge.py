@@ -99,6 +99,17 @@ class BridgeError(Exception):
 # ── configuration ───────────────────────────────────────────────────────────
 
 
+def read_agent_token(token_env: str, need_token: bool = True) -> str:
+    """The bridge agent's hub token from the environment; refuses placeholders before connecting."""
+    token = os.environ.get(token_env, "").strip()
+    if need_token and not token:
+        raise SystemExit(f"Set {token_env} to the bridge agent's token.")
+    if need_token and (not token.startswith("ac_") or "PASTE" in token.upper() or "…" in token):
+        raise SystemExit(f"{token_env} does not look like an agent token. It should be the ac_... token shown when you "
+                         "add the bridge's agent in the project, not a placeholder.")
+    return token
+
+
 @dataclass
 class Config:
     hub_url: str
@@ -138,12 +149,7 @@ class Config:
         hub, repo, local, esp = raw.get("hub", {}), raw.get("repo", {}), raw.get("local", {}), raw.get("esphome", {})
         exp = lambda p: Path(os.path.expanduser(p)).resolve() if p else None  # noqa: E731
         token_env = hub.get("token_env", "EHGI_BRIDGE_TOKEN")
-        token = os.environ.get(token_env, "").strip()
-        if need_token and not token:
-            raise SystemExit(f"Set {token_env} to the bridge agent's token.")
-        if need_token and (not token.startswith("ac_") or "PASTE" in token.upper() or "…" in token):
-            raise SystemExit(f"{token_env} does not look like an agent token. It should be the ac_... token shown when you "
-                             "add the bridge's agent in the project, not a placeholder.")
+        token = read_agent_token(token_env, need_token)
         enabled = [a for a in raw.get("actions", {}).get("enabled", ["status", "config", "compile"]) if a in ACTIONS]
         cfg = Config(
             hub_url=hub.get("url", "https://ehgi.ai/api/mcp"),
@@ -212,7 +218,7 @@ class Request:
     content: str | None = None  # writefile: the new file (the message's code block)
 
 
-def request_words(text: str, handle: str) -> list[str] | None:
+def request_words(text: str, handle: str, actions: tuple[str, ...] = ACTIONS) -> list[str] | None:
     """The words of the request line in a chat message, or None if it has none.
 
     A request is a line that starts with the mention (`@esp-bridge compile x.yaml`,
@@ -242,7 +248,7 @@ def request_words(text: str, handle: str) -> list[str] | None:
             words[0] = words[0].strip("`.,:;!?").lower()
             candidates.append(words)
     for words in candidates:
-        if words[0] in ACTIONS:
+        if words[0] in actions:
             return words
     only_line = len([ln for ln in text.splitlines() if ln.strip()]) == 1
     return candidates[0] if candidates and only_line else None
@@ -1244,11 +1250,16 @@ class HubAuthError(RuntimeError):
 
 
 AUTH_HELP = ("The hub rejected the bridge's token (HTTP {code}). Put the token of the bridge's own agent "
-             "(Add an agent in the project, e.g. esp-bridge) in {env}, then run `check` again. "
+             "(Add an agent in the project, e.g. {handle}) in {env}, then run `check` again. "
              "A token that was rotated or whose agent was removed also gives this.")
 
 
 class Hub:
+    """Minimal EhGI MCP client. Needs cfg.hub_url, token, token_env, handle and project_id
+    (tools/device_bridge uses it too)."""
+
+    CLIENT_NAME = "esp-bridge"
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.session: str | None = None
@@ -1264,7 +1275,8 @@ class Hub:
             response = urllib.request.urlopen(request, timeout=timeout)
         except urllib.error.HTTPError as error:
             if error.code in (401, 403):
-                raise HubAuthError(AUTH_HELP.format(code=error.code, env=self.cfg.token_env)) from None
+                raise HubAuthError(AUTH_HELP.format(code=error.code, env=self.cfg.token_env,
+                                                    handle=getattr(self.cfg, "handle", "esp-bridge"))) from None
             raise
         with response:
             self.session = response.headers.get("Mcp-Session-Id") or self.session
@@ -1279,7 +1291,7 @@ class Hub:
     def connect(self) -> None:
         self.session = None
         self._post({"jsonrpc": "2.0", "id": 0, "method": "initialize",
-                    "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "esp-bridge", "version": "1"}}})
+                    "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": self.CLIENT_NAME, "version": "1"}}})
         self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
     def call(self, tool: str, args: dict, timeout: int = 90) -> dict:

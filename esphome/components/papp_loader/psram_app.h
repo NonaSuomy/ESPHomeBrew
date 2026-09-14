@@ -24,6 +24,9 @@ extern "C" {
 #define PAPP_MAGIC       0x50415050   /* "PAPP" in little-endian */
 #define PAPP_ABI_VERSION 1
 #define PAPP_HEADER_SIZE 32
+/* Zeroed pointer slots a loader leaves after app_services_t (see the
+ * APPEND-ONLY ZONE), so services appended later read NULL. */
+#define PAPP_SERVICES_SPARE_SLOTS 64
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;        /* Must be PAPP_MAGIC                        */
@@ -167,6 +170,12 @@ typedef struct {
      * a version bump. A new field may be NULL if an OLDER launcher loads
      * a newer app, so touch-aware apps MUST null-check before calling:
      *     if (svc->touch_read && svc->touch_read(&x, &y)) { ... }
+     * Loaders since display_get_size/display_set_canvas leave
+     * PAPP_SERVICES_SPARE_SLOTS zeroed pointers after the table, so a field
+     * appended later reads NULL on them. Loaders built before those two
+     * fields end the table at net_resolve and whatever follows it is NOT
+     * zero: an app that calls a field added after net_resolve needs a
+     * loader that has it.
      * ──────────────────────────────────────────────────────────────── */
 
     /* ── Touch (GT911) ───────────────────────────────────────────────── */

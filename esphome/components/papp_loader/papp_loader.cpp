@@ -4186,11 +4186,16 @@ int psram_app_run(psram_app_handle_t handle) {
   esp_cache_msync(handle->exec_ptr, handle->code_alloc,
                   ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_INST);
 
-  app_services_t services{};
-  PappLoader::populate_services(&services);
+  // Zeroed room after the table: an app built against a newer psram_app.h
+  // reads NULL for services appended after this loader, not stack garbage.
+  struct {
+    app_services_t services;
+    void *appended_later[PAPP_SERVICES_SPARE_SLOTS];
+  } table{};
+  PappLoader::populate_services(&table.services);
   auto entry = reinterpret_cast<papp_entry_fn_t>(static_cast<uint8_t *>(handle->exec_ptr) + handle->header.entry_off);
   ESP_LOGI(TAG, "Calling PAPP entry point at %p", reinterpret_cast<void *>(entry));
-  const int result = entry(&services);
+  const int result = entry(&table.services);
 
   unmap_exec_alias(handle);
   return result;

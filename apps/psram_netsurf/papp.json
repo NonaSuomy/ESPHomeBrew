@@ -1,12 +1,12 @@
 {
   "name": "psram_netsurf",
   "title": "NetSurf",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "The NetSurf web browser (framebuffer frontend) as a PAPP on the whole panel: http:// and https:// pages over the loader's network and TLS, files on the card and NetSurf's about: pages, with touch, USB keyboard and mouse. Work in progress.",
   "author": "The NetSurf Developers; PAPP port",
   "category": "Tool",
   "license": "GPL-2.0 (NetSurf); MIT, zlib, libpng, IJG (libraries)",
-  "about": "NetSurf is a small, fast web browser with its own HTML and CSS engine. This port runs its framebuffer frontend on the whole panel (the store's Screen setting can pick 800x480) with NetSurf's built-in bitmap font: HTML 4 and CSS 2 (partly CSS 3) pages, PNG, JPEG, GIF and BMP images, forms and cookies, but no JavaScript. It loads http:// pages over the loader's TCP services and https:// pages over its TLS service, which checks every certificate against the firmware's certificate bundle (sites it cannot verify do not open; there is no way to skip the check). Local files open as file:///sd/..., and NetSurf's about: pages work. Its files live in /sd/roms/netsurf/: Choices (options), Cookies, and optionally Messages or your own copies of default.css, welcome.html and the other built-in resources, which then replace the built-in ones. There is no disk cache. The folder is optional: without it NetSurf runs with its built-in defaults and keeps no cookies.",
+  "about": "NetSurf is a small, fast web browser with its own HTML and CSS engine. This port runs its framebuffer frontend on the whole panel (the store's Screen setting can pick 800x480) with NetSurf's built-in bitmap font: HTML 4 and CSS 2 (partly CSS 3) pages, PNG, JPEG, GIF and BMP images, forms and cookies, but no JavaScript. It loads http:// pages over the loader's TCP services and https:// pages over its TLS service, which checks every certificate against the firmware's certificate bundle (sites it cannot verify do not open; there is no way to skip the check). Local files open as file:///sd/..., and NetSurf's about: pages work. Its files live in /sd/roms/netsurf/: Choices (options), Cookies, and optionally Messages or your own copies of default.css, welcome.html and the other built-in resources, which then replace the built-in ones. There is no disk cache. The folder is optional: without it NetSurf runs with its built-in defaults and keeps no cookies. Video and sound links (.mp4, .webm, .mkv, .mov, .avi, .ts, .mp3, .ogg, .opus, .m4a, or a video/audio answer) open in the Video Player (psram_video) when it is installed or in a library source; quitting it comes back to the page.",
   "controls": [
     "Touch: tap to click, drag the page to scroll",
     "Touch the scroll bars to drag them",

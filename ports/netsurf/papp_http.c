@@ -119,6 +119,10 @@ struct http_ctx {
     char *location;
     char *realm;
     char message[200];  // error/progress text handed to NetSurf
+    char *referer;      // the page this was fetched for (the Referer header)
+    bool media;         // Content-Type video/* or audio/*
+    bool html;          // Content-Type text/html
+    bool handoff;       // given to the video player instead of fetched
     // for the device log
     unsigned id;
     int64_t t_start;
@@ -146,6 +150,52 @@ static void ip_text(uint32_t ip, char *out, size_t len)
 
 static struct http_ctx *s_list = NULL;
 static bool s_polling = false;
+
+// ── Video and sound: psram_video ─────────────────────────────────────────────
+// A link to a video or sound file (by its extension, or a video/* or audio/*
+// answer) is handed to the video player with the loader's app_open, which
+// starts NetSurf again on the page the link was on when the player quits.
+
+static bool s_handed_off = false;
+static char s_last_page[1024];  // the last HTML page fetched (when there is no Referer)
+
+static bool media_link(const char *url)
+{
+    static const char *const ext[] = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".ts",
+                                      ".mp3", ".ogg", ".opus", ".m4a", NULL};
+    const size_t end = strcspn(url, "?#");
+    for (int i = 0; ext[i] != NULL; i++) {
+        const size_t n = strlen(ext[i]);
+        if (end > n && strncasecmp(url + end - n, ext[i], n) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// True when the loader took it: NetSurf is quitting now.
+static bool hand_off(struct http_ctx *c)
+{
+    if (s_handed_off) {
+        return true;
+    }
+    if (papp_svc->app_open == NULL) {
+        return false;  // an older loader: NetSurf handles it as before
+    }
+    const char *url = nsurl_access(c->url);
+    const char *page = c->referer != NULL ? c->referer : s_last_page;
+    if (papp_svc->app_set_resume_arg != NULL) {
+        papp_svc->app_set_resume_arg(page);
+    }
+    if (papp_svc->app_open("psram_video", url, 1) != 0) {
+        papp_svc->log_printf("NETSURF: the video player is not installed or not in the library\n");
+        return false;
+    }
+    papp_svc->log_printf("NETSURF: playing a video or sound link in psram_video\n");
+    s_handed_off = true;
+    papp_request_quit(0);
+    return true;
+}
 
 // ── Host name lookups ───────────────────────────────────────────────────────
 
@@ -878,6 +928,13 @@ static void headers_done(struct http_ctx *c)
         finish_with(c, FETCH_AUTH, c->realm);
         return;
     }
+    if (code >= 200 && code < 300 && c->media && !c->post && hand_off(c)) {
+        fail(c, "Playing it in the Video Player");
+        return;
+    }
+    if (code == 200 && c->html) {
+        snprintf(s_last_page, sizeof(s_last_page), "%s", nsurl_access(c->url));
+    }
     if (c->only_2xx && (code < 200 || code > 299)) {
         finish_with(c, FETCH_ERROR, messages_get("Not2xx"));
         return;
@@ -970,6 +1027,9 @@ static void header_line(struct http_ctx *c, char *line, size_t len)
         } else if (strcasestr(v, "keep-alive") != NULL) {
             c->conn_close = false;
         }
+    } else if (header_is(line, "Content-Type", &v)) {
+        c->media = strncasecmp(v, "video/", 6) == 0 || strncasecmp(v, "audio/", 6) == 0;
+        c->html = strncasecmp(v, "text/html", 9) == 0;
     } else if (header_is(line, "Set-Cookie", &v)) {
         fetch_set_cookie(c->fetch, v);
     } else if (header_is(line, "Date", &v)) {
@@ -1177,6 +1237,10 @@ static void tls_failed(struct http_ctx *c)
 static void step(struct http_ctx *c, int64_t now)
 {
     static uint8_t rbuf[RECV_BUF];
+    if (c->handoff) {
+        fail(c, "Playing it in the Video Player");  // http_setup handed the link over
+        return;
+    }
     switch (c->state) {
     case ST_RESOLVE:
         if (c->https && !papp_have_tls()) {
@@ -1397,6 +1461,12 @@ static void *http_setup(struct fetch *parent, nsurl *url, bool only_2xx, bool do
         free(c);
         return NULL;
     }
+    for (int i = 0; headers != NULL && headers[i] != NULL; i++) {
+        if (strncasecmp(headers[i], "Referer: ", 9) == 0) {
+            c->referer = strdup(headers[i] + 9);
+        }
+    }
+    c->handoff = !c->post && media_link(nsurl_access(url)) && hand_off(c);
     static unsigned next_id = 0;
     c->id = ++next_id;
     c->t_start = papp_time_us();
@@ -1457,6 +1527,7 @@ static void http_free(void *vctx)
     free(c->req);
     free(c->location);
     free(c->realm);
+    free(c->referer);
     free(c);
 }
 

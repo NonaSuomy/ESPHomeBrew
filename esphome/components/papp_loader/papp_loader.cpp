@@ -3769,10 +3769,10 @@ int PappLoader::svc_file_remove(const char *path) {
   struct stat st{};
   if (fs_path.empty() || fs_path == root || stat(fs_path.c_str(), &st) != 0)
     return -1;
-  const int result = S_ISDIR(st.st_mode) ? rmdir(fs_path.c_str()) : unlink(fs_path.c_str());
-  if (result != 0)
+  const bool removed = S_ISDIR(st.st_mode) ? remove_empty_folder(fs_path) : unlink(fs_path.c_str()) == 0;
+  if (!removed)
     ESP_LOGW(TAG, "App remove %s failed (errno %d)", fs_path.c_str(), errno);
-  return result == 0 ? 0 : -1;
+  return removed ? 0 : -1;
 }
 
 int PappLoader::svc_file_rename(const char *from, const char *to) {
@@ -4615,6 +4615,28 @@ bool make_parent_dirs(const std::string &root, const std::string &target) {
     slash = target.find('/', slash + 1);
   }
   return true;
+}
+
+// The toolchain's C library has no rmdir(). The FAT VFS driver's rmdir and
+// unlink both come down to FatFs f_unlink, which deletes a folder only when
+// it is empty, so unlink() does the same job; the folder check keeps it to
+// folders.
+bool remove_empty_folder(const std::string &path) {
+  struct stat st{};
+  if (stat(path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))
+    return false;
+  DIR *dir = opendir(path.c_str());
+  if (dir == nullptr)
+    return false;
+  bool empty = true;
+  while (dirent *entry = readdir(dir)) {
+    if (std::strcmp(entry->d_name, ".") != 0 && std::strcmp(entry->d_name, "..") != 0) {
+      empty = false;
+      break;
+    }
+  }
+  closedir(dir);
+  return empty && unlink(path.c_str()) == 0;
 }
 
 // Returns where `target` (relative, e.g. roms/doom/doom1.wad) already exists:

@@ -662,11 +662,11 @@ bool PappLoader::uninstall_app(const std::string &app, bool delete_data) {
       ESP_LOGI(TAG, "Uninstall: deleted %s (%u bytes)", file.first.c_str(), static_cast<unsigned>(file.second));
       deleted++;
       bytes += file.second;
-      // Folders it leaves empty go too (rmdir refuses one that is not).
+      // Folders it leaves empty go too; the first one still in use stops it.
       std::string clean, storage;
       if (files::clean_app_path(file.first.c_str(), roots, &clean, &storage) && clean.size() > storage.size()) {
         for (const auto &folder : files::parent_folders(clean.substr(storage.size() + 1))) {
-          if (rmdir(runtime_path((storage + "/" + folder).c_str()).c_str()) != 0)
+          if (!remove_empty_folder(runtime_path((storage + "/" + folder).c_str())))
             break;
         }
       }

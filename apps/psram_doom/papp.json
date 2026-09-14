@@ -1,12 +1,13 @@
 {
   "name": "psram_doom",
   "title": "Doom",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "PrBoom as a PSRAM app. The store downloads the shareware doom1.wad and prboom.wad to /sd/roms/doom/.",
   "author": "PrBoom team; P4 port by RetroESP32-P4",
   "category": "Game",
   "license": "GPL-2.0 (PrBoom)",
-  "about": "The classic 1993 first-person shooter, running from PSRAM on the ESP32-P4 via PrBoom. The store fetches the free shareware episode (doom1.wad) and prboom.wad onto the card on first launch; drop in your own doom.wad or doom2.wad for the full game.",
+  "about": "The classic 1993 first-person shooter, running from PSRAM on the ESP32-P4 via PrBoom. The store fetches the free shareware episode (doom1.wad) and prboom.wad onto the card on first launch; drop in your own doom.wad or doom2.wad for the full game. Screen setting: 640x400 (the 320x200 picture doubled, the default: sharp and the least to send each frame), 800x480 (the classic 768x480) or 960x600 (tripled, the panel's full height).",
+  "changelog": "0.2.0: canvas from the store's Screen setting: 640x400 (2x, default), 800x480 (2.4x) or 960x600 (3x)",
   "controls": [
     "D-pad: move / turn; menu navigation",
     "A: fire; menu select",
@@ -24,12 +25,24 @@
     "url": "https://prboom.sourceforge.net/"
   },
   "icon": "icon.png",
+  "canvas": {
+    "sizes": [
+      "960x600",
+      "800x480",
+      "640x400"
+    ],
+    "recommended": "640x400"
+  },
   "build": "custom",
   "source": {
     "repo": "https://github.com/NonaSuomy/RetroESP32-P4",
     "ref": "5c475e9df46c43463bd85c43f647d513d3b9bfa2",
     "path": "apps/psram_doom"
   },
+  "patches": [
+    "local:ports/retroesp32/patches/*.patch",
+    "local:ports/doom/patches/*.patch"
+  ],
   "includes": [
     "apps/psram_doom/compat",
     "components/psram_app_loader/include",

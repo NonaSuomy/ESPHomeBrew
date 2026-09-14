@@ -1,0 +1,24 @@
+--- a/frontends/framebuffer/fetch.c
++++ b/frontends/framebuffer/fetch.c
+@@ -90,11 +90,21 @@
+ 	return "text/html";
+ }
+ 
++#ifdef PAPP_NETSURF
++/* resources compiled into the PAPP (ports/netsurf/papp_main.c) */
++nserror papp_get_resource_data(const char *path, const uint8_t **data, size_t *data_len);
++nserror papp_release_resource_data(const uint8_t *data);
++#endif
++
+ /* table for fetch operations */
+ static struct gui_fetch_table fetch_table = {
+ 	.filetype = fetch_filetype,
+ 
+ 	.get_resource_url = get_resource_url,
++#ifdef PAPP_NETSURF
++	.get_resource_data = papp_get_resource_data,
++	.release_resource_data = papp_release_resource_data,
++#endif
+ };
+ 
+ struct gui_fetch_table *framebuffer_fetch_table = &fetch_table;

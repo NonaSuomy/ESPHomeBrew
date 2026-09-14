@@ -1,0 +1,176 @@
+--- a/frontends/framebuffer/gui.c
++++ b/frontends/framebuffer/gui.c
+@@ -59,6 +59,63 @@
+ 
+ 
+ #define NSFB_TOOLBAR_DEFAULT_LAYOUT "blfsrutc"
++
++#ifdef PAPP_NETSURF
++#include <strings.h>
++
++/* ports/netsurf/papp_main.c: option defaults for the PAPP device */
++void papp_netsurf_set_defaults(void);
++
++static void fb_update_back_forward(struct gui_window *gw);
++
++/* focus an empty url bar, ready for a new address */
++static void fb_papp_focus_url(struct gui_window *gw)
++{
++	nsfb_event_t event;
++
++	if (gw->url == NULL)
++		return;
++	memset(&event, 0, sizeof(event));
++	event.type = NSFB_EVENT_KEY_DOWN;
++	event.value.keycode = NSFB_KEY_MOUSE_1;
++	fbtk_set_text(gw->url, "");
++	fbtk_set_focus(gw->url);
++	fbtk_post_callback(gw->url, FBTK_CBT_CLICK, &event, 0, 0);
++}
++
++/* an address as typed: a path is a file on the card and a name without
++ * a scheme is a web site (http: until the port has TLS) */
++static nserror fb_papp_url(const char *text, nsurl **url)
++{
++	const char *prefix;
++	char *full;
++	size_t len;
++	nserror error;
++
++	while (*text == ' ')
++		text++;
++	if (text[0] == '/') {
++		prefix = "file://";
++	} else if (strstr(text, "://") == NULL &&
++		   strncasecmp(text, "about:", 6) != 0 &&
++		   strncasecmp(text, "data:", 5) != 0 &&
++		   strncasecmp(text, "file:", 5) != 0 &&
++		   strncasecmp(text, "resource:", 9) != 0 &&
++		   strncasecmp(text, "javascript:", 11) != 0) {
++		prefix = "http://";
++	} else {
++		return nsurl_create(text, url);
++	}
++	len = strlen(prefix) + strlen(text) + 1;
++	full = malloc(len);
++	if (full == NULL)
++		return NSERROR_NOMEM;
++	snprintf(full, len, "%s%s", prefix, text);
++	error = nsurl_create(full, url);
++	free(full);
++	return error;
++}
++#endif
+ 
+ fbtk_widget_t *fbtk;
+ 
+@@ -584,6 +641,10 @@
+ 		{ NSOPTION_LISTEND, 0},
+ 	};
+ 
++#ifdef PAPP_NETSURF
++	papp_netsurf_set_defaults();
++#endif
++
+ 	/* Set defaults for absent option strings */
+ 	nsoption_setnull_charp(cookie_file, strdup("~/.netsurf/Cookies"));
+ 	nsoption_setnull_charp(cookie_jar, strdup("~/.netsurf/Cookies"));
+@@ -692,6 +753,25 @@
+ 			gui_drag.y = y;
+ 			break;
+ 
++#ifdef PAPP_NETSURF
++		case NSFB_KEY_MOUSE_4:
++		case NSFB_KEY_MOUSE_5: {
++			/* the papp surface's wheel events carry the distance:
++			 * vector.y down and vector.z right (papp_surface.c) */
++			int dy = cbi->event->value.vector.y;
++			int dx = cbi->event->value.vector.z;
++
++			if (browser_window_scroll_at_point(gw->bw,
++							   x, y,
++							   dx, dy) == false) {
++				if (dy != 0)
++					widget_scroll_y(gw, dy, false);
++				if (dx != 0)
++					widget_scroll_x(gw, dx, false);
++			}
++			break;
++		}
++#else
+ 		case NSFB_KEY_MOUSE_4:
+ 			/* scroll up */
+ 			if (browser_window_scroll_at_point(gw->bw,
+@@ -707,6 +787,7 @@
+ 							   0, 100) == false)
+ 				widget_scroll_y(gw, 100, false);
+ 			break;
++#endif
+ 
+ 		default:
+ 			break;
+@@ -960,6 +1041,52 @@
+ 			}
+ 			break;
+ 
++#ifdef PAPP_NETSURF
++		case NSFB_KEY_F5:
++			browser_window_reload(gw->bw, true);
++			break;
++
++		case NSFB_KEY_F6:
++			fb_papp_focus_url(gw);
++			break;
++
++		case NSFB_KEY_F13: /* back (Alt+Left, gamepad B) */
++			if (browser_window_back_available(gw->bw))
++				browser_window_history_back(gw->bw, false);
++			fb_update_back_forward(gw);
++			break;
++
++		case NSFB_KEY_F14: /* forward (Alt+Right) */
++			if (browser_window_forward_available(gw->bw))
++				browser_window_history_forward(gw->bw, false);
++			fb_update_back_forward(gw);
++			break;
++
++		case NSFB_KEY_HOME:
++			if (browser_window_key_press(gw->bw,
++					NS_KEY_TEXT_START) == false)
++				widget_scroll_y(gw, 0, true);
++			break;
++
++		case NSFB_KEY_END:
++			if (browser_window_key_press(gw->bw,
++					NS_KEY_TEXT_END) == false)
++				widget_scroll_y(gw, INT_MAX, true);
++			break;
++
++		case NSFB_KEY_l:
++			if (modifier & FBTK_MOD_RCTRL ||
++					modifier & FBTK_MOD_LCTRL) {
++				fb_papp_focus_url(gw);
++				break;
++			}
++			ucs4 = fbtk_keycode_to_ucs4(cbi->event->value.keycode,
++						    modifier);
++			if (ucs4 != -1)
++				browser_window_key_press(gw->bw, ucs4);
++			break;
++#endif
++
+ 		case NSFB_KEY_RSHIFT:
+ 			modifier |= FBTK_MOD_RSHIFT;
+ 			break;
+@@ -1169,7 +1296,11 @@
+ 	nsurl *url;
+ 	nserror error;
+ 
++#ifdef PAPP_NETSURF
++	error = fb_papp_url(text, &url);
++#else
+ 	error = nsurl_create(text, &url);
++#endif
+ 	if (error != NSERROR_OK) {
+ 		fb_warn_user("Errorcode:", messages_get_errorcode(error));
+ 	} else {

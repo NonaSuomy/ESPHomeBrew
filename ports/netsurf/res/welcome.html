@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>NetSurf on the ESP32-P4</title>
+<link rel="stylesheet" type="text/css" href="resource:internal.css">
+</head>
+<body class="ns-even-bg ns-even-fg ns-border">
+<h1>NetSurf on the ESP32-P4</h1>
+
+<p>This is the <a href="https://www.netsurf-browser.org/">NetSurf</a> web
+browser's framebuffer frontend, running as a PAPP. Type an address in the bar
+at the top: plain <code>http://</code> sites, files on the card and NetSurf's
+own pages work. HTTPS is not available yet.</p>
+
+<h2>Try</h2>
+<ul>
+<li><a href="about:about">about:about</a>: NetSurf's internal pages</li>
+<li><a href="about:config">about:config</a>: its options</li>
+<li><a href="about:credits">about:credits</a> and <a href="about:licence">about:licence</a></li>
+<li><a href="http://info.cern.ch/">info.cern.ch</a>: the first web site</li>
+<li><a href="http://frogfind.com/">FrogFind</a>: a search engine for old browsers</li>
+<li><a href="http://68k.news/">68k.news</a>: news in plain HTML</li>
+<li><a href="file:///sd/roms/netsurf/index.html">file:///sd/roms/netsurf/index.html</a>: your own start page on the card</li>
+</ul>
+
+<h2>Controls</h2>
+<ul>
+<li>Touch: tap to click, drag the page to scroll, drag the scroll bars.</li>
+<li>The keyboard button in the bottom right corner opens an on-screen keyboard.</li>
+<li>USB mouse: point and click; hold the middle button and move to scroll.</li>
+<li>USB keyboard: type into the address bar or page; arrows, Page Up/Down,
+Home/End scroll. F6 or Ctrl-L: new address. F5: reload. Alt+Left/Right:
+back/forward. Ctrl-+/-/0: zoom.</li>
+<li>Gamepad: A click, B back, Y reload, Select address bar, Start Enter,
+L/R page up/down.</li>
+<li>Menu or Escape held for 3 seconds, or the X button at the top right,
+quits to the launcher.</li>
+</ul>
+
+<h2>Files</h2>
+<p>NetSurf keeps its files in <code>/sd/roms/netsurf/</code>: <code>Choices</code>
+(options, in NetSurf's <code>key:value</code> format), <code>Cookies</code>, and
+optionally <code>Messages</code> or its own copies of <code>default.css</code>,
+<code>welcome.html</code> and the other built-in resources, which then replace
+the built-in ones. Create an empty file named <code>verbose</code> there for
+NetSurf's log in the device log.</p>
+</body>
+</html>

@@ -1,0 +1,363 @@
+{
+  "name": "psram_netsurf",
+  "title": "NetSurf",
+  "version": "0.1.0",
+  "description": "The NetSurf web browser (framebuffer frontend) as a PAPP at 800x480: plain http:// pages over the loader's network, files on the card and NetSurf's about: pages, with touch, USB keyboard and mouse. Work in progress; no HTTPS yet.",
+  "author": "The NetSurf Developers; PAPP port",
+  "category": "Tool",
+  "license": "GPL-2.0 (NetSurf); MIT (libraries)",
+  "about": "NetSurf is a small, fast web browser with its own HTML and CSS engine. This port runs its framebuffer frontend on the loader's 800x480 screen with NetSurf's built-in bitmap font: HTML 4 and CSS 2 (partly CSS 3) pages, GIF and BMP images (no PNG or JPEG yet), forms and cookies, but no JavaScript. It loads plain http:// pages over the loader's TCP services (HTTPS is not available yet), local files as file:///sd/..., and NetSurf's about: pages. Its files live in /sd/roms/netsurf/: Choices (options), Cookies, and optionally Messages or your own copies of default.css, welcome.html and the other built-in resources, which then replace the built-in ones. There is no disk cache. The folder is optional: without it NetSurf runs with its built-in defaults and keeps no cookies.",
+  "controls": [
+    "Touch: tap to click, drag the page to scroll",
+    "Touch the scroll bars to drag them",
+    "Bottom-right button: on-screen keyboard",
+    "USB mouse: point, click; middle button drag scrolls",
+    "USB keyboard: type; arrows, PgUp/PgDn, Home/End scroll",
+    "F6 or Ctrl-L: new address; F5: reload",
+    "Alt+Left / Alt+Right: back / forward",
+    "Ctrl-+ / Ctrl-- / Ctrl-0: zoom",
+    "Gamepad: A click, B back, Y reload",
+    "Gamepad: Select address bar, Start Enter, L/R page",
+    "Menu or Escape held 3 s: quit to the launcher",
+    "X button top right: quit to the launcher"
+  ],
+  "upstream": {
+    "project": "NetSurf",
+    "url": "https://www.netsurf-browser.org/"
+  },
+  "icon": "icon.png",
+  "publish": false,
+  "build": "custom",
+  "source": {
+    "repo": "https://github.com/netsurf-browser/netsurf",
+    "ref": "39da3c3a40af4566d86500ff3052dfdc7f9a0378",
+    "path": "frontends/framebuffer"
+  },
+  "submodules": [
+    {
+      "path": "libs/libwapcaplet",
+      "repo": "https://github.com/netsurf-browser/libwapcaplet",
+      "ref": "c7c128d3eb3223b216c974471f82e9337fbcf4ba"
+    },
+    {
+      "path": "libs/libparserutils",
+      "repo": "https://github.com/netsurf-browser/libparserutils",
+      "ref": "6b0cbf086ca8eb8fe74b69f0c9ecf274eb2397ca"
+    },
+    {
+      "path": "libs/libhubbub",
+      "repo": "https://github.com/netsurf-browser/libhubbub",
+      "ref": "6651b8cf87a4aa87bcdb2ff024a02659cd3f9402"
+    },
+    {
+      "path": "libs/libdom",
+      "repo": "https://github.com/netsurf-browser/libdom",
+      "ref": "f69781e1f062444b5af3f62d431d7d94018da53b"
+    },
+    {
+      "path": "libs/libcss",
+      "repo": "https://github.com/netsurf-browser/libcss",
+      "ref": "104d87fde48b9e022cd3cdad28aeb4d8cc0a0c5a"
+    },
+    {
+      "path": "libs/libnsutils",
+      "repo": "https://github.com/netsurf-browser/libnsutils",
+      "ref": "0bd39060740b6163bd50875326654a722df97eb2"
+    },
+    {
+      "path": "libs/libnspsl",
+      "repo": "https://github.com/netsurf-browser/libnspsl",
+      "ref": "82815c2bc7fd70d1b6afccfa89a9a0f3fa73db8a"
+    },
+    {
+      "path": "libs/libnsbmp",
+      "repo": "https://github.com/netsurf-browser/libnsbmp",
+      "ref": "ea063c9f46acb43e90208da14073332b505ef7e7"
+    },
+    {
+      "path": "libs/libnsgif",
+      "repo": "https://github.com/netsurf-browser/libnsgif",
+      "ref": "22e99eb6818b1284d0f3ff1b7f46159e87221220"
+    },
+    {
+      "path": "libs/libnsfb",
+      "repo": "https://github.com/netsurf-browser/libnsfb",
+      "ref": "b701cdce7241c3747ccd78658a365db0983ebe24"
+    },
+    {
+      "path": "libs/utf8proc",
+      "repo": "https://github.com/JuliaStrings/utf8proc",
+      "ref": "e5e799221b45bbb90f5fdc5c69b6b8dfbf017e78"
+    },
+    {
+      "path": "libs/zlib",
+      "repo": "https://github.com/madler/zlib",
+      "ref": "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf"
+    }
+  ],
+  "paths": [
+    "resources",
+    "tools",
+    "frontends/framebuffer/res",
+    "libs/libhubbub/build",
+    "libs/libparserutils/build"
+  ],
+  "patches": [
+    "local:ports/netsurf/patches/*.patch"
+  ],
+  "prebuild": [
+    [
+      "{python}",
+      "{repo}/ports/netsurf/gen_netsurf.py",
+      "--src",
+      "{src}",
+      "--gen",
+      "{gen}"
+    ]
+  ],
+  "linker_script": "local:ports/redalert/papp_cpp.ld",
+  "includes": [
+    "local:ports/netsurf/include",
+    "local:",
+    "libs/libwapcaplet/include",
+    "libs/libparserutils/include",
+    "libs/libhubbub/include",
+    "libs/libdom/include",
+    "libs/libcss/include",
+    "libs/libnsutils/include",
+    "libs/libnspsl/include",
+    "libs/libnsbmp/include",
+    "libs/libnsgif/include",
+    "libs/libnsfb/include",
+    "libs/utf8proc",
+    "libs/zlib",
+    ".papp-gen/include"
+  ],
+  "cflags": [
+    "-std=gnu11",
+    "-Os",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-DPAPP_APP_SIDE=1",
+    "-DPAPP_NETSURF=1",
+    "-D_DEFAULT_SOURCE",
+    "-D_BSD_SOURCE",
+    "-D_POSIX_C_SOURCE=200809L",
+    "-D_XOPEN_SOURCE=700",
+    "-D_NETBSD_SOURCE",
+    "-Dnsframebuffer",
+    "-DNETSURF_FB_RESPATH=\"/sd/roms/netsurf\"",
+    "-DNETSURF_FB_FONTPATH=\"/sd/roms/netsurf/fonts\"",
+    "-DNETSURF_UA_FORMAT_STRING=\"Mozilla/5.0 (%s) NetSurf/%d.%d\"",
+    "-DNETSURF_HOMEPAGE=\"about:welcome\"",
+    "-DNETSURF_LOG_LEVEL=INFO",
+    "-DNETSURF_BUILTIN_LOG_FILTER=\"(level:WARNING)\"",
+    "-DNETSURF_BUILTIN_VERBOSE_FILTER=\"(level:VERBOSE)\"",
+    "-DWITH_BMP",
+    "-DWITH_GIF",
+    "-DWITH_NSPSL",
+    "-DWITH_UTF8PROC",
+    "-DSTMTEXPR=1",
+    "-DWITHOUT_ICONV_FILTER",
+    "-DZ_HAVE_UNISTD_H",
+    "-DUTF8PROC_STATIC",
+    "-DNSGIF_NAME=nsgif",
+    "-DNSGIF_VERSION=1.0.0",
+    "-Wno-unused-parameter",
+    "-Wno-unused-but-set-variable",
+    "-Wno-error=implicit-function-declaration",
+    "-Wno-error=incompatible-pointer-types",
+    "-Wno-error=int-conversion"
+  ],
+  "groups": [
+    {
+      "dir": "libs/libwapcaplet/src",
+      "prefix": "wapcaplet_",
+      "includes": ["libs/libwapcaplet/src"],
+      "files": ["*.c"]
+    },
+    {
+      "dir": "libs/libparserutils/src",
+      "prefix": "parserutils_",
+      "includes": ["libs/libparserutils/src"],
+      "files": ["**/*.c"]
+    },
+    {
+      "dir": "libs/libhubbub/src",
+      "prefix": "hubbub_",
+      "includes": ["libs/libhubbub/src", ".papp-gen/hubbub"],
+      "files": ["**/*.c"]
+    },
+    {
+      "dir": "libs/libdom/src",
+      "prefix": "dom_",
+      "includes": ["libs/libdom/src"],
+      "files": ["**/*.c"]
+    },
+    {
+      "dir": "libs/libdom/bindings/hubbub",
+      "prefix": "dombind_",
+      "includes": ["libs/libdom/src", "libs/libdom/bindings/hubbub"],
+      "files": ["parser.c"]
+    },
+    {
+      "dir": "libs/libcss/src",
+      "prefix": "css_",
+      "includes": ["libs/libcss/src"],
+      "files": ["**/*.c"],
+      "exclude": ["parse/properties/css_property_parser_gen.c"]
+    },
+    {
+      "dir": "libs/libnsutils/src",
+      "prefix": "nsutils_",
+      "includes": ["libs/libnsutils/src"],
+      "files": ["*.c"]
+    },
+    {
+      "dir": "libs/libnspsl/src",
+      "prefix": "nspsl_",
+      "includes": ["libs/libnspsl/src"],
+      "files": ["nspsl.c"]
+    },
+    {
+      "dir": "libs/libnsbmp/src",
+      "prefix": "nsbmp_",
+      "includes": ["libs/libnsbmp/src"],
+      "files": ["libnsbmp.c"]
+    },
+    {
+      "dir": "libs/libnsgif/src",
+      "prefix": "nsgif_",
+      "includes": ["libs/libnsgif/src"],
+      "files": ["*.c"]
+    },
+    {
+      "dir": "libs/libnsfb/src",
+      "prefix": "nsfb_",
+      "includes": ["libs/libnsfb/src"],
+      "files": [
+        "libnsfb.c",
+        "dump.c",
+        "cursor.c",
+        "palette.c",
+        "plot/api.c",
+        "plot/util.c",
+        "plot/generic.c",
+        "plot/32bpp-xrgb8888.c",
+        "plot/32bpp-xbgr8888.c",
+        "plot/16bpp.c",
+        "plot/8bpp.c",
+        "surface/surface.c",
+        "surface/ram.c"
+      ]
+    },
+    {
+      "dir": "libs/utf8proc",
+      "prefix": "utf8proc_",
+      "files": ["utf8proc.c"]
+    },
+    {
+      "dir": "libs/zlib",
+      "prefix": "zlib_",
+      "files": [
+        "adler32.c",
+        "compress.c",
+        "crc32.c",
+        "deflate.c",
+        "gzclose.c",
+        "gzlib.c",
+        "gzread.c",
+        "gzwrite.c",
+        "infback.c",
+        "inffast.c",
+        "inflate.c",
+        "inftrees.c",
+        "trees.c",
+        "uncompr.c",
+        "zutil.c"
+      ]
+    },
+    {
+      "dir": "content",
+      "prefix": "ns_content_",
+      "includes": [".", "include", "frontends", "content/handlers", ".papp-gen"],
+      "files": [
+        "*.c",
+        "fetchers/*.c",
+        "fetchers/about/*.c",
+        "fetchers/file/*.c",
+        "handlers/css/*.c",
+        "handlers/html/*.c",
+        "handlers/text/*.c",
+        "handlers/javascript/fetcher.c",
+        "handlers/javascript/none/none.c",
+        "handlers/image/image.c",
+        "handlers/image/image_cache.c",
+        "handlers/image/bmp.c",
+        "handlers/image/gif.c",
+        "handlers/image/ico.c"
+      ],
+      "exclude": ["fs_backing_store.c", "fetchers/curl.c"]
+    },
+    {
+      "dir": "utils",
+      "prefix": "ns_utils_",
+      "includes": [".", "include", "frontends", "content/handlers", ".papp-gen"],
+      "files": ["*.c", "http/*.c", "nsurl/*.c"]
+    },
+    {
+      "dir": "desktop",
+      "prefix": "ns_desktop_",
+      "includes": [".", "include", "frontends", "content/handlers", ".papp-gen"],
+      "files": ["*.c"]
+    },
+    {
+      "dir": "frontends/framebuffer",
+      "prefix": "ns_fb_",
+      "includes": [".", "include", "frontends", "content/handlers", ".papp-gen"],
+      "files": [
+        "gui.c",
+        "framebuffer.c",
+        "schedule.c",
+        "bitmap.c",
+        "fetch.c",
+        "findfile.c",
+        "corewindow.c",
+        "local_history.c",
+        "clipboard.c",
+        "font_internal.c",
+        "fbtk/fbtk.c",
+        "fbtk/event.c",
+        "fbtk/fill.c",
+        "fbtk/bitmap.c",
+        "fbtk/user.c",
+        "fbtk/window.c",
+        "fbtk/text.c",
+        "fbtk/scroll.c",
+        "fbtk/osk.c"
+      ]
+    },
+    {
+      "dir": ".papp-gen",
+      "prefix": "gen_",
+      "includes": [".", "include", "frontends", "content/handlers", ".papp-gen", "local:ports/netsurf"],
+      "files": ["*.c"]
+    },
+    {
+      "dir": "local:ports/netsurf",
+      "prefix": "papp_",
+      "includes": [".", "include", "frontends", "content/handlers", ".papp-gen", "libs/libnsfb/src"],
+      "files": [
+        "papp_main.c",
+        "papp_syscalls.c",
+        "papp_surface.c",
+        "papp_http.c",
+        "papp_iconv.c"
+      ]
+    }
+  ],
+  "ldflags": [
+    "-Wl,--wrap=exit"
+  ],
+  "newlib": true
+}

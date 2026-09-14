@@ -1,0 +1,28 @@
+--- a/content/fetch.c
++++ b/content/fetch.c
+@@ -85,6 +85,11 @@
+ 
+ static scheme_fetcher fetchers[MAX_FETCHERS];
+ 
++#ifdef PAPP_NETSURF
++/* HTTP over the PAPP loader's TCP services (ports/netsurf/papp_http.c) */
++nserror papp_fetch_http_register(void);
++#endif
++
+ /** Information for a single fetch. */
+ struct fetch {
+ 	fetch_callback callback;/**< Callback function. */
+@@ -285,6 +290,13 @@
+ nserror fetcher_init(void)
+ {
+ 	nserror ret;
++
++#ifdef PAPP_NETSURF
++	ret = papp_fetch_http_register();
++	if (ret != NSERROR_OK) {
++		return ret;
++	}
++#endif
+ 
+ #ifdef WITH_CURL
+ 	ret = fetch_curl_register();

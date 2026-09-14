@@ -343,8 +343,12 @@ static bool send_msg(struct http_ctx *c, fetch_msg *msg)
     return true;
 }
 
+// The fetch's last message; nothing more is sent after it.
 static void finish_with(struct http_ctx *c, fetch_msg_type type, const char *text)
 {
+    if (c->dead) {
+        return;
+    }
     fetch_msg msg;
     memset(&msg, 0, sizeof(msg));
     msg.type = type;
@@ -715,6 +719,9 @@ static void header_line(struct http_ctx *c, char *line, size_t len)
     if (line[0] == ' ' || line[0] == '\t') {
         return;  // obsolete line folding
     }
+    while (len > 0 && (line[len - 1] == ' ' || line[len - 1] == '\t')) {
+        line[--len] = '\0';
+    }
 
     fetch_msg msg;
     memset(&msg, 0, sizeof(msg));
@@ -882,7 +889,7 @@ static bool feed(struct http_ctx *c, const uint8_t *p, size_t n)
             c->line[c->line_len++] = ch;
         }
     }
-    if (n > 0 && c->state == ST_BODY) {
+    if (n > 0 && c->state == ST_BODY && !c->dead) {
         return body_bytes(c, p, n);
     }
     return !c->dead;

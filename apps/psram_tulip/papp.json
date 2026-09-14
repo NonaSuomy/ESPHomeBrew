@@ -19,6 +19,9 @@
     "project": "Tulip Creative Computer",
     "url": "https://github.com/shorepine/tulipcc"
   },
+  "requires": [
+    {"path": "/sd/roms/tulip/", "note": "For tulip.lfs, Tulip's files (made on first start)", "optional": true}
+  ],
   "icon": "icon.png",
   "publish": true,
   "dev_build": true,

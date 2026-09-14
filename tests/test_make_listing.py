@@ -32,7 +32,8 @@ def png(w: int, h: int) -> bytes:
 STORE = {"apps": [{
     "name": "psram_doom", "title": "Doom", "version": "0.1.1", "author": "PrBoom team", "about": "Shooter.",
     "controls": ["A: fire"], "upstream": {"project": "PrBoom", "version": "2.5.0"}, "changelog": "store build only",
-    "canvas": True,
+    "canvas": True, "canvas_recommended": "800x480",
+    "requires": [{"path": "/sd/roms/doom/doom1.wad", "download": True}],
     "source": {"repo": "r", "ref": "f" * 40}, "size": 1, "sha256": "0" * 64,
     "icon": {"type": "image/png", "width": 8, "height": 8, "base64": "AAAA", "url": PAGES + "psram_doom-0.1.1.png"},
     "data": {"license": "shareware", "files": [
@@ -75,6 +76,8 @@ class ListingTests(unittest.TestCase):
         self.assertEqual(listing["url"], "http://lan:8000/doom.papp")
         self.assertEqual((listing["controls"], listing["upstream"]["project"]), (["A: fire"], "PrBoom"))
         self.assertIs(listing["canvas"], True)  # keeps the store's Screen setting
+        self.assertEqual(listing["canvas_recommended"], "800x480")  # and its default
+        self.assertEqual(listing["requires"], [{"path": "/sd/roms/doom/doom1.wad", "download": True}])
         self.assertNotIn("changelog", listing)
         self.assertNotIn("source", listing)
         self.assertNotIn("url", listing["icon"])

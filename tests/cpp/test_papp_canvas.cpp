@@ -144,7 +144,46 @@ static void test_choices() {
   CHECK(choices(800, 480, {"1024x600"}).empty());
 }
 
+// The store's Screen button with and without a recommended size.
+static void test_recommended() {
+  const std::vector<std::string> none;
+  const std::vector<std::string> listed{"800x480", "1024x600"};
+  CHECK(recommended(1024, 600, listed, "800x480") == "800x480");
+  CHECK(recommended(1024, 600, listed, "800X480") == "800x480");
+  CHECK(recommended(1024, 600, listed, "640x480").empty());  // not one of its sizes
+  CHECK(recommended(800, 480, {"1024x600"}, "1024x600").empty());  // does not fit
+  CHECK(recommended(1024, 600, listed, "").empty());
+  CHECK(recommended(1024, 600, listed, "junk").empty());
+  CHECK(recommended(1024, 600, none, "960x540") == "960x540");  // any size: any that fits
+  CHECK(recommended(1024, 600, none, "961x540").empty());
+  CHECK(recommended(1024, 600, none, "1280x720").empty());
+
+  CHECK((offered(1024, 600, listed, "800x480") == std::vector<std::string>{"1024x600", "800x480"}));
+  CHECK((offered(1024, 600, none, "") == std::vector<std::string>{"1024x600", "800x480", "640x480"}));
+  CHECK((offered(1024, 600, none, "960x540") ==
+         std::vector<std::string>{"1024x600", "960x540", "800x480", "640x480"}));
+
+  // No recommendation: Default first, as before.
+  const std::vector<std::string> plain = screen_options(offered(1024, 600, listed, ""), "");
+  CHECK((plain == std::vector<std::string>{"", "1024x600", "800x480"}));
+  CHECK(next_screen_option(plain, "") == "1024x600");
+  CHECK(next_screen_option(plain, "1024x600") == "800x480");
+  CHECK(next_screen_option(plain, "800x480").empty());
+  CHECK(next_screen_option(plain, "640x480").empty());  // no longer offered: back to Default
+
+  // Recommended 800x480: "" (no setting) is 800x480, in its place; no Default.
+  const std::vector<std::string> rec = screen_options(offered(1024, 600, listed, "800x480"), "800x480");
+  CHECK((rec == std::vector<std::string>{"1024x600", ""}));
+  CHECK(next_screen_option(rec, "") == "1024x600");
+  CHECK(next_screen_option(rec, "1024x600").empty());
+  CHECK(next_screen_option(rec, "1280x720").empty());
+  CHECK((screen_options({"800x480"}, "800x480") == std::vector<std::string>{""}));
+  CHECK(next_screen_option({""}, "").empty());
+  CHECK(next_screen_option({}, "800x480").empty());
+}
+
 int main() {
+  test_recommended();
   test_legacy_layout();
   test_full_panel_and_small_canvases();
   test_sizes();

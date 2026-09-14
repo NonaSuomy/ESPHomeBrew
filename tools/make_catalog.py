@@ -146,7 +146,20 @@ def screenshot_name(app: dict, index: int) -> str:
     return f"{app['name']}-{app['version']}-screen{index + 1}.png"
 
 
-LISTING_FIELDS = ("author", "category", "license", "about", "changelog", "controls", "upstream", "canvas")
+LISTING_FIELDS = ("author", "category", "license", "about", "changelog", "controls", "upstream", "canvas",
+                  "canvas_recommended")
+
+
+def requires_list(app: dict) -> list[dict]:
+    """What the app needs on the card, for the store's tick-or-cross check: its
+    "requires" from papp.json, then each data file the store downloads for it
+    (as /sd/<target>, marked "download")."""
+    required = list(app.get("requires", []))
+    for f in app.get("data", {}).get("files", []):
+        path = "/sd/" + f["target"]
+        if not any(entry["path"] == path for entry in required):
+            required.append({"path": path, "download": True})
+    return required
 
 
 def store_entry(repo: str, a: dict) -> dict:
@@ -157,6 +170,7 @@ def store_entry(repo: str, a: dict) -> dict:
         "version": a["version"],
         "description": a.get("description", ""),
         **{key: a[key] for key in LISTING_FIELDS if key in a},
+        **({"requires": requires_list(a)} if requires_list(a) else {}),
         **({"icon": {**a["icon"], "url": pages_base(repo) + icon_name(a)}} if a.get("icon") else {}),
         # Screenshots are big, so only their URLs; the icon stays inline.
         **({"screenshots": [{"width": s["width"], "height": s["height"], "url": pages_base(repo) + screenshot_name(a, i)}

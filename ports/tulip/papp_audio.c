@@ -137,7 +137,8 @@ size_t amy_i2s_write(const uint8_t *buffer, size_t nbytes)
     return nbytes;
 }
 
-// MIDI: no MIDI hardware on the PAPP loader (AMY_HOST_MIDI: this is the host).
+// MIDI (AMY_HOST_MIDI: this is the host): input is read by poll_midi in
+// papp_display.c; output goes to the loader's USB-MIDI device, if it has one.
 void run_midi(void)
 {
 }
@@ -148,6 +149,7 @@ void stop_midi(void)
 
 void midi_out(uint8_t *bytes, uint16_t len)
 {
-    (void)bytes;
-    (void)len;
+    if (papp_svc->midi_write != NULL && bytes != NULL && len > 0) {
+        papp_svc->midi_write(bytes, len);
+    }
 }

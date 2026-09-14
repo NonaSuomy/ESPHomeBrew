@@ -330,9 +330,44 @@ def upstream_info(name: str, upstream: object) -> dict:
     return info
 
 
+# The canvas sizes an app may list: even, from 320x240 up (the loader's
+# papp_canvas.h limits).
+CANVAS_SIZE = re.compile(r"(\d{1,4})x(\d{1,4})")
+CANVAS_MIN = (320, 240)
+CANVAS_MAX_SIDE = 4096
+MAX_CANVAS_SIZES = 8
+
+
+def canvas_info(name: str, canvas: object) -> bool | list[str]:
+    """The listing's "canvas": the app picks its canvas with display_get_size /
+    display_set_canvas (psram_app.h), so the store offers it a Screen setting.
+
+    true: it draws at whatever size display_get_size offers. A list names the
+    sizes it can draw ("1024x600", "800x480", ...), and only those are offered.
+    Apps without it keep the 800x480 canvas.
+    """
+    if canvas is True:
+        return True
+    if not isinstance(canvas, list) or not 1 <= len(canvas) <= MAX_CANVAS_SIZES:
+        raise ValueError(f"{name}: canvas must be true or a list of 1 to {MAX_CANVAS_SIZES} sizes such as \"1024x600\"")
+    sizes: list[str] = []
+    for size in canvas:
+        match = CANVAS_SIZE.fullmatch(size) if isinstance(size, str) else None
+        width, height = (int(match[1]), int(match[2])) if match else (0, 0)
+        if (not match or width < CANVAS_MIN[0] or height < CANVAS_MIN[1] or width > CANVAS_MAX_SIDE
+                or height > CANVAS_MAX_SIDE or width % 2 or height % 2):
+            raise ValueError(f"{name}: canvas size {size!r} must be WIDTHxHEIGHT, even, at least "
+                             f"{CANVAS_MIN[0]}x{CANVAS_MIN[1]}")
+        text = f"{width}x{height}"
+        if text in sizes:
+            raise ValueError(f"{name}: canvas lists {text} twice")
+        sizes.append(text)
+    return sizes
+
+
 def store_info(name: str, manifest: dict, app_dir: Path) -> dict:
     """The store listing extras from papp.json: author, category, license, about,
-    changelog, controls, upstream, icon and screenshots.
+    changelog, controls, upstream, canvas, icon and screenshots.
 
     All optional. Images are PNGs in the app's folder: an icon of at most
     256x256 and 64 KB, and up to three screenshots of at most 1024x600 and
@@ -353,6 +388,8 @@ def store_info(name: str, manifest: dict, app_dir: Path) -> dict:
         info["controls"] = [c.strip() for c in controls]
     if "upstream" in manifest:
         info["upstream"] = upstream_info(name, manifest["upstream"])
+    if "canvas" in manifest:
+        info["canvas"] = canvas_info(name, manifest["canvas"])
     if "icon" in manifest:
         info["icon"] = listing_png(name, app_dir, manifest["icon"], "icon", MAX_ICON_BYTES, MAX_ICON_SIDE, MAX_ICON_SIDE)
     if "screenshots" in manifest:

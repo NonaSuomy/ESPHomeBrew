@@ -32,6 +32,7 @@ def png(w: int, h: int) -> bytes:
 STORE = {"apps": [{
     "name": "psram_doom", "title": "Doom", "version": "0.1.1", "author": "PrBoom team", "about": "Shooter.",
     "controls": ["A: fire"], "upstream": {"project": "PrBoom", "version": "2.5.0"}, "changelog": "store build only",
+    "canvas": True,
     "source": {"repo": "r", "ref": "f" * 40}, "size": 1, "sha256": "0" * 64,
     "icon": {"type": "image/png", "width": 8, "height": 8, "base64": "AAAA", "url": PAGES + "psram_doom-0.1.1.png"},
     "data": {"license": "shareware", "files": [
@@ -73,6 +74,7 @@ class ListingTests(unittest.TestCase):
         self.assertEqual((listing["size"], listing["sha256"]), (50, sha(b"P" * 50)))
         self.assertEqual(listing["url"], "http://lan:8000/doom.papp")
         self.assertEqual((listing["controls"], listing["upstream"]["project"]), (["A: fire"], "PrBoom"))
+        self.assertIs(listing["canvas"], True)  # keeps the store's Screen setting
         self.assertNotIn("changelog", listing)
         self.assertNotIn("source", listing)
         self.assertNotIn("url", listing["icon"])

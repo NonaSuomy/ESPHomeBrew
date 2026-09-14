@@ -37,16 +37,40 @@ What a store screen shows before an app is downloaded:
   "changelog": "0.1.1: sound fixes\n0.1.0: first release",
   "controls": ["D-pad: move", "A: fire", "Start: menu"],
   "upstream": {"project": "PrBoom", "version": "2.5.0", "url": "https://github.com/..."},
+  "canvas": true,
   "icon": "icon.png",
   "screenshots": ["screen1.png", "screen2.png"]
 }
 ```
 
 - `author` (up to 60 characters), `category` (30), `license` (60), `about` (2000) and `changelog` (4000) are text; `controls` is 1–20 lines of up to 60 characters; `upstream` names the original project the port comes from (`project` up to 60 characters, optional `version` up to 30 and an `https://` `url`), shown next to the `source` repo and commit the app is built from. The fields follow the Homebrew App Store (hb-app.store) listing.
+- `canvas` says the app chooses its canvas size ([below](#canvas-size-for-app-authors)), which gives it a **Screen** setting on its store page: `true` when it draws at whatever size `display_get_size` offers, or a list of the sizes it can draw, such as `["1024x600", "800x480"]` (up to 8, each even and at least 320x240; only those that fit the panel are offered). Leave it out for apps that keep 800×480; the setting would do nothing for them.
 - `icon` is a PNG in the app's folder, at most 256×256 and 64 KB; `screenshots` lists up to three PNGs of at most 1024×600 and 300 KB. Use your own or freely licensed art, not official game logos.
 - Publish store puts all of it, with the icon as base64, the `.papp` size and the data size, into `store.json` and into a sidecar next to each app (`psram_doom-0.1.1.json`, found by swapping `.papp` for `.json`). The icon is also published as `psram_doom-0.1.1.png`, which the web page shows, and screenshots as `psram_doom-0.1.1-screen1.png`, … (listed by URL only, to keep the JSON small). A LAN server or SD folder can carry the same sidecar next to its `.papp` files.
 
 Sources come from the `source` repository at a pinned commit, and so does the PAPP SDK (`psram_app.h`, `psram_app.ld`, `pack_papp.py`), so an app always builds against the loader ABI of its own tree. They are fetched at build time rather than copied here, because upstream has no license file. Today the apps come from [NonaSuomy/RetroESP32-P4](https://github.com/NonaSuomy/RetroESP32-P4) (`papp-serial-upload`) and [giltal/RetroESP32-P4](https://github.com/giltal/RetroESP32-P4).
+
+### Canvas size (for app authors)
+
+An app draws on a canvas centred on the panel. It starts with 800×480, the size every existing app assumes. Two services at the end of the service table (`psram_app.h`) let it use another size, up to the whole panel (1024×600 on the Elecrow board):
+
+```c
+int w = 800, h = 480;
+if (svc->display_get_size && svc->display_set_canvas) {   // NULL on older loaders
+    svc->display_get_size(&w, &h);          // the user's Screen setting, else the device default
+    if (svc->display_set_canvas(w, h) != 0) {
+        w = 800;                            // refused: still 800x480
+        h = 480;
+    }
+}
+uint16_t *fb = svc->display_get_framebuffer();   // w x h RGB565, stride w
+```
+
+- Call `display_set_canvas` once, before drawing, from the task that draws. Sizes are even, at least 320×240 and at most the panel; `display_get_size`'s answer always qualifies. A switch clears the framebuffer and the panel to black.
+- Everything on the display side then uses the new size: the framebuffer and `display_flush`, `display_clear`, `display_write_frame_rgb565` (one full canvas), `display_write_rect`, `display_write_frame_custom` and `display_emu_flush` (the scaled frame centred in the canvas), `touch_read` (canvas coordinates) and screenshots.
+- An app with fixed sizes (a build-time resolution, say) picks the largest of its own sizes that fits in what `display_get_size` returns, or simply asks for the one size it has, and lists them under `canvas` in `papp.json`. An app built only for 1024×600 can call `display_set_canvas(1024, 600)` directly and draw scaled down (for example with `display_write_frame_custom`) if that fails.
+- On a canvas as wide as the panel the loader's close button covers the canvas's top-right 58×58 pixels (plus a small margin); touches there close the app.
+- Apps in this repository's `ports/` include `esphome/components/papp_loader/psram_app.h` and get the services from it. An app built against an older SDK header (such as RetroESP32-P4's) needs the two fields added after `net_resolve`, in the same order, or a newer header.
 
 ### Custom recipes
 

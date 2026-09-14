@@ -23,6 +23,7 @@
 #include "esphome/components/usb_hidx/usb_hidx.h"
 #endif
 
+#include "papp_canvas.h"
 #include "papp_data.h"
 #include "psram_app.h"
 
@@ -123,9 +124,10 @@ class PappLoader : public Component {
     this->stream_enabled_ = true;
     ESP_LOGI("papp_loader", "Screen stream enabled remotely");
   }
-  // One full 800x480 capture of the running PAPP's canvas, sent to the next
-  // (or current) client of the diagnostic stream on TCP port 3233 as a
-  // PAPPSS01 packet. With no app running the packet is empty (0x0).
+  // One full capture of the running PAPP's canvas (800x480 unless the app
+  // chose another size), sent to the next (or current) client of the
+  // diagnostic stream on TCP port 3233 as a PAPPSS01 packet. With no app
+  // running it is the menu (or an empty 0x0 packet).
   void request_screenshot() {
     this->screenshot_requested_ = true;
     this->stream_enabled_ = true;
@@ -142,6 +144,35 @@ class PappLoader : public Component {
   // `deletefile`). Never game data or apps; refused while an app runs.
   void delete_file(const std::string &path);
   void set_autostart(bool autostart) { this->autostart_ = autostart; }
+  // ── Canvas size (papp_canvas.h) ──
+  // The panel's size (YAML panel_width/panel_height); by default the
+  // display's own. Frame buffers are allocated for a canvas this large.
+  void set_panel_size(int width, int height) {
+    this->panel_config_w_ = width;
+    this->panel_config_h_ = height;
+  }
+  // The canvas offered to apps that ask for one (display_get_size) and have no
+  // per-app setting (YAML canvas_width/canvas_height); by default the panel.
+  // Apps that never ask keep 800x480.
+  void set_default_canvas(int width, int height) {
+    this->default_canvas_w_ = width;
+    this->default_canvas_h_ = height;
+  }
+  int get_panel_width() const { return this->geometry_.panel_w; }
+  int get_panel_height() const { return this->geometry_.panel_h; }
+  int get_default_canvas_width() const { return this->default_canvas_w_; }
+  int get_default_canvas_height() const { return this->default_canvas_h_; }
+  // The per-app Screen setting ("1024x600", or "" for the device default), kept
+  // in <install_dir>/settings.json by app name (canvas::app_key: the .papp's
+  // file name without folders, ".papp" and a "-<version>" suffix). set returns
+  // false for a size this device cannot show, or when the file can't be written.
+  std::string get_app_canvas(const std::string &app);
+  bool set_app_canvas(const std::string &app, const std::string &size);
+  // The sizes the Screen setting offers after "Default" (canvas::choices): the
+  // app's listed sizes that fit, or the panel, 1024x600, 800x480 and 640x480.
+  std::vector<std::string> canvas_choices(const std::vector<std::string> &listed = {}) const {
+    return canvas::choices(this->max_canvas_w_, this->max_canvas_h_, listed);
+  }
   void set_display(display::Display *display) { this->display_ = display; }
   void set_touchscreen(touchscreen::Touchscreen *touchscreen) { this->touchscreen_ = touchscreen; }
   void set_speaker(speaker::Speaker *speaker) { this->speaker_ = speaker; }
@@ -205,6 +236,8 @@ class PappLoader : public Component {
   static void svc_display_write_frame_custom(const uint16_t *buffer, uint16_t in_w, uint16_t in_h,
                                              float scale, bool byte_swap);
   static void svc_display_write_rect(int x, int y, int w, int h, const uint16_t *data);
+  static void svc_display_get_size(int *width, int *height);
+  static int svc_display_set_canvas(int width, int height);
   static int svc_sprite_blit(uint16_t *framebuf, uint32_t fb_w, uint32_t fb_h,
                              uint32_t x, uint32_t y, const uint16_t *sprite,
                              uint32_t sp_w, uint32_t sp_h, uint16_t colorkey);
@@ -275,9 +308,37 @@ class PappLoader : public Component {
   void update_catalog_ui_();
   void update_progress_ui_();
   void flush_framebuffer_();
-  // Sends a panel-oriented 800x480 frame to the display (plus the remote-view
-  // sample and the close button). The caller holds display_mutex_.
+  // Sends a panel-oriented (turned 180 degrees) canvas-sized frame to the
+  // display (plus the remote-view sample and the close button). The caller
+  // holds display_mutex_.
   void send_display_buffer_(const uint16_t *display_buffer, int64_t start_us);
+  // Canvas size. geometry_ is the panel and the running app's canvas; it only
+  // changes under display_mutex_ (tasks that just hit-test touches read it
+  // without the lock). The frame buffers hold max_canvas_w_ x max_canvas_h_
+  // (the panel, unless that much PSRAM was not available).
+  canvas::Geometry geometry_{};
+  int max_canvas_w_{canvas::LEGACY_WIDTH};
+  int max_canvas_h_{canvas::LEGACY_HEIGHT};
+  size_t frame_alloc_bytes_{0};  // each of framebuffer_, rotated_framebuffer_, ppa_framebuffer_
+  int panel_config_w_{0};  // YAML panel size; 0 = the display's
+  int panel_config_h_{0};
+  int default_canvas_w_{0};  // YAML default canvas; 0 = the panel
+  int default_canvas_h_{0};
+  // For the running app: the size display_get_size offers, and whether the
+  // app has chosen a canvas (then display_get_size reports that one).
+  int offered_canvas_w_{canvas::LEGACY_WIDTH};
+  int offered_canvas_h_{canvas::LEGACY_HEIGHT};
+  volatile bool canvas_chosen_{false};
+  bool allocate_frame_buffers_(int width, int height);
+  void free_frame_buffers_();
+  int set_canvas_(int width, int height);
+  // Switches the canvas to width x height and blanks the frame buffers (and,
+  // with blank_panel, the whole panel). The caller holds display_mutex_.
+  void apply_canvas_(int width, int height, bool blank_panel);
+  // Back to 800x480 for the next app, and what display_get_size offers it.
+  void prepare_canvas_for_app_(const std::string &source);
+  void restore_legacy_canvas_();
+  std::string settings_path_() const;
   void render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t in_h, float scale, bool byte_swap);
   void log_render_time_(int64_t render_start_us, uint16_t in_w, uint16_t in_h, float scale);
   // Where render_custom_ last put a frame in rotated_framebuffer_ (x, y, w, h):
@@ -484,6 +545,11 @@ class PappLoader : public Component {
     bool has_info{false};
     std::string name, title, version, author, category, license, about, changelog, upstream, source;
     std::vector<std::string> controls;
+    // The listing's "canvas": true (any size) or the sizes the app can draw
+    // ("1024x600", ...). Either one adds the Screen setting to its detail page.
+    bool canvas_any{false};
+    std::vector<std::string> canvas_sizes;
+    bool supports_canvas() const { return this->canvas_any || !this->canvas_sizes.empty(); }
     uint32_t size{0}, data_size{0};
     std::string sha256;
     std::string sidecar;            // the raw JSON, saved next to an installed copy
@@ -588,6 +654,11 @@ class PappLoader : public Component {
   void close_detail_();
   void focus_detail_button_(uint8_t index);
   void run_detail_action_(uint8_t action);
+  // The detail page's Screen button: the app's settings key and label, and
+  // one press (the next choice, saved).
+  std::string detail_app_key_(int index) const;
+  std::string screen_label_(const std::string &app);
+  void cycle_screen_setting_(int index);
   bool handle_store_controls_(uint8_t newly_pressed, bool a_pressed, bool b_pressed, bool l_pressed, bool r_pressed,
                               bool select_pressed);
 #endif

@@ -48,7 +48,7 @@ static constexpr uint32_t COLOR_UPDATE = 0xF59E0B;
 // Transparent icon pixels are blended onto the tile colour (PNGdec takes 0xBBGGRR).
 static constexpr uint32_t ICON_BLEND_BGR = 0x331C11;
 
-enum DetailAction : uint8_t { ACTION_STREAM, ACTION_INSTALL, ACTION_LAUNCH, ACTION_BACK };
+enum DetailAction : uint8_t { ACTION_STREAM, ACTION_INSTALL, ACTION_LAUNCH, ACTION_SCREEN, ACTION_BACK };
 
 // The listing next to a .papp: the same name with .json.
 static std::string sidecar_for(const std::string &papp) {
@@ -96,6 +96,17 @@ static bool parse_app_info(const std::string &text, PappLoader::AppInfo *info) {
       const char *value = line | "";
       if (*value != '\0')
         info->controls.emplace_back(value);
+    }
+    // "canvas": true, or the sizes the app draws: ["1024x600", "800x480"].
+    if (root["canvas"].is<bool>()) {
+      info->canvas_any = root["canvas"].as<bool>();
+    } else {
+      for (JsonVariant entry : root["canvas"].as<JsonArray>()) {
+        const char *value = entry | "";
+        int w = 0, h = 0;
+        if (canvas::parse_size(value, &w, &h))
+          info->canvas_sizes.emplace_back(canvas::format_size(w, h));
+      }
     }
     const char *project = root["upstream"]["project"] | "";
     const char *upstream_version = root["upstream"]["version"] | "";
@@ -311,6 +322,79 @@ std::string PappLoader::installed_version_(const std::string &name) const {
       return item.second;
   }
   return {};
+}
+
+// ── Per-app settings ────────────────────────────────────────────────────────
+// <install_dir>/settings.json maps app names to their settings:
+//   {"psram_tulip": {"canvas": "1024x600"}}
+// Other apps and other fields are kept when it is rewritten. Read when an app
+// starts and by the store's detail page, both on the main loop.
+
+static constexpr size_t SETTINGS_MAX_BYTES = 16 * 1024;
+
+std::string PappLoader::settings_path_() const { return this->install_dir_ + "/settings.json"; }
+
+std::string PappLoader::get_app_canvas(const std::string &app) {
+  std::string text;
+  if (app.empty() || read_small_file(this->settings_path_(), &text, SETTINGS_MAX_BYTES) != ESP_OK)
+    return {};
+  std::string value;
+  json::parse_json(text, [&app, &value](JsonObject root) -> bool {
+    value = root[app]["canvas"] | "";
+    return true;
+  });
+  int w = 0, h = 0;
+  return canvas::parse_size(value, &w, &h) ? canvas::format_size(w, h) : std::string();
+}
+
+bool PappLoader::set_app_canvas(const std::string &app, const std::string &size) {
+  int w = 0, h = 0;
+  if (app.empty() || app.size() > 96)
+    return false;
+  if (!size.empty() &&
+      (!canvas::parse_size(size, &w, &h) || !canvas::size_ok(w, h, this->max_canvas_w_, this->max_canvas_h_))) {
+    ESP_LOGW(TAG, "Screen setting %s for %s refused: even sizes from %dx%d to %dx%d", size.c_str(), app.c_str(),
+             canvas::MIN_WIDTH, canvas::MIN_HEIGHT, this->max_canvas_w_, this->max_canvas_h_);
+    return false;
+  }
+  std::string text;
+  JsonDocument doc;
+  if (read_small_file(this->settings_path_(), &text, SETTINGS_MAX_BYTES) != ESP_OK || deserializeJson(doc, text) ||
+      !doc.is<JsonObject>())
+    doc.to<JsonObject>();  // missing or unreadable: start a new one
+  JsonObject root = doc.as<JsonObject>();
+  JsonObject entry = root[app].as<JsonObject>();
+  if (size.empty()) {
+    if (!entry.isNull()) {
+      entry.remove("canvas");
+      if (entry.size() == 0)
+        root.remove(app);
+    }
+  } else {
+    if (entry.isNull())
+      entry = root[app].to<JsonObject>();
+    entry["canvas"] = canvas::format_size(w, h);
+  }
+  std::string out;
+  serializeJsonPretty(doc, out);
+  out.push_back('\n');
+
+  // install_dir is a storage root and a folder on it: /sd/roms/papp -> /sd + roms/papp.
+  const std::string &dir = this->install_dir_;
+  const size_t cut = dir.find('/', 1);
+  const std::string storage = runtime_path((cut == std::string::npos ? dir : dir.substr(0, cut)).c_str());
+  const std::string target = (cut == std::string::npos ? std::string() : dir.substr(cut + 1) + "/") + "settings.json";
+  bool ok = make_parent_dirs(storage, target);
+  FILE *file = ok ? std::fopen((storage + "/" + target).c_str(), "wb") : nullptr;
+  ok = file != nullptr && std::fwrite(out.data(), 1, out.size(), file) == out.size();
+  if (file != nullptr)
+    ok = std::fclose(file) == 0 && ok;
+  if (ok) {
+    ESP_LOGI(TAG, "Screen setting for %s: %s", app.c_str(), size.empty() ? "default" : size.c_str());
+  } else {
+    ESP_LOGW(TAG, "Could not write %s", this->settings_path_().c_str());
+  }
+  return ok;
 }
 
 // ── Install ─────────────────────────────────────────────────────────────────
@@ -691,6 +775,9 @@ void PappLoader::open_detail_(int index) {
   } else {
     buttons.emplace_back(ACTION_LAUNCH, LV_SYMBOL_PLAY "  Launch");
   }
+  // Only apps whose listing says they choose their canvas size.
+  if (info != nullptr && info->supports_canvas())
+    buttons.emplace_back(ACTION_SCREEN, this->screen_label_(this->detail_app_key_(index)));
   buttons.emplace_back(ACTION_BACK, LV_SYMBOL_CLOSE "  Back");
   this->detail_buttons_.clear();
   this->detail_actions_.clear();
@@ -710,6 +797,11 @@ void PappLoader::open_detail_(int index) {
     lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(button, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_t *label = text_label(button, buttons[i].second, 0xFFFFFF);
+    if (buttons[i].first == ACTION_SCREEN) {
+      // Its text changes with each press: keep it to one line inside the button.
+      one_line(label, DETAIL_ICON - 16);
+      lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    }
     lv_obj_center(label);
     lv_obj_add_event_cb(button, store_button_event_cb_, LV_EVENT_ALL, new DetailButtonContext{this, buttons[i].first});  // NOLINT
     this->detail_buttons_.push_back(button);
@@ -854,10 +946,61 @@ void PappLoader::run_detail_action_(uint8_t action) {
     case ACTION_INSTALL:
       this->start_install_(index);
       break;
+    case ACTION_SCREEN:
+      this->cycle_screen_setting_(index);
+      break;
     case ACTION_BACK:
     default:
       this->close_detail_();
       break;
+  }
+}
+
+// The settings key of the file Launch / Stream would run, as the loader keys
+// it at launch (canvas::app_key).
+std::string PappLoader::detail_app_key_(int index) const {
+  if (index < 0 || static_cast<size_t>(index) >= this->catalog_entries_.size())
+    return {};
+  const AppInfo *info = static_cast<size_t>(index) < this->app_info_.size() ? &this->app_info_[index] : nullptr;
+  if (info != nullptr && !info->name.empty() && !this->installed_version_(info->name).empty())
+    return canvas::app_key(this->install_dir_ + "/" + info->name + ".papp");
+  return canvas::app_key(this->catalog_entries_[index].second);
+}
+
+std::string PappLoader::screen_label_(const std::string &app) {
+  const std::string size = this->get_app_canvas(app);
+  return std::string(LV_SYMBOL_IMAGE "  Screen ") + (size.empty() ? std::string("Default") : size);
+}
+
+// One press of Screen: Default, then each size the app can use on this panel,
+// then Default again. Saved at once; the app gets it from its next start.
+void PappLoader::cycle_screen_setting_(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= this->app_info_.size() || !this->app_info_[index].supports_canvas())
+    return;
+  const AppInfo &info = this->app_info_[index];
+  const std::string app = this->detail_app_key_(index);
+  std::vector<std::string> options{std::string()};
+  for (const auto &size : this->canvas_choices(info.canvas_any ? std::vector<std::string>() : info.canvas_sizes))
+    options.push_back(size);
+  const std::string current = this->get_app_canvas(app);
+  size_t next = 0;  // a size that is no longer offered goes back to Default
+  for (size_t i = 0; i < options.size(); i++) {
+    if (options[i] == current) {
+      next = (i + 1) % options.size();
+      break;
+    }
+  }
+  if (!this->set_app_canvas(app, options[next])) {
+    this->set_progress_(false, 0, 0, "%s", "Could not save the Screen setting - is the card in?");
+    return;
+  }
+  const std::string label = this->screen_label_(app);
+  for (size_t i = 0; i < this->detail_buttons_.size() && i < this->detail_actions_.size(); i++) {
+    if (this->detail_actions_[i] != ACTION_SCREEN)
+      continue;
+    lv_obj_t *text = lv_obj_get_child(this->detail_buttons_[i], 0);
+    if (text != nullptr)
+      lv_label_set_text(text, label.c_str());
   }
 }
 

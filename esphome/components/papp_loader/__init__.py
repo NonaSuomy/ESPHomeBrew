@@ -36,6 +36,17 @@ CONF_LEFT_STICK_X_SENSOR = "left_stick_x_sensor"
 CONF_LEFT_STICK_Y_SENSOR = "left_stick_y_sensor"
 CONF_RIGHT_STICK_X_SENSOR = "right_stick_x_sensor"
 CONF_RIGHT_STICK_Y_SENSOR = "right_stick_y_sensor"
+CONF_CANVAS_WIDTH = "canvas_width"
+CONF_CANVAS_HEIGHT = "canvas_height"
+CONF_PANEL_WIDTH = "panel_width"
+CONF_PANEL_HEIGHT = "panel_height"
+
+# The canvas apps draw on (psram_app.h display_get_size / display_set_canvas):
+# apps that never ask stay at 800x480; these limits match papp_canvas.h.
+CANVAS_MIN_WIDTH = 320
+CANVAS_MIN_HEIGHT = 240
+LEGACY_CANVAS = (800, 480)
+MAX_SIDE = 4096
 
 papp_loader_ns = cg.esphome_ns.namespace("papp_loader")
 PappLoader = papp_loader_ns.class_("PappLoader", cg.Component)
@@ -104,6 +115,29 @@ CATALOG_SCHEMA = cv.Schema(
 )
 
 
+def even_pixels(minimum):
+    """A canvas side: an even number of pixels from `minimum` to 4096."""
+
+    def validator(value):
+        value = cv.int_range(min=minimum, max=MAX_SIDE)(value)
+        if value % 2:
+            raise cv.Invalid(f"{value} is odd; canvas sizes are even numbers of pixels")
+        return value
+
+    return validator
+
+
+def validate_canvas(config):
+    """canvas_width/height and panel_width/height come in pairs; the canvas fits the panel."""
+    for width, height in ((CONF_CANVAS_WIDTH, CONF_CANVAS_HEIGHT), (CONF_PANEL_WIDTH, CONF_PANEL_HEIGHT)):
+        if (width in config) != (height in config):
+            raise cv.Invalid(f"set both {width} and {height}, or neither")
+    if CONF_CANVAS_WIDTH in config and CONF_PANEL_WIDTH in config:
+        if config[CONF_CANVAS_WIDTH] > config[CONF_PANEL_WIDTH] or config[CONF_CANVAS_HEIGHT] > config[CONF_PANEL_HEIGHT]:
+            raise cv.Invalid("the canvas must fit on the panel (canvas_width/height at most panel_width/height)")
+    return config
+
+
 def validate_catalogs(config):
     catalogs = config.get(CONF_CATALOGS, [])
     names = [catalog[CONF_NAME].lower() for catalog in catalogs]
@@ -141,6 +175,15 @@ CONFIG_SCHEMA = cv.Schema(
         # found files are not downloaded, and app reads of /sd/... fall back here.
         cv.Optional(CONF_DATA_SEARCH, default=["/sd", "/usb0"]): cv.ensure_list(validate_data_root),
         cv.Required(CONF_DISPLAY_ID): cv.use_id(display.Display),
+        # The panel's size; by default the display's own (1024x600 on the Elecrow).
+        # The frame buffers are sized for a canvas this large.
+        cv.Optional(CONF_PANEL_WIDTH): cv.int_range(min=LEGACY_CANVAS[0], max=MAX_SIDE),
+        cv.Optional(CONF_PANEL_HEIGHT): cv.int_range(min=LEGACY_CANVAS[1], max=MAX_SIDE),
+        # The canvas offered to apps that choose their size (and have no per-app
+        # Screen setting); by default the whole panel. Apps that never ask keep
+        # 800x480. See docs/esphome-store.md "Canvas size".
+        cv.Optional(CONF_CANVAS_WIDTH): even_pixels(CANVAS_MIN_WIDTH),
+        cv.Optional(CONF_CANVAS_HEIGHT): even_pixels(CANVAS_MIN_HEIGHT),
         cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
         cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
         cv.Optional(CONF_LVGL_ID): cv.use_id(LvglComponent),
@@ -159,7 +202,9 @@ CONFIG_SCHEMA = cv.Schema(
         **BUTTON_SCHEMAS,
     }
 ).extend(cv.COMPONENT_SCHEMA)
-CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, cv.has_at_most_one_key(CONF_CATALOG_URL, CONF_CATALOGS), validate_catalogs)
+CONFIG_SCHEMA = cv.All(
+    CONFIG_SCHEMA, cv.has_at_most_one_key(CONF_CATALOG_URL, CONF_CATALOGS), validate_catalogs, validate_canvas
+)
 
 
 async def to_code(config):
@@ -204,6 +249,10 @@ async def to_code(config):
 
     display_var = await cg.get_variable(config[CONF_DISPLAY_ID])
     cg.add(var.set_display(display_var))
+    if CONF_PANEL_WIDTH in config:
+        cg.add(var.set_panel_size(config[CONF_PANEL_WIDTH], config[CONF_PANEL_HEIGHT]))
+    if CONF_CANVAS_WIDTH in config:
+        cg.add(var.set_default_canvas(config[CONF_CANVAS_WIDTH], config[CONF_CANVAS_HEIGHT]))
 
     if touchscreen_id := config.get(CONF_TOUCHSCREEN_ID):
         touchscreen_var = await cg.get_variable(touchscreen_id)

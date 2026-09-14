@@ -96,3 +96,6 @@ papp_loader:
   default_catalog: Store
   report_url: https://example.invalid/papp-report
   report_log_bytes: 4096
+  # The canvas offered to apps that choose their size (the panel's by default).
+  canvas_width: 1024
+  canvas_height: 600

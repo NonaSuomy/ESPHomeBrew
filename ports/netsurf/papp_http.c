@@ -188,12 +188,10 @@ static bool hand_off(struct http_ctx *c)
         papp_svc->app_set_resume_arg(page);
     }
     if (papp_svc->app_open("psram_video", url, 1) != 0) {
-        papp_svc->log_printf("NETSURF: the video player is not installed or not in the library
-");
+        papp_svc->log_printf("NETSURF: the video player is not installed or not in the library\n");
         return false;
     }
-    papp_svc->log_printf("NETSURF: playing a video or sound link in psram_video
-");
+    papp_svc->log_printf("NETSURF: playing a video or sound link in psram_video\n");
     s_handed_off = true;
     papp_request_quit(0);
     return true;

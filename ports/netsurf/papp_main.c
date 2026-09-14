@@ -168,8 +168,7 @@ static void netsurf_task(void *arg)
     static char start_url[PAPP_APP_ARG_MAX];
     const int start_len = papp_svc->app_get_arg != NULL ? papp_svc->app_get_arg(start_url, sizeof(start_url)) : 0;
     if (start_len > 0 && start_len < (int)sizeof(start_url)) {
-        papp_svc->log_printf("NETSURF: opening the page it was started with
-");
+        papp_svc->log_printf("NETSURF: opening the page it was started with\n");
         argv[argc++] = start_url;
     }
     argv[argc] = NULL;

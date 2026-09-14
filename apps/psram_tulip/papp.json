@@ -1,17 +1,17 @@
 {
   "name": "psram_tulip",
   "title": "Tulip CC",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Tulip Creative Computer (MicroPython, the AMY synthesizer, Tulip's graphics, editor and LVGL UI) as a PAPP, at its full 1024x600 with USB keyboard, touch and the loader's speaker. Work in progress.",
   "author": "shorepine (Tulip, AMY); PAPP port",
   "category": "Tool",
   "license": "MIT (Tulip, MicroPython, AMY, LVGL)",
-  "about": "Tulip is a self-contained computer for music, graphics and code: a MicroPython REPL and editor, the AMY synthesizer, sprites, a background layer and an LVGL user interface. This port runs Tulip Desktop's code on the ESP32-P4 loader: Tulip's display at its own 1024x600 shown 1:1 (scaled to 800x480 on loaders without canvas sizes), AMY at 44.1 kHz on the loader's speaker, USB keyboard to the REPL and editor, touch as Tulip's touch and LVGL pointer. Tulip's files live in a 16 MiB filesystem image, /sd/roms/tulip/tulip.lfs, made on first start (create the folder /sd/roms/tulip first); the card itself is at /sd for opening files by name. No network, MIDI or native C modules yet.",
+  "about": "Tulip is a self-contained computer for music, graphics and code: a MicroPython REPL and editor, the AMY synthesizer, sprites, a background layer and an LVGL user interface. This port runs Tulip Desktop's code on the ESP32-P4 loader: Tulip's display at its own 1024x600 shown 1:1 (scaled to 800x480 on loaders without canvas sizes), AMY at 44.1 kHz on the loader's speaker, USB keyboard to the REPL and editor, touch as Tulip's touch and LVGL pointer. Tulip's files live in a 16 MiB filesystem image, /sd/roms/tulip/tulip.lfs, made on first start (create the folder /sd/roms/tulip first); the card itself is at /sd for opening files by name. MIDI in and out through a USB-MIDI cable or keyboard on loaders with usb_midi (tulip.midi_callback, the synths). No network or native C modules yet.",
   "controls": [
     "USB keyboard: the REPL and editor",
     "Ctrl, then a key: Ctrl-C, Ctrl-X, Ctrl-Q, Ctrl-Tab",
     "Arrows / D-pad: history, cursor; Tulip joystick",
-    "Touch: Tulip touch and LVGL",
+    "Touch: Tulip touch (up to 3 fingers) and LVGL",
     "Menu or Escape held 3 s: quit to the launcher",
     "Ctrl-D on an empty line: quit to the launcher"
   ],

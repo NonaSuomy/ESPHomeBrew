@@ -274,27 +274,70 @@ static void poll_gamepad(int64_t now)
 
 static int s_touching = 0;
 
+// A canvas point in Tulip's own coordinates.
+static void to_tulip(int *x, int *y)
+{
+    if (s_scaled_frame != NULL) {
+        *x = (int)((float)*x / SCALED_SCALE);
+        *y = (int)((float)(*y - s_scaled_y0) / SCALED_SCALE);
+    }
+    *x = *x < 0 ? 0 : (*x >= H_RES ? H_RES - 1 : *x);
+    *y = *y < 0 ? 0 : (*y >= V_RES ? V_RES - 1 : *y);
+}
+
+// Up to 3 fingers, as Tulip's GT911 driver fills them: tulip.touch() reads
+// all three, touch callbacks and LVGL get the first. A loader without
+// touch_read_points gives one.
 static void poll_touch(void)
 {
-    if (papp_svc->touch_read == NULL) {
-        return;
+    int xs[3], ys[3];
+    int count = 0;
+    if (papp_svc->touch_read_points != NULL) {
+        papp_touch_point_t points[3];
+        count = papp_svc->touch_read_points(points, 3);
+        for (int i = 0; i < count; i++) {
+            xs[i] = points[i].x;
+            ys[i] = points[i].y;
+        }
+    } else if (papp_svc->touch_read != NULL) {
+        count = papp_svc->touch_read(&xs[0], &ys[0]) ? 1 : 0;
     }
-    int x = 0, y = 0;
-    const int down = papp_svc->touch_read(&x, &y);
-    if (down && s_scaled_frame != NULL) {
-        x = (int)((float)x / SCALED_SCALE);
-        y = (int)((float)(y - s_scaled_y0) / SCALED_SCALE);
-        x = x < 0 ? 0 : (x >= H_RES ? H_RES - 1 : x);
-        y = y < 0 ? 0 : (y >= V_RES ? V_RES - 1 : y);
-    }
-    if (down) {
-        last_touch_x[0] = (int16_t)x;
-        last_touch_y[0] = (int16_t)y;
-        send_touch_to_micropython((int16_t)x, (int16_t)y, 0);
+    if (count > 0) {
+        for (int i = 0; i < 3; i++) {
+            if (i < count) {
+                to_tulip(&xs[i], &ys[i]);
+                last_touch_x[i] = (int16_t)xs[i];
+                last_touch_y[i] = (int16_t)ys[i];
+            } else {
+                last_touch_x[i] = -1;
+                last_touch_y[i] = -1;
+            }
+        }
+        send_touch_to_micropython(last_touch_x[0], last_touch_y[0], 0);
         s_touching = 1;
     } else if (s_touching) {
         send_touch_to_micropython(last_touch_x[0], last_touch_y[0], 1);
         s_touching = 0;
+    }
+}
+
+// ── MIDI ────────────────────────────────────────────────────────────────────
+// A USB-MIDI cable or keyboard on the loader (usb_midi): its bytes go to AMY's
+// parser as Tulip Desktop's MIDI thread does, so synths play and
+// tulip.midi_callback() sees the messages. AMY's midi_out (papp_audio.c)
+// sends the other way.
+
+extern void convert_midi_bytes_to_messages(uint8_t *data, size_t len, uint8_t usb);
+
+static void poll_midi(void)
+{
+    if (papp_svc->midi_read == NULL) {
+        return;
+    }
+    uint8_t buf[64];
+    int n;
+    while ((n = papp_svc->midi_read(buf, (int)sizeof(buf))) > 0) {
+        convert_midi_bytes_to_messages(buf, (size_t)n, 0);
     }
 }
 
@@ -379,6 +422,7 @@ static void display_task(void *arg)
             poll_keyboard(now);
             poll_gamepad(now);
             poll_touch();
+            poll_midi();
         }
         draw_frame();
         if (papp_mp_ready) {

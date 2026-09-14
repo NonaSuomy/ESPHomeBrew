@@ -1,0 +1,28 @@
+--- a/frontends/framebuffer/framebuffer.c
++++ b/frontends/framebuffer/framebuffer.c
+@@ -44,6 +44,12 @@
+ /* netsurf framebuffer library handle */
+ static nsfb_t *nsfb;
+ 
++#ifdef PAPP_NETSURF
++/* ports/netsurf/papp_path.c: paths (SVG images) drawn with FreeType */
++nserror papp_plot_path(nsfb_t *nsfb, const plot_style_t *style,
++		const float *p, unsigned int n, const float transform[6]);
++#endif
++
+ 
+ /**
+  * \brief Sets a clip rectangle for subsequent plot operations.
+@@ -271,8 +277,12 @@ framebuffer_plot_path(const struct redraw_context *ctx,
+ 		unsigned int n,
+ 		const float transform[6])
+ {
++#ifdef PAPP_NETSURF
++	return papp_plot_path(nsfb, pstyle, p, n, transform);
++#else
+ 	NSLOG(netsurf, INFO, "path unimplemented");
+ 	return NSERROR_OK;
++#endif
+ }
+ 
+ 

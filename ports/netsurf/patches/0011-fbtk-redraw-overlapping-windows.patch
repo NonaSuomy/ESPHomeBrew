@@ -1,0 +1,99 @@
+--- a/frontends/framebuffer/fbtk.h
++++ b/frontends/framebuffer/fbtk.h
+@@ -270,6 +270,14 @@ bool fbtk_get_bbox(fbtk_widget_t *widget, struct nsfb_bbox_s *bbox);
+  */
+ bool fbtk_get_caret(fbtk_widget_t *widget, int *x, int *y, int *height);
+ 
++#ifdef PAPP_NETSURF
++/**
++ * Whether a mapped widget drawn above this one (such as the on-screen
++ * keyboard over the page) covers part of it.
++ */
++bool fbtk_papp_covered(fbtk_widget_t *widget);
++#endif
++
+ 
+ /******************* Widget Manipulation **********************/
+ 
+--- a/frontends/framebuffer/fbtk/fbtk.c
++++ b/frontends/framebuffer/fbtk/fbtk.c
+@@ -618,6 +618,35 @@ fbtk_get_redraw_pending(fbtk_widget_t *widget)
+ 	return root->redraw.needed | root->redraw.child;
+ }
+ 
++#ifdef PAPP_NETSURF
++/* whether two bounding boxes overlap */
++static bool
++fbtk_papp_overlap(const nsfb_bbox_t *a, const nsfb_bbox_t *b)
++{
++	return a->x0 < b->x1 && b->x0 < a->x1 && a->y0 < b->y1 && b->y0 < a->y1;
++}
++
++/* exported function documented in fbtk.h */
++bool
++fbtk_papp_covered(fbtk_widget_t *widget)
++{
++	nsfb_bbox_t area, above;
++	fbtk_widget_t *w, *s;
++
++	fbtk_get_bbox(widget, &area);
++	for (w = widget; w->parent != NULL; w = w->parent) {
++		for (s = w->prev; s != NULL; s = s->prev) {
++			if (s->mapped) {
++				fbtk_get_bbox(s, &above);
++				if (fbtk_papp_overlap(&area, &above))
++					return true;
++			}
++		}
++	}
++	return false;
++}
++#endif
++
+ /** Perform a depth-first tree-walk, calling the redraw callback of the widgets in turn.
+  *
+  * This function makes no decisions of its own and simply walks the
+@@ -649,6 +678,26 @@ do_redraw(nsfb_t *nsfb, fbtk_widget_t *widget)
+ 			fbtk_post_callback(widget, FBTK_CBT_REDRAW);
+ 		}
+ 		widget->redraw.needed = false;
++#ifdef PAPP_NETSURF
++		{
++			/* Siblings drawn above this widget, or above one of
++			 * its parents, that it overlaps (the on-screen
++			 * keyboard over the page) were just painted over:
++			 * they are drawn again after it in this pass. */
++			fbtk_widget_t *w, *s;
++			nsfb_bbox_t above;
++
++			for (w = widget; w->parent != NULL; w = w->parent) {
++				for (s = w->prev; s != NULL; s = s->prev) {
++					if (!s->mapped || s->redraw.needed)
++						continue;
++					fbtk_get_bbox(s, &above);
++					if (fbtk_papp_overlap(&plot_ctx, &above))
++						fbtk_request_redraw(s);
++				}
++			}
++		}
++#endif
+ 	}
+ 
+ 	/* walk the widgets children if child flag is set */
+--- a/frontends/framebuffer/gui.c
++++ b/frontends/framebuffer/gui.c
+@@ -310,7 +310,13 @@ fb_pan(fbtk_widget_t *widget,
+ 
+ 	/* if the pan exceeds the viewport size just redraw the whole area */
+ 	if (bwidget->pany >= height || bwidget->pany <= -height ||
+-	    bwidget->panx >= width || bwidget->panx <= -width) {
++	    bwidget->panx >= width || bwidget->panx <= -width
++#ifdef PAPP_NETSURF
++	    /* or when a window above (the on-screen keyboard) covers part
++	     * of it: copying would move that window's pixels too */
++	    || fbtk_papp_covered(widget)
++#endif
++	    ) {
+ 
+ 		bwidget->scrolly += bwidget->pany;
+ 		bwidget->scrollx += bwidget->panx;

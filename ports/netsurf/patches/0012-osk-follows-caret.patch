@@ -1,0 +1,216 @@
+--- a/frontends/framebuffer/fbtk.h
++++ b/frontends/framebuffer/fbtk.h
+@@ -617,4 +617,25 @@ void fbtk_enable_oskb(fbtk_widget_t *widget);
+  */
+ void map_osk(void);
+ 
++#ifdef PAPP_NETSURF
++/**
++ * The caret was set or taken away: show the on-screen keyboard for a text
++ * field (unless a USB keyboard is in use), hide it soon after the caret
++ * goes if it was shown that way.
++ */
++void fbtk_papp_osk_caret(bool has_caret);
++
++/**
++ * The on-screen keyboard's rows on the screen, [y0, y1).
++ *
++ * @return false when the keyboard is hidden.
++ */
++bool fbtk_papp_osk_area(int *y0, int *y1);
++
++/**
++ * Put the on-screen keyboard at the top of the screen or back at the bottom.
++ */
++void fbtk_papp_osk_place(bool top);
++#endif
++
+ #endif
+--- a/frontends/framebuffer/fbtk/fbtk.c
++++ b/frontends/framebuffer/fbtk/fbtk.c
+@@ -275,6 +275,11 @@ fbtk_set_caret(fbtk_widget_t *widget, bool set,
+ 		root->u.root.caret.owner = NULL;
+ 		root->u.root.caret.remove_cb = NULL;
+ 	}
++#ifdef PAPP_NETSURF
++	/* the on-screen keyboard comes up for a text field and goes
++	 * again with its caret */
++	fbtk_papp_osk_caret(root->u.root.caret.owner != NULL);
++#endif
+ }
+ 
+ /* exported function documented in fbtk.h */
+--- a/frontends/framebuffer/fbtk/osk.c
++++ b/frontends/framebuffer/fbtk/osk.c
+@@ -109,6 +109,95 @@ static struct kbd_button_s kbdbase[KEYCOUNT] = {
+ 
+ static fbtk_widget_t *osk;
+ 
++#ifdef PAPP_NETSURF
++#include "utils/errors.h"
++#include "framebuffer/schedule.h"
++
++/* ports/netsurf/papp_surface.c: false once a USB keyboard has been used */
++int papp_osk_auto_allowed(void);
++
++static bool osk_auto = false; /* shown because a text field has the caret */
++static bool osk_top = false;  /* at the top of the screen, not the bottom */
++static bool osk_dismissed = false; /* closed by hand while a field had the caret */
++
++/* move the keyboard to the top or the bottom of the screen */
++static void
++osk_papp_move(bool top)
++{
++	int height;
++	bool mapped;
++
++	if (osk == NULL || top == osk_top)
++		return;
++	osk_top = top;
++	height = fbtk_get_height(osk);
++	mapped = osk->mapped;
++	if (mapped)
++		fbtk_set_mapping(osk, false);
++	fbtk_set_pos_and_size(osk, 0,
++			top ? 0 : fbtk_get_height(fbtk_get_root_widget(osk)) - height,
++			0, height);
++	if (mapped)
++		fbtk_set_mapping(osk, true);
++}
++
++static void
++osk_papp_hide_cb(void *p)
++{
++	fbtk_widget_t *root;
++
++	if (osk == NULL || !osk_auto)
++		return;
++	root = fbtk_get_root_widget(osk);
++	if (root->u.root.caret.owner != NULL)
++		return; /* a text field has the caret again */
++	osk_auto = false;
++	fbtk_set_mapping(osk, false);
++	osk_papp_move(false);
++}
++
++/* exported function documented in fbtk.h */
++void
++fbtk_papp_osk_caret(bool has_caret)
++{
++	if (osk == NULL)
++		return;
++	if (has_caret) {
++		if (!osk->mapped && !osk_dismissed &&
++		    papp_osk_auto_allowed()) {
++			fbtk_set_zorder(osk, INT_MIN);
++			fbtk_set_mapping(osk, true);
++			osk_auto = true;
++		}
++	} else {
++		/* the next field to get the caret brings it up again */
++		osk_dismissed = false;
++		/* hide it unless a text field takes the caret again soon
++		 * (the caret moving between fields, or to the address bar) */
++		if (osk_auto)
++			framebuffer_schedule(100, osk_papp_hide_cb, NULL);
++	}
++}
++
++/* exported function documented in fbtk.h */
++bool
++fbtk_papp_osk_area(int *y0, int *y1)
++{
++	if (osk == NULL || !osk->mapped)
++		return false;
++	*y0 = fbtk_get_absy(osk);
++	*y1 = *y0 + fbtk_get_height(osk);
++	return true;
++}
++
++/* exported function documented in fbtk.h */
++void
++fbtk_papp_osk_place(bool top)
++{
++	osk_papp_move(top);
++}
++#endif
++
+ static int
+ osk_close(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+ {
+@@ -116,6 +205,12 @@ osk_close(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+ 		return 0;
+ 
+ 	fbtk_set_mapping(osk, false);
++#ifdef PAPP_NETSURF
++	/* stay closed while this field keeps the caret */
++	osk_dismissed = fbtk_get_root_widget(osk)->u.root.caret.owner != NULL;
++	osk_auto = false;
++	osk_papp_move(false);
++#endif
+ 
+ 	return 0;
+ }
+@@ -190,6 +285,10 @@ map_osk(void)
+ {
+ 	fbtk_set_zorder(osk, INT_MIN);
+ 	fbtk_set_mapping(osk, true);
++#ifdef PAPP_NETSURF
++	/* opened by hand: it stays until closed by hand */
++	osk_auto = false;
++#endif
+ }
+ 
+ /*
+--- a/frontends/framebuffer/gui.c
++++ b/frontends/framebuffer/gui.c
+@@ -2241,6 +2241,39 @@ gui_window_remove_caret_cb(fbtk_widget_t *widget)
+ 	}
+ }
+ 
++#ifdef PAPP_NETSURF
++#define FB_PAPP_OSK_MARGIN 8
++
++/* keep a caret at y..y+height in the page clear of the on-screen
++ * keyboard: scroll the page up, or when it cannot scroll that far, move
++ * the keyboard to the top of the screen */
++static void
++fb_papp_osk_follow(struct gui_window *g, int y, int height)
++{
++	struct browser_widget_s *bwidget = fbtk_get_userpw(g->browser);
++	int k0, k1, top, bottom;
++
++	if (!fbtk_papp_osk_area(&k0, &k1))
++		return;
++	top = fbtk_get_absy(g->browser) + y -
++		(bwidget->scrolly + bwidget->pany) - FB_PAPP_OSK_MARGIN;
++	bottom = top + height + 2 * FB_PAPP_OSK_MARGIN;
++	if (bottom <= k0 || top >= k1)
++		return; /* clear of the keyboard */
++	if (k0 == 0) {
++		/* the keyboard is at the top, over the caret: back down */
++		fbtk_papp_osk_place(false);
++		if (!fbtk_papp_osk_area(&k0, &k1) || bottom <= k0)
++			return;
++	}
++	widget_scroll_y(g, bottom - k0, false);
++	bottom = fbtk_get_absy(g->browser) + y + height -
++		(bwidget->scrolly + bwidget->pany) + FB_PAPP_OSK_MARGIN;
++	if (bottom > k0)
++		fbtk_papp_osk_place(true);
++}
++#endif
++
+ static void
+ gui_window_place_caret(struct gui_window *g, int x, int y, int height,
+ 		const struct rect *clip)
+@@ -2250,6 +2283,9 @@ gui_window_place_caret(struct gui_window *g, int x, int y, int height,
+ 	/* set new pos */
+ 	fbtk_set_caret(g->browser, true, x, y, height,
+ 			gui_window_remove_caret_cb);
++#ifdef PAPP_NETSURF
++	fb_papp_osk_follow(g, y, height);
++#endif
+ 
+ 	/* redraw new caret pos */
+ 	fb_queue_redraw(g->browser,

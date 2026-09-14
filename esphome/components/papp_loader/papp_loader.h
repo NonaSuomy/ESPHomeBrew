@@ -7,6 +7,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
+#include "esp_timer.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
@@ -327,6 +328,26 @@ class PappLoader : public Component {
   binary_sensor::BinarySensor *launch_button_{nullptr};
   binary_sensor::BinarySensor *fire_button_{nullptr};
   binary_sensor::BinarySensor *touch_button_{nullptr};
+  // A capacitive pad can read ON for good (toggle mode latched, calibrated
+  // while touched): after 10 s ON without a change it is ignored as A until it
+  // turns OFF, so it cannot hold A down in apps or keep the launcher unarmed.
+  int64_t touch_on_since_us_{0};
+  bool touch_stuck_logged_{false};
+  bool touch_button_stuck_() {
+    const int64_t now = esp_timer_get_time();
+    if (this->touch_on_since_us_ == 0)
+      this->touch_on_since_us_ = now;
+    const bool stuck = now - this->touch_on_since_us_ > 10000000;
+    if (stuck && !this->touch_stuck_logged_) {
+      ESP_LOGW("papp_loader", "Touch button ON for over 10 s: ignored as A until it is released");
+      this->touch_stuck_logged_ = true;
+    }
+    return stuck;
+  }
+  void touch_button_released_() {
+    this->touch_on_since_us_ = 0;
+    this->touch_stuck_logged_ = false;
+  }
   sensor::Sensor *adc_button_sensor_{nullptr};
   sensor::Sensor *left_stick_x_sensor_{nullptr};
   sensor::Sensor *left_stick_y_sensor_{nullptr};

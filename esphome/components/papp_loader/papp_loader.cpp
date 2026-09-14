@@ -2129,8 +2129,12 @@ void PappLoader::read_input_(papp_gamepad_state_t *state) {
   // normal A/fire input, and the touch button is an additional A/fire input.
   if (this->fire_button_ != nullptr && this->fire_button_->get_state())
     state->values[PAPP_INPUT_A] = 1;
-  if (this->touch_button_ != nullptr && this->touch_button_->get_state())
-    state->values[PAPP_INPUT_A] = 1;
+  if (this->touch_button_ != nullptr) {
+    if (!this->touch_button_->get_state())
+      this->touch_button_released_();
+    else if (!this->touch_button_stuck_())
+      state->values[PAPP_INPUT_A] = 1;
+  }
 
   // Elecrow GPIO16 is a resistor ladder. Preserve the calibrated mapping used
   // by the ESPHome UI, while exposing its diagonal/axis directions to PAPPs.

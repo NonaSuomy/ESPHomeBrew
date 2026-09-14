@@ -10,14 +10,22 @@
 
 <p>This is the <a href="https://www.netsurf-browser.org/">NetSurf</a> web
 browser's framebuffer frontend, running as a PAPP. Type an address in the bar
-at the top: plain <code>http://</code> sites, files on the card and NetSurf's
-own pages work. HTTPS is not available yet.</p>
+at the top: <code>http://</code> and <code>https://</code> sites, files on the
+card and NetSurf's own pages work (no JavaScript). A name typed without
+<code>http://</code> or <code>https://</code> opens with HTTPS.</p>
+
+<p>HTTPS connections are made and checked by the loader against the
+firmware's certificate bundle. A site it cannot verify does not open, and
+there is no way to skip the check.</p>
 
 <h2>Try</h2>
 <ul>
 <li><a href="about:about">about:about</a>: NetSurf's internal pages</li>
 <li><a href="about:config">about:config</a>: its options</li>
 <li><a href="about:credits">about:credits</a> and <a href="about:licence">about:licence</a></li>
+<li><a href="https://lite.duckduckgo.com/lite/">DuckDuckGo Lite</a>: web search without JavaScript</li>
+<li><a href="https://en.m.wikipedia.org/">Wikipedia</a> (mobile pages)</li>
+<li><a href="https://text.npr.org/">text.npr.org</a>: news in plain HTML</li>
 <li><a href="http://info.cern.ch/">info.cern.ch</a>: the first web site</li>
 <li><a href="http://frogfind.com/">FrogFind</a>: a search engine for old browsers</li>
 <li><a href="http://68k.news/">68k.news</a>: news in plain HTML</li>

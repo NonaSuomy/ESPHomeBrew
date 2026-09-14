@@ -24,6 +24,12 @@ extern "C" {
 // The loader's service table, set by app_entry before anything else runs.
 extern const app_services_t *papp_svc;
 
+// The canvas NetSurf draws on: the loader's offer (normally the whole panel,
+// 1024x600) or 800x480 on older loaders. papp_main.c sets it before NetSurf
+// starts.
+extern int papp_canvas_w;
+extern int papp_canvas_h;
+
 // NetSurf's folder on the card: Choices, Cookies, Messages, and any resource
 // (default.css, welcome.html, ...) that should replace the built-in copy.
 #define PAPP_NS_DIR "/sd/roms/netsurf"

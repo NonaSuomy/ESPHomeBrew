@@ -1,6 +1,6 @@
 --- a/frontends/framebuffer/gui.c
 +++ b/frontends/framebuffer/gui.c
-@@ -59,6 +59,63 @@
+@@ -59,6 +59,70 @@
  
  
  #define NSFB_TOOLBAR_DEFAULT_LAYOUT "blfsrutc"
@@ -28,8 +28,12 @@
 +	fbtk_post_callback(gw->url, FBTK_CBT_CLICK, &event, 0, 0);
 +}
 +
++/* ports/netsurf/papp_http.c: whether the loader offers TLS */
++int papp_have_tls(void);
++
 +/* an address as typed: a path is a file on the card and a name without
-+ * a scheme is a web site (http: until the port has TLS) */
++ * a scheme is a web site, https: when the loader has TLS, except for
++ * local names and numeric addresses, which get http: */
 +static nserror fb_papp_url(const char *text, nsurl **url)
 +{
 +	const char *prefix;
@@ -47,7 +51,10 @@
 +		   strncasecmp(text, "file:", 5) != 0 &&
 +		   strncasecmp(text, "resource:", 9) != 0 &&
 +		   strncasecmp(text, "javascript:", 11) != 0) {
-+		prefix = "http://";
++		size_t hostlen = strcspn(text, ":/?#");
++		bool local = (memchr(text, '.', hostlen) == NULL) ||
++			(strspn(text, "0123456789.") >= hostlen);
++		prefix = (papp_have_tls() && !local) ? "https://" : "http://";
 +	} else {
 +		return nsurl_create(text, url);
 +	}
@@ -64,7 +71,7 @@
  
  fbtk_widget_t *fbtk;
  
-@@ -584,6 +641,10 @@
+@@ -584,6 +648,10 @@
  		{ NSOPTION_LISTEND, 0},
  	};
  
@@ -75,7 +82,7 @@
  	/* Set defaults for absent option strings */
  	nsoption_setnull_charp(cookie_file, strdup("~/.netsurf/Cookies"));
  	nsoption_setnull_charp(cookie_jar, strdup("~/.netsurf/Cookies"));
-@@ -692,6 +753,25 @@
+@@ -692,6 +760,25 @@
  			gui_drag.y = y;
  			break;
  
@@ -101,7 +108,7 @@
  		case NSFB_KEY_MOUSE_4:
  			/* scroll up */
  			if (browser_window_scroll_at_point(gw->bw,
-@@ -707,6 +787,7 @@
+@@ -707,6 +794,7 @@
  							   0, 100) == false)
  				widget_scroll_y(gw, 100, false);
  			break;
@@ -109,7 +116,7 @@
  
  		default:
  			break;
-@@ -960,6 +1041,52 @@
+@@ -960,6 +1048,52 @@
  			}
  			break;
  
@@ -162,7 +169,7 @@
  		case NSFB_KEY_RSHIFT:
  			modifier |= FBTK_MOD_RSHIFT;
  			break;
-@@ -1169,13 +1296,27 @@
+@@ -1169,13 +1303,27 @@
  	nsurl *url;
  	nserror error;
  

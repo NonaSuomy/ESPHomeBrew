@@ -1,31 +1,28 @@
-// HTTP fetcher for the NetSurf PAPP, on the loader's net_* services instead
-// of libcurl. Registered for http: and https: (patches/0002 calls
-// papp_fetch_http_register() from fetcher_init); NetSurf's own file:,
-// about:, resource: and data: fetchers stay as they are.
+// HTTP and HTTPS fetcher for the NetSurf PAPP, on the loader's net_* and
+// net_tls_* services instead of libcurl. Registered for http: and https:
+// (patches/0002 calls papp_fetch_http_register() from fetcher_init);
+// NetSurf's own file:, about:, resource: and data: fetchers stay as they are.
 //
-// HTTP/1.1, one connection per fetch ("Connection: close"): GET and POST
-// (URL-encoded and multipart), redirects (NetSurf follows them), chunked
-// transfer coding, Content-Length or read-to-close bodies, gzip/deflate
-// content coding (zlib), cookies, Basic authentication, If-Modified-Since /
-// If-None-Match from NetSurf's cache, and an optional HTTP proxy (the
-// http_proxy options). Nothing blocks: NetSurf's scheduler polls fetchers
-// every 10 ms while any is active, and each poll advances every fetch a step
-// with net_poll/net_tcp_send/net_tcp_recv. Host names are looked up by a
-// small task (net_resolve blocks) and cached.
+// HTTP/1.1: GET and POST (URL-encoded and multipart), redirects (NetSurf
+// follows them, between http: and https: too), chunked transfer coding,
+// Content-Length or read-to-close bodies, gzip content coding (zlib),
+// cookies, Basic authentication, If-Modified-Since / If-None-Match from
+// NetSurf's cache, and an optional HTTP proxy for http: (the http_proxy
+// options). Connections are kept alive and reused for the next request to
+// the same server (one TLS handshake per server, not per image); a request
+// on a kept connection that turns out to be closed is sent again on a new
+// one (never a POST).
 //
-// The byte stream goes through a transport (struct transport). Plain TCP is
-// the only one today; https: fetches fail with an explanation. HTTPS (phase
-// 2) is meant to be a second transport over loader services backed by the
-// firmware's mbedTLS (esp-tls), so no TLS stack is compiled into the app:
-//   int  net_tls_connect(const char *host, uint32_t ip, uint16_t port, uint32_t flags);
-//          starts TCP + handshake with SNI and certificate checks against
-//          the firmware's CA bundle; returns a handle (net_poll: bit 1 once
-//          the handshake is done, bit 2 on failure)
-//   int  net_tls_send(int handle, const void *buf, int len);   like net_tcp_send
-//   int  net_tls_recv(int handle, void *buf, int len);         like net_tcp_recv
-//   int  net_tls_status(int handle, char *msg, int len);       verify result
-//   void net_tls_close(int handle);
-// tls_transport below would call those; the fetcher above it does not change.
+// Nothing blocks: NetSurf's scheduler polls fetchers every 10 ms while any is
+// active, and each poll advances every fetch a step. Host names are looked
+// up by a small task (net_resolve blocks) and cached.
+//
+// The byte stream goes through a transport: plain TCP (net_tcp_*), or TLS
+// (net_tls_*), where the loader does the TCP connect and the handshake on its
+// own task and verifies the certificate against the firmware's CA bundle
+// with SNI; there is no way to skip that check, so a failure shows NetSurf's
+// certificate error page without its "proceed" button (patches/0008). The
+// loader has at most 4 TLS sessions for all apps; this fetcher uses 3.
 #include "papp_port.h"
 
 #include <ctype.h>
@@ -53,27 +50,31 @@
 #include "content/urldb.h"
 
 nserror papp_fetch_http_register(void);
+int papp_have_tls(void);
 
 #define RECV_BUF 4096
-#define MAX_READ_PER_POLL (48 * 1024)   // bytes one fetch may take per poll
-#define MAX_LINE 8192                    // longest header line kept
-#define MAX_UPLOAD (8 * 1024 * 1024)     // largest file a form may post
-#define CONNECT_RETRY_US 4000000         // how long to wait for a free socket
-#define IDLE_TIMEOUT_US 60000000         // no data for this long: timed out
+#define MAX_READ_PER_POLL (48 * 1024)       // bytes one fetch may take per poll
+#define MAX_LINE 8192                        // longest header line kept
+#define MAX_UPLOAD (8 * 1024 * 1024)         // largest file a form may post
+#define CONNECT_RETRY_US 4000000             // how long to retry when the loader refuses a connection
+#define WAIT_FOR_SESSION_US 120000000        // how long to queue for a TLS session
+#define TLS_CONNECT_TIMEOUT_US 60000000      // lookup + TCP + handshake, on the loader's task
+#define IDLE_TIMEOUT_US 60000000             // no data for this long: timed out
+#define KEEP_IDLE_US 15000000                // a kept connection is closed after this long unused
+#define TLS_MAX 3                            // TLS handles this app holds at once (the loader has 4)
 
 enum state { ST_RESOLVE, ST_CONNECT, ST_CONNECTING, ST_SEND, ST_STATUS, ST_HEADERS, ST_BODY };
 enum body_mode { BODY_NONE, BODY_LENGTH, BODY_CHUNKED, BODY_TO_CLOSE };
 enum chunk_state { CH_SIZE, CH_DATA, CH_DATA_END, CH_TRAILER };
 
-struct http_ctx;
-
-// A byte stream to the server.
+// A byte stream to a server.
 struct transport {
-    int (*open)(struct http_ctx *c);                          // 0 started, -1 not (yet)
-    int (*ready)(struct http_ctx *c);                         // 1 connected, 0 not yet, -1 failed
-    int (*send)(struct http_ctx *c, const void *buf, int len);  // bytes, 0 would block, -1 failed
-    int (*recv)(struct http_ctx *c, void *buf, int len);      // bytes, 0 closed, -2 nothing yet, -1 failed
-    void (*close)(struct http_ctx *c);
+    bool tls;
+    int (*open)(const char *host, uint32_t ip, uint16_t port);  // handle, -1 refused (try again), -2 busy
+    int (*ready)(int h);                                         // 1 connected, 0 not yet, -1 failed
+    int (*send)(int h, const void *buf, int len);                // bytes, 0 would block, -1 failed
+    int (*recv)(int h, void *buf, int len);                      // bytes, 0 closed, -2 nothing yet, -1 failed
+    void (*close)(int h);
 };
 
 struct http_ctx {
@@ -82,6 +83,7 @@ struct http_ctx {
     nsurl *url;
     const struct transport *tp;
     bool https;
+    bool proxy;
     bool only_2xx;
     bool post;
     bool started, aborted, dead, locked;
@@ -90,16 +92,21 @@ struct http_ctx {
     uint16_t port;
     uint32_t ip;
     int dns;         // lookup slot, or -1
-    int sock;
+    int sock;        // transport handle, or -1
+    bool reused;     // sock came from the keep-alive pool
     char *req;
     size_t req_len, req_sent;
     int64_t deadline;
     int64_t retry_until;
+    int64_t queued_until;
     bool got_bytes;
     // response
     char line[MAX_LINE + 1];
     size_t line_len;
     long http_code;
+    bool http10;
+    bool conn_close;
+    bool trailing;   // bytes after the end of the body: the connection is not reusable
     long long content_length;
     bool chunked;
     bool gzip;
@@ -110,7 +117,7 @@ struct http_ctx {
     enum chunk_state chunk;
     char *location;
     char *realm;
-    char message[160];  // error/progress text handed to NetSurf
+    char message[200];  // error/progress text handed to NetSurf
 };
 
 static struct http_ctx *s_list = NULL;
@@ -167,20 +174,6 @@ static void dns_worker(void *arg)
     for (;;) {
         papp_svc->delay_ms(1000);  // deleted by papp_http_shutdown
     }
-}
-
-void papp_http_shutdown(void)
-{
-    if (s_dns_task == NULL) {
-        return;
-    }
-    s_dns_stop = 1;
-    // A lookup in progress is left to finish (lwIP holds on to its task).
-    for (int i = 0; i < 1000 && s_dns_running; i++) {
-        papp_svc->delay_ms(10);
-    }
-    papp_svc->task_delete(s_dns_task);
-    s_dns_task = NULL;
 }
 
 static bool parse_ipv4(const char *s, uint32_t *ip)
@@ -286,46 +279,203 @@ static void dns_abandon(int slot)
 
 // ── Transports ──────────────────────────────────────────────────────────────
 
-static int tcp_open(struct http_ctx *c)
+static int s_tls_open = 0;  // TLS handles held: fetches and kept connections
+
+static int tcp_open(const char *host, uint32_t ip, uint16_t port)
 {
-    c->sock = papp_svc->net_tcp_connect(c->ip, c->port);
-    return c->sock >= 0 ? 0 : -1;
+    (void)host;
+    const int h = papp_svc->net_tcp_connect(ip, port);
+    return h >= 0 ? h : -1;
 }
 
-static int tcp_ready(struct http_ctx *c)
+static int tcp_ready(int h)
 {
-    const int r = papp_svc->net_poll(c->sock);
+    const int r = papp_svc->net_poll(h);
     if (r < 0 || (r & 4)) {
         return -1;
     }
     return (r & 2) ? 1 : 0;
 }
 
-static int tcp_send(struct http_ctx *c, const void *buf, int len)
+static int tcp_send(int h, const void *buf, int len)
 {
-    return papp_svc->net_tcp_send(c->sock, buf, len);
+    return papp_svc->net_tcp_send(h, buf, len);
 }
 
-static int tcp_recv(struct http_ctx *c, void *buf, int len)
+static int tcp_recv(int h, void *buf, int len)
 {
-    return papp_svc->net_tcp_recv(c->sock, buf, len);
+    return papp_svc->net_tcp_recv(h, buf, len);
 }
 
-static void tcp_close(struct http_ctx *c)
+static void tcp_close(int h)
 {
-    if (c->sock >= 0) {
-        papp_svc->net_udp_close(c->sock);  // closes TCP handles too
-        c->sock = -1;
+    papp_svc->net_udp_close(h);  // closes TCP handles too
+}
+
+static const struct transport tcp_transport = {false, tcp_open, tcp_ready, tcp_send, tcp_recv, tcp_close};
+
+static bool drop_kept_tls(void);
+
+static int tls_open(const char *host, uint32_t ip, uint16_t port)
+{
+    (void)ip;  // the loader looks the name up itself, for SNI and the certificate
+    if (s_tls_open >= TLS_MAX && !drop_kept_tls()) {
+        return -2;
+    }
+    const int h = papp_svc->net_tls_connect(host, port);
+    if (h < 0) {
+        return -1;
+    }
+    s_tls_open++;
+    return h;
+}
+
+static int tls_ready(int h)
+{
+    const int s = papp_svc->net_tls_status(h);
+    return s > 0 ? 1 : (s == 0 ? 0 : -1);
+}
+
+static int tls_send(int h, const void *buf, int len)
+{
+    return papp_svc->net_tls_send(h, buf, len);  // 0: send the same bytes again later
+}
+
+static int tls_recv(int h, void *buf, int len)
+{
+    const int n = papp_svc->net_tls_recv(h, buf, len);
+    if (n > 0) {
+        return n;
+    }
+    if (n == 0) {
+        return -2;
+    }
+    return papp_svc->net_tls_status(h) == 1 ? 0 : -1;  // a clean close, or an error
+}
+
+static void tls_close(int h)
+{
+    papp_svc->net_tls_close(h);
+    if (s_tls_open > 0) {
+        s_tls_open--;
     }
 }
 
-static const struct transport tcp_transport = {tcp_open, tcp_ready, tcp_send, tcp_recv, tcp_close};
+static const struct transport tls_transport = {true, tls_open, tls_ready, tls_send, tls_recv, tls_close};
 
-// Phase 2: a TLS transport over the loader's net_tls_* services (see the top
-// of this file). Until the loader offers them there is none.
-static const struct transport *tls_transport(void)
+int papp_have_tls(void)
 {
-    return NULL;
+    return papp_svc != NULL && papp_svc->net_tls_connect != NULL && papp_svc->net_tls_status != NULL &&
+           papp_svc->net_tls_send != NULL && papp_svc->net_tls_recv != NULL && papp_svc->net_tls_close != NULL;
+}
+
+// ── Kept-alive connections ──────────────────────────────────────────────────
+
+#define KEEP_MAX 4
+
+static struct {
+    const struct transport *tp;  // NULL: slot free
+    int h;
+    char host[256];
+    uint16_t port;
+    int64_t since;
+} s_keep[KEEP_MAX];
+
+static void keep_close(int i)
+{
+    s_keep[i].tp->close(s_keep[i].h);
+    s_keep[i].tp = NULL;
+}
+
+// Close the oldest kept TLS connection, so its session can serve a new one.
+static bool drop_kept_tls(void)
+{
+    int oldest = -1;
+    for (int i = 0; i < KEEP_MAX; i++) {
+        if (s_keep[i].tp != NULL && s_keep[i].tp->tls && (oldest < 0 || s_keep[i].since < s_keep[oldest].since)) {
+            oldest = i;
+        }
+    }
+    if (oldest < 0) {
+        return false;
+    }
+    keep_close(oldest);
+    return true;
+}
+
+static void keep_put(const struct transport *tp, int h, const char *host, uint16_t port)
+{
+    int slot = -1;
+    for (int i = 0; i < KEEP_MAX; i++) {
+        if (s_keep[i].tp == NULL) {
+            slot = i;
+            break;
+        }
+        if (slot < 0 || s_keep[i].since < s_keep[slot].since) {
+            slot = i;
+        }
+    }
+    if (s_keep[slot].tp != NULL) {
+        keep_close(slot);
+    }
+    s_keep[slot].tp = tp;
+    s_keep[slot].h = h;
+    snprintf(s_keep[slot].host, sizeof(s_keep[slot].host), "%s", host);
+    s_keep[slot].port = port;
+    s_keep[slot].since = papp_time_us();
+}
+
+static int keep_take(const struct transport *tp, const char *host, uint16_t port)
+{
+    for (int i = 0; i < KEEP_MAX; i++) {
+        if (s_keep[i].tp == tp && s_keep[i].port == port && strcasecmp(s_keep[i].host, host) == 0) {
+            s_keep[i].tp = NULL;
+            return s_keep[i].h;
+        }
+    }
+    return -1;
+}
+
+// Kept connections that timed out, or that the server closed (anything to
+// read on an idle connection means that), are closed.
+static void keep_check(int64_t now)
+{
+    for (int i = 0; i < KEEP_MAX; i++) {
+        if (s_keep[i].tp == NULL) {
+            continue;
+        }
+        const int r = papp_svc->net_poll(s_keep[i].h);
+        if (now - s_keep[i].since > KEEP_IDLE_US || r < 0 || (r & 5) != 0) {
+            keep_close(i);
+        }
+    }
+}
+
+void papp_http_shutdown(void)
+{
+    for (int i = 0; i < KEEP_MAX; i++) {
+        if (s_keep[i].tp != NULL) {
+            keep_close(i);
+        }
+    }
+    if (s_dns_task == NULL) {
+        return;
+    }
+    s_dns_stop = 1;
+    // A lookup in progress is left to finish (lwIP holds on to its task).
+    for (int i = 0; i < 1000 && s_dns_running; i++) {
+        papp_svc->delay_ms(10);
+    }
+    papp_svc->task_delete(s_dns_task);
+    s_dns_task = NULL;
+}
+
+static void close_conn(struct http_ctx *c)
+{
+    if (c->sock >= 0) {
+        c->tp->close(c->sock);
+        c->sock = -1;
+    }
 }
 
 // ── Callbacks into NetSurf ──────────────────────────────────────────────────
@@ -359,9 +509,7 @@ static void finish_with(struct http_ctx *c, fetch_msg_type type, const char *tex
     } else if (type == FETCH_AUTH) {
         msg.data.auth.realm = text;
     }
-    if (c->tp != NULL) {
-        c->tp->close(c);
-    }
+    close_conn(c);
     send_msg(c, &msg);
     c->dead = true;
 }
@@ -374,6 +522,12 @@ static void fail(struct http_ctx *c, const char *fmt, ...)
     va_end(ap);
     NSLOG(fetch, INFO, "%s: %s", nsurl_access(c->url), c->message);
     finish_with(c, FETCH_ERROR, c->message);
+}
+
+static void timed_out(struct http_ctx *c, const char *fmt)
+{
+    snprintf(c->message, sizeof(c->message), fmt, c->host);
+    finish_with(c, FETCH_TIMEDOUT, c->message);
 }
 
 static void progress(struct http_ctx *c, const char *fmt, ...)
@@ -456,6 +610,18 @@ static void buf_printf(struct buf *b, const char *fmt, ...)
     free(big);
 }
 
+static void buf_basic_auth(struct buf *b, const char *header, const char *userpass)
+{
+    uint8_t *enc = NULL;
+    size_t enc_len = 0;
+    if (nsu_base64_encode_alloc((const uint8_t *)userpass, strlen(userpass), &enc, &enc_len) == NSUERROR_OK) {
+        buf_printf(b, "%s: Basic ", header);
+        buf_add(b, enc, enc_len);
+        buf_add(b, "\r\n", 2);
+        free(enc);
+    }
+}
+
 static void add_file(struct buf *b, const char *path)
 {
     FILE *f = (path != NULL && *path != '\0') ? fopen(path, "rb") : NULL;
@@ -507,9 +673,9 @@ static bool build_request(struct http_ctx *c, const char *post_urlenc, const str
     struct buf b = {0};
     char *target = NULL;
     size_t target_len = 0;
-    const bool proxy = use_proxy() && !c->https;
-    nserror err = nsurl_get(c->url, proxy ? (NSURL_SCHEME | NSURL_HOST | NSURL_PORT | NSURL_PATH | NSURL_QUERY)
-                                          : (NSURL_PATH | NSURL_QUERY),
+    c->proxy = use_proxy() && !c->https;
+    nserror err = nsurl_get(c->url, c->proxy ? (NSURL_SCHEME | NSURL_HOST | NSURL_PORT | NSURL_PATH | NSURL_QUERY)
+                                             : (NSURL_PATH | NSURL_QUERY),
                             &target, &target_len);
     if (err != NSERROR_OK) {
         return false;
@@ -532,7 +698,7 @@ static bool build_request(struct http_ctx *c, const char *post_urlenc, const str
     } else {
         buf_printf(&b, "Host: %s\r\n", lwc_string_data(host));
     }
-    if (proxy) {
+    if (c->proxy) {
         snprintf(c->host, sizeof(c->host), "%s", nsoption_charp(http_proxy_host));
         c->port = (uint16_t)nsoption_int(http_proxy_port);
     } else {
@@ -554,9 +720,8 @@ static bool build_request(struct http_ctx *c, const char *post_urlenc, const str
         buf_printf(&b, "Accept-Charset: %s, *;q=0.1\r\n", nsoption_charp(accept_charset));
     }
     if (nsoption_bool(do_not_track)) {
-        buf_add(&b, "DNT: 1\r\n", 8);
+        buf_printf(&b, "DNT: 1\r\n");
     }
-    buf_add(&b, "Connection: close\r\n", 19);
 
     char *cookie = urldb_get_cookie(c->url, true);
     if (cookie != NULL) {
@@ -565,28 +730,14 @@ static bool build_request(struct http_ctx *c, const char *post_urlenc, const str
     }
     const char *auth = urldb_get_auth_details(c->url, NULL);
     if (auth != NULL) {
-        uint8_t *enc = NULL;
-        size_t enc_len = 0;
-        if (nsu_base64_encode_alloc((const uint8_t *)auth, strlen(auth), &enc, &enc_len) == NSUERROR_OK) {
-            buf_add(&b, "Authorization: Basic ", 21);
-            buf_add(&b, enc, enc_len);
-            buf_add(&b, "\r\n", 2);
-            free(enc);
-        }
+        buf_basic_auth(&b, "Authorization", auth);
     }
-    if (proxy && nsoption_int(http_proxy_auth) == OPTION_HTTP_PROXY_AUTH_BASIC) {
+    if (c->proxy && nsoption_int(http_proxy_auth) == OPTION_HTTP_PROXY_AUTH_BASIC) {
         char userpass[256];
         snprintf(userpass, sizeof(userpass), "%s:%s",
                  nsoption_charp(http_proxy_auth_user) ? nsoption_charp(http_proxy_auth_user) : "",
                  nsoption_charp(http_proxy_auth_pass) ? nsoption_charp(http_proxy_auth_pass) : "");
-        uint8_t *enc = NULL;
-        size_t enc_len = 0;
-        if (nsu_base64_encode_alloc((const uint8_t *)userpass, strlen(userpass), &enc, &enc_len) == NSUERROR_OK) {
-            buf_add(&b, "Proxy-Authorization: Basic ", 27);
-            buf_add(&b, enc, enc_len);
-            buf_add(&b, "\r\n", 2);
-            free(enc);
-        }
+        buf_basic_auth(&b, "Proxy-Authorization", userpass);
     }
     for (int i = 0; headers != NULL && headers[i] != NULL; i++) {
         buf_printf(&b, "%s\r\n", headers[i]);
@@ -639,8 +790,17 @@ static bool header_is(const char *line, const char *name, const char **value)
     return true;
 }
 
+// The body is complete: keep the connection for the next request when the
+// server allows it and nothing is left over on it, then tell NetSurf.
 static void body_done(struct http_ctx *c)
 {
+    if (c->dead) {
+        return;
+    }
+    if (c->sock >= 0 && !c->conn_close && !c->trailing && c->body != BODY_TO_CLOSE && !c->proxy) {
+        keep_put(c->tp, c->sock, c->host, c->port);
+        c->sock = -1;
+    }
     finish_with(c, FETCH_FINISHED, NULL);
 }
 
@@ -650,6 +810,11 @@ static void headers_done(struct http_ctx *c)
 {
     const long code = c->http_code;
     if (code == 304 && !c->post) {
+        c->body = BODY_NONE;
+        if (!c->conn_close && !c->trailing && c->sock >= 0 && !c->proxy) {
+            keep_put(c->tp, c->sock, c->host, c->port);
+            c->sock = -1;
+        }
         finish_with(c, FETCH_NOTMODIFIED, NULL);
         return;
     }
@@ -704,6 +869,8 @@ static void header_line(struct http_ctx *c, char *line, size_t len)
             fail(c, "%s sent a bad status line", c->host);
             return;
         }
+        c->http10 = strncmp(line, "HTTP/1.0", 8) == 0;
+        c->conn_close = c->http10;  // HTTP/1.0 closes unless it says keep-alive
         fetch_set_http_code(c->fetch, (http_response_code)c->http_code);
         c->state = ST_HEADERS;
         return;
@@ -745,6 +912,12 @@ static void header_line(struct http_ctx *c, char *line, size_t len)
         c->chunked = strcasestr(v, "chunked") != NULL;
     } else if (header_is(line, "Content-Encoding", &v)) {
         c->gzip = strcasecmp(v, "gzip") == 0 || strcasecmp(v, "x-gzip") == 0 || strcasecmp(v, "deflate") == 0;
+    } else if (header_is(line, "Connection", &v)) {
+        if (strcasestr(v, "close") != NULL) {
+            c->conn_close = true;
+        } else if (strcasestr(v, "keep-alive") != NULL) {
+            c->conn_close = false;
+        }
     } else if (header_is(line, "Set-Cookie", &v)) {
         fetch_set_cookie(c->fetch, v);
     } else if (header_is(line, "Date", &v)) {
@@ -812,6 +985,7 @@ static bool body_bytes(struct http_ctx *c, const uint8_t *p, size_t n)
         }
         c->remaining -= (long long)take;
         if (c->remaining == 0) {
+            c->trailing = n > take;
             body_done(c);
             return false;
         }
@@ -859,6 +1033,7 @@ static bool body_bytes(struct http_ctx *c, const uint8_t *p, size_t n)
             } else if (c->chunk == CH_DATA_END) {
                 c->chunk = CH_SIZE;  // the CRLF after a chunk's data
             } else if (c->chunk == CH_TRAILER && len == 0) {
+                c->trailing = n > 0;
                 body_done(c);
                 return false;
             }
@@ -866,6 +1041,7 @@ static bool body_bytes(struct http_ctx *c, const uint8_t *p, size_t n)
         return true;
     case BODY_NONE:
     default:
+        c->trailing = true;  // bytes where no body belongs
         return true;
     }
 }
@@ -881,6 +1057,9 @@ static bool feed(struct http_ctx *c, const uint8_t *p, size_t n)
             c->line[c->line_len] = '\0';
             const size_t len = c->line_len;
             c->line_len = 0;
+            if (len == 0 && n > 0) {
+                c->trailing = true;  // unless a body takes those bytes (body_bytes decides)
+            }
             header_line(c, c->line, len);
             if (c->dead) {
                 return false;
@@ -895,14 +1074,32 @@ static bool feed(struct http_ctx *c, const uint8_t *p, size_t n)
     return !c->dead;
 }
 
+// A kept connection the server had already closed: send the request again
+// on a new one.
+static bool retry_fresh(struct http_ctx *c)
+{
+    if (!c->reused || c->got_bytes) {
+        return false;
+    }
+    NSLOG(fetch, INFO, "kept connection to %s was closed, reconnecting", c->host);
+    close_conn(c);
+    c->reused = false;
+    c->req_sent = 0;
+    c->line_len = 0;
+    c->state = ST_RESOLVE;
+    return true;
+}
+
 static void closed_by_server(struct http_ctx *c)
 {
+    if (retry_fresh(c)) {
+        return;
+    }
     if (c->state == ST_BODY) {
         // End of a read-to-close body; a short Content-Length or chunked body
         // still shows what arrived (curl's fetcher does the same).
-        if (!c->dead) {
-            body_done(c);
-        }
+        c->conn_close = true;
+        body_done(c);
         return;
     }
     if (!c->got_bytes) {
@@ -912,6 +1109,16 @@ static void closed_by_server(struct http_ctx *c)
     }
 }
 
+// The loader could not make the TLS connection: the certificate did not
+// verify, or the connection or handshake failed (the device log says which).
+// NetSurf shows its certificate error page for this (patches/0008), without
+// the button to go on anyway: the loader cannot skip the check.
+static void tls_failed(struct http_ctx *c)
+{
+    NSLOG(fetch, INFO, "TLS connection to %s:%u failed", c->host, (unsigned)c->port);
+    finish_with(c, FETCH_CERT_ERR, NULL);
+}
+
 // ── One step of a fetch ─────────────────────────────────────────────────────
 
 static void step(struct http_ctx *c, int64_t now)
@@ -919,13 +1126,26 @@ static void step(struct http_ctx *c, int64_t now)
     static uint8_t rbuf[RECV_BUF];
     switch (c->state) {
     case ST_RESOLVE:
-        if (c->tp == NULL) {
-            fail(c, "HTTPS needs TLS, which this loader does not offer apps yet. Try the http:// address");
+        if (c->https && !papp_have_tls()) {
+            fail(c, "HTTPS needs a loader with TLS services for apps; this one has none. "
+                    "Try the http:// address, or update the loader");
             return;
         }
         if (papp_svc->net_tcp_connect == NULL || papp_svc->net_resolve == NULL) {
             fail(c, "This loader has no network services for apps");
             return;
+        }
+        // A kept connection to the same server skips the connect (never for
+        // a POST: resending one on a stale connection could post twice).
+        if (!c->post && !c->proxy) {
+            const int h = keep_take(c->tp, c->host, c->port);
+            if (h >= 0) {
+                c->sock = h;
+                c->reused = true;
+                c->state = ST_SEND;
+                c->deadline = now + IDLE_TIMEOUT_US;
+                break;
+            }
         }
         if (c->dns < 0) {
             if (parse_ipv4(c->host, &c->ip) || dns_cached(c->host, &c->ip)) {
@@ -951,45 +1171,66 @@ static void step(struct http_ctx *c, int64_t now)
             c->state = ST_CONNECT;
         }
         c->retry_until = now + CONNECT_RETRY_US;
-        /* fall through */
-    case ST_CONNECT:
-        if (c->tp->open(c) < 0) {
-            if (now < c->retry_until) {
-                return;  // no free socket yet
+        c->queued_until = now + WAIT_FOR_SESSION_US;
+        break;
+    default:
+        break;
+    }
+
+    if (c->state == ST_CONNECT) {
+        const int h = c->tp->open(c->host, c->ip, c->port);
+        if (h == -2) {
+            // Every TLS session is in use by other fetches: wait for one.
+            if (now > c->queued_until) {
+                timed_out(c, "Waiting for a secure connection to %s timed out");
             }
-            fail(c, "Could not connect to %s", c->host);
             return;
         }
-        c->state = ST_CONNECTING;
-        c->deadline = now + (int64_t)nsoption_uint(curl_fetch_timeout) * 1000000;
-        if (!c->dead) {
-            progress(c, "Connecting to %s", c->host);
+        if (h < 0) {
+            if (now < c->retry_until) {
+                return;  // the loader has no free socket or session yet
+            }
+            fail(c, c->https ? "The loader could not open a secure connection to %s "
+                               "(no certificate bundle, or no free TLS session)"
+                             : "Could not connect to %s", c->host);
+            return;
         }
+        c->sock = h;
+        c->state = ST_CONNECTING;
+        c->deadline = now + (c->tp->tls ? TLS_CONNECT_TIMEOUT_US
+                                        : (int64_t)nsoption_uint(curl_fetch_timeout) * 1000000);
+        progress(c, c->https ? "Securely connecting to %s" : "Connecting to %s", c->host);
         if (c->dead) {
             return;
         }
-        /* fall through */
-    case ST_CONNECTING: {
-        const int r = c->tp->ready(c);
+    }
+
+    if (c->state == ST_CONNECTING) {
+        const int r = c->tp->ready(c->sock);
         if (r < 0) {
-            fail(c, "Could not connect to %s:%u", c->host, (unsigned)c->port);
+            if (c->tp->tls) {
+                tls_failed(c);
+            } else {
+                fail(c, "Could not connect to %s:%u", c->host, (unsigned)c->port);
+            }
             return;
         }
         if (r == 0) {
             if (now > c->deadline) {
-                snprintf(c->message, sizeof(c->message), "Connecting to %s timed out", c->host);
-                finish_with(c, FETCH_TIMEDOUT, c->message);
+                timed_out(c, "Connecting to %s timed out");
             }
             return;
         }
         c->state = ST_SEND;
     }
-        /* fall through */
-    case ST_SEND:
+
+    if (c->state == ST_SEND) {
         while (c->req_sent < c->req_len) {
-            const int n = c->tp->send(c, c->req + c->req_sent, (int)(c->req_len - c->req_sent));
+            const int n = c->tp->send(c->sock, c->req + c->req_sent, (int)(c->req_len - c->req_sent));
             if (n < 0) {
-                fail(c, "Lost the connection to %s", c->host);
+                if (!retry_fresh(c)) {
+                    fail(c, "Lost the connection to %s", c->host);
+                }
                 return;
             }
             if (n == 0) {
@@ -999,47 +1240,39 @@ static void step(struct http_ctx *c, int64_t now)
         }
         if (c->req_sent < c->req_len) {
             if (now > c->deadline) {
-                snprintf(c->message, sizeof(c->message), "Sending to %s timed out", c->host);
-                finish_with(c, FETCH_TIMEDOUT, c->message);
+                timed_out(c, "Sending to %s timed out");
             }
             return;
         }
-        free(c->req);
-        c->req = NULL;
         c->state = ST_STATUS;
         c->deadline = now + IDLE_TIMEOUT_US;
-        /* fall through */
-    case ST_STATUS:
-    case ST_HEADERS:
-    case ST_BODY: {
-        size_t total = 0;
-        while (total < MAX_READ_PER_POLL && !c->dead) {
-            const int n = c->tp->recv(c, rbuf, sizeof(rbuf));
-            if (n == -2) {
-                break;
-            }
-            if (n < 0) {
-                fail(c, "Lost the connection to %s", c->host);
-                return;
-            }
-            if (n == 0) {
-                closed_by_server(c);
-                return;
-            }
-            c->deadline = now + IDLE_TIMEOUT_US;
-            total += (size_t)n;
-            if (!feed(c, rbuf, (size_t)n)) {
-                return;
-            }
-        }
-        if (!c->dead && now > c->deadline) {
-            snprintf(c->message, sizeof(c->message), "%s stopped sending", c->host);
-            finish_with(c, FETCH_TIMEDOUT, c->message);
-        }
-        return;
     }
-    default:
-        return;
+
+    // ST_STATUS, ST_HEADERS, ST_BODY
+    size_t total = 0;
+    while (total < MAX_READ_PER_POLL && !c->dead) {
+        const int n = c->tp->recv(c->sock, rbuf, sizeof(rbuf));
+        if (n == -2) {
+            break;
+        }
+        if (n < 0) {
+            if (!retry_fresh(c)) {
+                fail(c, "Lost the connection to %s", c->host);
+            }
+            return;
+        }
+        if (n == 0) {
+            closed_by_server(c);
+            return;
+        }
+        c->deadline = now + IDLE_TIMEOUT_US;
+        total += (size_t)n;
+        if (!feed(c, rbuf, (size_t)n)) {
+            return;
+        }
+    }
+    if (!c->dead && now > c->deadline) {
+        timed_out(c, "%s stopped sending");
     }
 }
 
@@ -1065,7 +1298,7 @@ static bool http_acceptable(const nsurl *url)
 static void *http_setup(struct fetch *parent, nsurl *url, bool only_2xx, bool downgrade_tls, const char *post_urlenc,
                         const struct fetch_multipart_data *post_multipart, const char **headers)
 {
-    (void)downgrade_tls;
+    (void)downgrade_tls;  // the loader's TLS has no weaker mode to fall back to
     struct http_ctx *c = calloc(1, sizeof(*c));
     if (c == NULL) {
         return NULL;
@@ -1074,7 +1307,7 @@ static void *http_setup(struct fetch *parent, nsurl *url, bool only_2xx, bool do
     c->url = nsurl_ref(url);
     c->only_2xx = only_2xx;
     c->https = nsurl_get_scheme_type(url) == NSURL_SCHEME_HTTPS;
-    c->tp = c->https ? tls_transport() : &tcp_transport;
+    c->tp = c->https ? &tls_transport : &tcp_transport;
     c->dns = -1;
     c->sock = -1;
     c->content_length = -1;
@@ -1102,9 +1335,7 @@ static bool http_start(void *vctx)
 
 static void release(struct http_ctx *c)
 {
-    if (c->tp != NULL) {
-        c->tp->close(c);
-    }
+    close_conn(c);
     dns_abandon(c->dns);
     c->dns = -1;
 }
@@ -1150,6 +1381,7 @@ static void http_poll(lwc_string *scheme)
     }
     s_polling = true;
     const int64_t now = papp_time_us();
+    keep_check(now);
     for (struct http_ctx *c = s_list; c != NULL; c = c->next) {
         if (c->dead) {
             continue;

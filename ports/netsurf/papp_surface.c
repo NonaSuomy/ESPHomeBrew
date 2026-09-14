@@ -1,5 +1,6 @@
 // libnsfb surface "papp": NetSurf's framebuffer frontend drawing straight
-// into the loader's 800x480 RGB565 canvas, with the loader's USB keyboard,
+// into the loader's RGB565 canvas (the whole panel when the loader offers
+// it, else 800x480), with the loader's USB keyboard,
 // USB mouse, touch panel and gamepad as its input.
 //
 // Display: libnsfb's 16 bpp plotters write into the canvas the loader
@@ -47,8 +48,10 @@
 
 #include "utils/nsoption.h"
 
-#define FB_W 800
-#define FB_H 480
+// The loader's canvas (papp_main.c): 1024x600 on a full panel, else 800x480;
+// its framebuffer's stride is its width.
+#define FB_W papp_canvas_w
+#define FB_H papp_canvas_h
 #define FRAME_US 33000        // flush the canvas at most ~30 times a second
 #define DEVICE_POLL_US 8000   // touch, mouse and gamepad at most this often
 
@@ -142,7 +145,7 @@ static int papp_defaults(nsfb_t *nsfb)
     return 0;
 }
 
-// Only RGB565 at up to 800x480: the loader's canvas.
+// Only RGB565, at most the loader's canvas.
 static int papp_set_geometry(nsfb_t *nsfb, int width, int height, enum nsfb_format_e format)
 {
     (void)format;

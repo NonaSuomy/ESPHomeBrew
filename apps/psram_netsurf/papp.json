@@ -1,12 +1,12 @@
 {
   "name": "psram_netsurf",
   "title": "NetSurf",
-  "version": "0.1.0",
-  "description": "The NetSurf web browser (framebuffer frontend) as a PAPP at 800x480: plain http:// pages over the loader's network, files on the card and NetSurf's about: pages, with touch, USB keyboard and mouse. Work in progress; no HTTPS yet.",
+  "version": "0.2.0",
+  "description": "The NetSurf web browser (framebuffer frontend) as a PAPP on the whole panel: http:// and https:// pages over the loader's network and TLS, files on the card and NetSurf's about: pages, with touch, USB keyboard and mouse. Work in progress.",
   "author": "The NetSurf Developers; PAPP port",
   "category": "Tool",
-  "license": "GPL-2.0 (NetSurf); MIT (libraries)",
-  "about": "NetSurf is a small, fast web browser with its own HTML and CSS engine. This port runs its framebuffer frontend on the loader's 800x480 screen with NetSurf's built-in bitmap font: HTML 4 and CSS 2 (partly CSS 3) pages, GIF and BMP images (no PNG or JPEG yet), forms and cookies, but no JavaScript. It loads plain http:// pages over the loader's TCP services (HTTPS is not available yet), local files as file:///sd/..., and NetSurf's about: pages. Its files live in /sd/roms/netsurf/: Choices (options), Cookies, and optionally Messages or your own copies of default.css, welcome.html and the other built-in resources, which then replace the built-in ones. There is no disk cache. The folder is optional: without it NetSurf runs with its built-in defaults and keeps no cookies.",
+  "license": "GPL-2.0 (NetSurf); MIT, zlib, libpng, IJG (libraries)",
+  "about": "NetSurf is a small, fast web browser with its own HTML and CSS engine. This port runs its framebuffer frontend on the whole panel (the store's Screen setting can pick 800x480) with NetSurf's built-in bitmap font: HTML 4 and CSS 2 (partly CSS 3) pages, PNG, JPEG, GIF and BMP images, forms and cookies, but no JavaScript. It loads http:// pages over the loader's TCP services and https:// pages over its TLS service, which checks every certificate against the firmware's certificate bundle (sites it cannot verify do not open; there is no way to skip the check). Local files open as file:///sd/..., and NetSurf's about: pages work. Its files live in /sd/roms/netsurf/: Choices (options), Cookies, and optionally Messages or your own copies of default.css, welcome.html and the other built-in resources, which then replace the built-in ones. There is no disk cache. The folder is optional: without it NetSurf runs with its built-in defaults and keeps no cookies.",
   "controls": [
     "Touch: tap to click, drag the page to scroll",
     "Touch the scroll bars to drag them",
@@ -25,6 +25,7 @@
     "project": "NetSurf",
     "url": "https://www.netsurf-browser.org/"
   },
+  "canvas": true,
   "icon": "icon.png",
   "publish": false,
   "build": "custom",
@@ -93,6 +94,16 @@
       "path": "libs/zlib",
       "repo": "https://github.com/madler/zlib",
       "ref": "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf"
+    },
+    {
+      "path": "libs/libpng",
+      "repo": "https://github.com/pnggroup/libpng",
+      "ref": "3061454d980de7d53608f594194cfac722721d2a"
+    },
+    {
+      "path": "libs/libjpeg-turbo",
+      "repo": "https://github.com/libjpeg-turbo/libjpeg-turbo",
+      "ref": "8ecba3647edb6dd940463fedf38ca33a8e2a73d1"
     }
   ],
   "paths": [
@@ -157,6 +168,8 @@
     "-DNETSURF_BUILTIN_VERBOSE_FILTER=\"(level:VERBOSE)\"",
     "-DWITH_BMP",
     "-DWITH_GIF",
+    "-DWITH_PNG",
+    "-DWITH_JPEG",
     "-DWITH_NSPSL",
     "-DWITH_UTF8PROC",
     "-DSTMTEXPR=1",
@@ -281,6 +294,86 @@
       ]
     },
     {
+      "dir": "libs/libpng",
+      "prefix": "png_",
+      "includes": ["libs/libpng"],
+      "files": [
+        "png.c",
+        "pngerror.c",
+        "pngget.c",
+        "pngmem.c",
+        "pngpread.c",
+        "pngread.c",
+        "pngrio.c",
+        "pngrtran.c",
+        "pngrutil.c",
+        "pngset.c",
+        "pngtrans.c",
+        "pngwio.c",
+        "pngwrite.c",
+        "pngwtran.c",
+        "pngwutil.c"
+      ]
+    },
+    {
+      "dir": "libs/libjpeg-turbo",
+      "prefix": "jpeg_",
+      "includes": ["libs/libjpeg-turbo"],
+      "files": [
+        "jcapimin.c",
+        "jcapistd.c",
+        "jccoefct.c",
+        "jccolor.c",
+        "jcdctmgr.c",
+        "jchuff.c",
+        "jcicc.c",
+        "jcinit.c",
+        "jcmainct.c",
+        "jcmarker.c",
+        "jcmaster.c",
+        "jcomapi.c",
+        "jcparam.c",
+        "jcphuff.c",
+        "jcprepct.c",
+        "jcsample.c",
+        "jctrans.c",
+        "jdapimin.c",
+        "jdapistd.c",
+        "jdatadst.c",
+        "jdatasrc.c",
+        "jdcoefct.c",
+        "jdcolor.c",
+        "jddctmgr.c",
+        "jdhuff.c",
+        "jdicc.c",
+        "jdinput.c",
+        "jdmainct.c",
+        "jdmarker.c",
+        "jdmaster.c",
+        "jdmerge.c",
+        "jdphuff.c",
+        "jdpostct.c",
+        "jdsample.c",
+        "jdtrans.c",
+        "jerror.c",
+        "jfdctflt.c",
+        "jfdctfst.c",
+        "jfdctint.c",
+        "jidctflt.c",
+        "jidctfst.c",
+        "jidctint.c",
+        "jidctred.c",
+        "jquant1.c",
+        "jquant2.c",
+        "jutils.c",
+        "jmemmgr.c",
+        "jmemnobs.c",
+        "jaricom.c",
+        "jdarith.c",
+        "jsimd_none.c"
+      ]
+    },
+    {
       "dir": "content",
       "prefix": "ns_content_",
       "includes": [".", "include", "frontends", "content/handlers", ".papp-gen"],
@@ -298,7 +391,9 @@
         "handlers/image/image_cache.c",
         "handlers/image/bmp.c",
         "handlers/image/gif.c",
-        "handlers/image/ico.c"
+        "handlers/image/ico.c",
+        "handlers/image/png.c",
+        "handlers/image/jpeg.c"
       ],
       "exclude": ["fs_backing_store.c", "fetchers/curl.c"]
     },

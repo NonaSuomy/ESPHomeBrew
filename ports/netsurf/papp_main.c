@@ -8,8 +8,9 @@
 // the loader, which does not reclaim them.
 //
 // The NetSurf task runs the global constructors (libnsfb registers its
-// surfaces from them), loads the built-in Messages and calls the
-// framebuffer frontend's main() with the papp surface at 800x480x16.
+// surfaces from them), switches to the canvas the loader offers (the whole
+// panel, else 800x480), loads the built-in Messages and calls the
+// framebuffer frontend's main() with the papp surface at that size, 16 bpp.
 #include "papp_port.h"
 
 #include <stdio.h>
@@ -23,6 +24,8 @@
 #include "papp_resources.h"
 
 const app_services_t *papp_svc = NULL;
+int papp_canvas_w = 800;
+int papp_canvas_h = 480;
 
 static volatile int s_quit = 0;
 static volatile int s_quit_code = 0;
@@ -68,8 +71,8 @@ void papp_netsurf_set_defaults(void)
 {
     nsoption_set_charp(cookie_file, strdup(PAPP_NS_DIR "/Cookies"));
     nsoption_set_charp(cookie_jar, strdup(PAPP_NS_DIR "/Cookies"));
-    nsoption_set_int(window_width, 800);
-    nsoption_set_int(window_height, 480);
+    nsoption_set_int(window_width, papp_canvas_w);
+    nsoption_set_int(window_height, papp_canvas_h);
     nsoption_set_bool(fb_osk, true);          // on-screen keyboard button, bottom right
     nsoption_set_int(fb_toolbar_size, 32);
     nsoption_set_int(fb_furniture_size, 22);  // scroll bars wide enough for a finger
@@ -125,6 +128,23 @@ static void netsurf_task(void *arg)
         papp_svc->log_printf("NETSURF: built-in Messages failed to load\n");
     }
 
+    // The canvas: what the loader offers (the store's Screen setting, else
+    // the whole panel), from this task, which draws; 800x480 if refused.
+    int w = 800, h = 480;
+    if (papp_svc->display_get_size != NULL && papp_svc->display_set_canvas != NULL) {
+        papp_svc->display_get_size(&w, &h);
+        if (w < 320 || h < 240 || papp_svc->display_set_canvas(w, h) != 0) {
+            w = 800;
+            h = 480;
+        }
+    }
+    papp_canvas_w = w;
+    papp_canvas_h = h;
+    papp_svc->log_printf("NETSURF: canvas %dx%d\n", w, h);
+
+    static char width_arg[8], height_arg[8];
+    snprintf(width_arg, sizeof(width_arg), "%d", w);
+    snprintf(height_arg, sizeof(height_arg), "%d", h);
     static char *argv[16];
     int argc = 0;
     argv[argc++] = (char *)"netsurf";
@@ -133,9 +153,9 @@ static void netsurf_task(void *arg)
     argv[argc++] = (char *)"-b";
     argv[argc++] = (char *)"16";
     argv[argc++] = (char *)"-w";
-    argv[argc++] = (char *)"800";
+    argv[argc++] = width_arg;
     argv[argc++] = (char *)"-h";
-    argv[argc++] = (char *)"480";
+    argv[argc++] = height_arg;
     // NetSurf's own log (verbose) when the card has PAPP_NS_DIR/verbose.
     if (papp_file_exists(PAPP_NS_DIR "/verbose")) {
         argv[argc++] = (char *)"-v";
@@ -182,11 +202,13 @@ __attribute__((section(".text.entry"), used)) int app_entry(const app_services_t
     }
     svc->log_printf("NETSURF: quitting (%d)\n", s_quit_code);
 
-    papp_http_shutdown();
+    // NetSurf first, so no other task is inside a net_tls_* call on the
+    // handles papp_http_shutdown closes.
     if (s_task != NULL) {
         svc->task_delete(s_task);
         s_task = NULL;
     }
+    papp_http_shutdown();
     papp_close_all_files();
     papp_free_all_memory();
     papp_syscalls_deinit();

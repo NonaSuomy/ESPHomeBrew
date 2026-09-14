@@ -21,6 +21,7 @@
   },
   "icon": "icon.png",
   "publish": true,
+  "dev_build": true,
   "build": "custom",
   "source": {
     "repo": "https://github.com/NonaSuomy/tulipcc",

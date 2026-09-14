@@ -261,6 +261,9 @@ class PappLoader : public Component {
   // Where render_custom_ last put a frame in rotated_framebuffer_ (x, y, w, h):
   // the black border around it only needs clearing when that changes.
   uint16_t direct_frame_[4]{0, 0, 0, 0};
+  // True when the newest frame is only in rotated_framebuffer_ (direct path),
+  // not in framebuffer_; screenshots then read it from there.
+  volatile bool last_frame_direct_{false};
   void render_emu_();
   void clear_(uint16_t color);
   void draw_close_overlay_();

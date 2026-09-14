@@ -1361,6 +1361,7 @@ void PappLoader::flush_framebuffer_() {
     xSemaphoreTakeRecursive(this->display_mutex_, portMAX_DELAY);
 
   const uint16_t *display_buffer = this->rotated_framebuffer_;
+  this->last_frame_direct_ = false;
   bool ppa_ok = false;
   if (this->ppa_srm_client_ != nullptr && this->ppa_framebuffer_ != nullptr) {
     const size_t frame_bytes = VIRTUAL_WIDTH * VIRTUAL_HEIGHT * sizeof(uint16_t);
@@ -1572,7 +1573,16 @@ bool PappLoader::send_screenshot_(int client_fd) {
     // rotation into the panel buffer) from running during the copy.
     const bool locked = this->display_mutex_ != nullptr &&
                         xSemaphoreTakeRecursive(this->display_mutex_, pdMS_TO_TICKS(200)) == pdTRUE;
-    std::memcpy(copy, this->framebuffer_, frame_bytes);
+    if (this->last_frame_direct_) {
+      // The frame went straight to the panel buffer, turned 180 degrees:
+      // reading it backwards turns it upright again.
+      const uint16_t *source = this->rotated_framebuffer_;
+      const size_t pixels = static_cast<size_t>(VIRTUAL_WIDTH) * VIRTUAL_HEIGHT;
+      for (size_t i = 0; i < pixels; i++)
+        copy[i] = source[pixels - 1 - i];
+    } else {
+      std::memcpy(copy, this->framebuffer_, frame_bytes);
+    }
     if (locked)
       xSemaphoreGiveRecursive(this->display_mutex_);
   }
@@ -1893,6 +1903,7 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
       // The PPA wrote memory behind the CPU cache: invalidate so the remote
       // view sample (read by the CPU) sees this frame, not a stale one.
       esp_cache_msync(this->rotated_framebuffer_, frame_bytes, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+      this->last_frame_direct_ = true;
       this->send_display_buffer_(this->rotated_framebuffer_, render_start_us);
     } else {
       this->direct_frame_[2] = 0;

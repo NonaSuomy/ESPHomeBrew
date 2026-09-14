@@ -160,13 +160,21 @@ static bool iq_pop(idxq_t *q, int *v)
 
 static unsigned iq_count(const idxq_t *q) { return q->head - q->tail; }
 
+// A decoded picture on its way to the screen. The video task owns a slot
+// while it is free (and drops the picture it held, so the decoder's buffer
+// pool is only touched by that task); the main task owns it while ready.
+typedef struct {
+    AVFrame *frame;
+    int64_t pts;
+    int serial;
+} slot_t;
+
+// RGB565 for the PPA: whole cache lines, 128-byte aligned.
 typedef struct {
     uint16_t *px;
     size_t cap;
     int w, h;
-    int64_t pts;
-    int serial;
-} slot_t;
+} picture_t;
 
 // ── The player ────────────────────────────────────────────────────────────
 
@@ -211,10 +219,11 @@ typedef struct {
 
     volatile int decoded, dropped_early, shown;
     int dropped_late;
+    volatile int held_slot;  // a free slot the video task took but could not use (-1 none)
     volatile int skip_level;
     int64_t lag_avg;
     int64_t skip_changed_us;
-    int64_t last_convert_us;
+    int64_t last_queued_us;
 
     void *demux_task, *video_task, *audio_task;
     volatile int demux_done, video_done, audio_done;
@@ -623,7 +632,7 @@ static void adapt(player_t *p, int64_t lag)
     }
 }
 
-static bool convert(slot_t *s, const AVFrame *fr)
+static bool convert(picture_t *s, const AVFrame *fr)
 {
     enum papp_yuv_layout layout;
     bool full = fr->color_range == AVCOL_RANGE_JPEG;
@@ -674,6 +683,7 @@ static bool convert(slot_t *s, const AVFrame *fr)
         s->px = papp_alloc_aligned(need, 128);
         s->cap = s->px != NULL ? need : 0;
         if (s->px == NULL) {
+            s->w = s->h = 0;
             return false;
         }
     }
@@ -691,7 +701,6 @@ static void video_task(void *arg)
     player_t *p = arg;
     AVFrame *fr = av_frame_alloc();
     int serial = p->serial;
-    int held = -1;
     int64_t next_pts = AV_NOPTS_VALUE;
     const AVRational fps = p->vst->avg_frame_rate.num > 0 ? p->vst->avg_frame_rate : p->vst->r_frame_rate;
     const int64_t frame_us = fps.num > 0 ? av_rescale(1000000, fps.den, fps.num) : 40000;
@@ -738,29 +747,33 @@ static void video_task(void *arg)
             if (clock_get(p, &clk) && !p->paused && serial == p->serial) {
                 const int64_t lag = clk - pts;
                 adapt(p, lag);
-                if (lag > LATE_DROP_US && now_us() - p->last_convert_us < SHOW_AT_LEAST_US) {
+                if (lag > LATE_DROP_US && now_us() - p->last_queued_us < SHOW_AT_LEAST_US) {
                     p->dropped_early++;
                     av_frame_unref(fr);
                     continue;
                 }
             }
-            // A free slot (one a failed conversion left over first: only the
-            // main task may push to the free queue).
-            int slot = held;
-            held = -1;
+            // A free slot: its old picture goes back to the decoder here, on
+            // the decoder's own task. The main task converts the new one to
+            // RGB565 on core 0 while this one decodes the next.
+            int slot = p->held_slot;
+            p->held_slot = -1;
             while (slot < 0 && !p->stop && serial == p->serial && !iq_pop(&p->freeq, &slot)) {
                 slot = -1;
                 papp_sleep_ms(10);
             }
             if (slot >= 0) {
                 slot_t *s = &p->slots[slot];
-                if (serial == p->serial && convert(s, fr)) {
+                av_frame_unref(s->frame);
+                if (serial == p->serial) {
+                    av_frame_move_ref(s->frame, fr);
                     s->pts = pts;
                     s->serial = serial;
-                    p->last_convert_us = now_us();
+                    p->last_queued_us = now_us();
                     iq_push(&p->readyq, slot);
                 } else {
-                    held = slot;
+                    // A seek came in: the slot stays with this task.
+                    p->held_slot = slot;
                 }
             }
             // (No forced sleeps: at priority 0 this task shares core 1 with
@@ -1114,7 +1127,7 @@ static void player_free(player_t *p)
     free(p->vq.items);
     free(p->aq.items);
     for (int i = 0; i < NSLOTS; i++) {
-        free(p->slots[i].px);
+        av_frame_free(&p->slots[i].frame);
     }
     avcodec_free_context(&p->vctx);
     avcodec_free_context(&p->actx);
@@ -1184,7 +1197,13 @@ enum papp_play_result papp_play(const char *location, int cw, int ch, papp_input
         player_free(p);
         return PLAY_FAILED;
     }
+    p->held_slot = -1;
     for (int i = 0; i < NSLOTS; i++) {
+        p->slots[i].frame = av_frame_alloc();
+        if (p->slots[i].frame == NULL) {
+            player_free(p);
+            return PLAY_FAILED;
+        }
         iq_push(&p->freeq, i);
     }
     papp_log("play %.200s", location);
@@ -1224,7 +1243,8 @@ enum papp_play_result papp_play(const char *location, int cw, int ch, papp_input
     const bool has_audio = p->actx != NULL && p->audio_task != NULL;
     uint16_t *ovl = NULL;
     size_t ovl_cap = 0;
-    int shown = -1;               // slot on screen
+    picture_t pic = {0};          // the picture on screen, RGB565
+    bool shown = false;
     int shown_serial = -1;
     int64_t shown_pts = AV_NOPTS_VALUE;
     int64_t serial_since = now_us();
@@ -1303,10 +1323,9 @@ enum papp_play_result papp_play(const char *location, int cw, int ch, papp_input
             int vw = cw, vh = ch;
             float sc = 1.0f;
             int ox = 0, oy = 0;
-            if (has_video && shown >= 0) {
-                const slot_t *s = &p->slots[shown];
-                vw = s->w;
-                vh = s->h;
+            if (has_video && shown) {
+                vw = pic.w;
+                vh = pic.h;
                 sc = fit_scale(vw, vh, cw, ch);
                 int out_w = (int)(vw * sc + 0.5f), out_h = (int)(vh * sc + 0.5f);
                 out_w = out_w > cw ? cw : out_w;
@@ -1422,20 +1441,25 @@ enum papp_play_result papp_play(const char *location, int cw, int ch, papp_input
                 }
             }
             iq_drop(&p->readyq);
-            if (shown >= 0) {
-                iq_push(&p->freeq, shown);
+            const bool ok_pic = convert(&pic, s->frame);  // YUV -> RGB565 on this core
+            const int64_t pts = s->pts;
+            const int sserial = s->serial;
+            iq_push(&p->freeq, idx);  // the video task drops the decoded picture
+            if (!ok_pic) {
+                shown = shown && pic.px != NULL && pic.w > 0;
+                continue;
             }
-            shown = idx;
-            shown_serial = s->serial;
-            shown_pts = s->pts;
+            shown = true;
+            shown_serial = sserial;
+            shown_pts = pts;
             presented = true;
             p->shown++;
             break;
         }
 
         // ── Drawing ──
-        if (has_video && shown >= 0 && (presented || (redraw && t - last_redraw > 30000))) {
-            const slot_t *s = &p->slots[shown];
+        if (has_video && shown && (presented || (redraw && t - last_redraw > 30000))) {
+            const picture_t *s = &pic;
             const float sc = fit_scale(s->w, s->h, cw, ch);
             const uint16_t *out = s->px;
             if (overlay) {
@@ -1459,7 +1483,7 @@ enum papp_play_result papp_play(const char *location, int cw, int ch, papp_input
             papp_svc->display_write_frame_custom(out, (uint16_t)s->w, (uint16_t)s->h, sc, false);
             redraw = false;
             last_redraw = t;
-        } else if ((!has_video || (shown < 0 && t - ready_at > 2000000)) && (redraw || t - last_redraw > 250000)) {
+        } else if ((!has_video || (!shown && t - ready_at > 2000000)) && (redraw || t - last_redraw > 250000)) {
             // Sound only (or pictures that cannot be shown): the overlay on
             // the canvas, always shown.
             const papp_canvas_t c = canvas_fb(cw, ch);
@@ -1500,5 +1524,6 @@ enum papp_play_result papp_play(const char *location, int cw, int ch, papp_input
              p->dropped_late, (int)result);
     player_free(p);
     free(ovl);
+    free(pic.px);
     return result;
 }

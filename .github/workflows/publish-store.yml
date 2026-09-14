@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: "Build PAPPs run to publish (default: latest successful on main)"
+        description: "Build PAPPs run to publish (default: the newest successful build on main)"
         required: false
 
 permissions:
@@ -37,13 +37,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The newest successful build on main, not necessarily the one that
+      # triggered this run: two merges build side by side, and when the older
+      # commit's build finished last its publish put the older app versions
+      # back in the store (NetSurf went from 0.2.3 back to 0.2.2). The queue
+      # above runs publishes one at a time, so the last one always publishes
+      # the newest build. A manual run_id still picks a run on purpose.
       - name: Pick the build run
         id: run
         shell: bash
         run: |
-          id="${{ github.event.workflow_run.id || inputs.run_id }}"
+          id="${{ inputs.run_id }}"
           if [ -z "$id" ]; then
-            id=$(gh run list -R "$REPO" --workflow build-papps.yml --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+            id=$(gh run list -R "$REPO" --workflow build-papps.yml --branch main --event push --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          fi
+          trigger="${{ github.event.workflow_run.id }}"
+          if [ -n "$trigger" ] && [ "$trigger" != "$id" ]; then
+            echo "Build run $trigger finished, but $id is a newer successful build on main: publishing that one."
           fi
           echo "id=$id" >> "$GITHUB_OUTPUT"
           echo "sha=$(gh run view "$id" -R "$REPO" --json headSha --jq .headSha)" >> "$GITHUB_OUTPUT"

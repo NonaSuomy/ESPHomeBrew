@@ -55,6 +55,7 @@
 
 #include <libwapcaplet/libwapcaplet.h>
 
+#include "utils/errors.h"
 #include "utils/log.h"
 #include "utils/nsoption.h"
 #include "utils/utf8.h"

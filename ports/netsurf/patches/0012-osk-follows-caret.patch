@@ -42,7 +42,7 @@
  /* exported function documented in fbtk.h */
 --- a/frontends/framebuffer/fbtk/osk.c
 +++ b/frontends/framebuffer/fbtk/osk.c
-@@ -109,6 +109,90 @@ static struct kbd_button_s kbdbase[KEYCOUNT] = {
+@@ -109,6 +109,95 @@ static struct kbd_button_s kbdbase[KEYCOUNT] = {
  
  static fbtk_widget_t *osk;
  
@@ -55,6 +55,7 @@
 +
 +static bool osk_auto = false; /* shown because a text field has the caret */
 +static bool osk_top = false;  /* at the top of the screen, not the bottom */
++static bool osk_dismissed = false; /* closed by hand while a field had the caret */
 +
 +/* move the keyboard to the top or the bottom of the screen */
 +static void
@@ -99,15 +100,19 @@
 +	if (osk == NULL)
 +		return;
 +	if (has_caret) {
-+		if (!osk->mapped && papp_osk_auto_allowed()) {
++		if (!osk->mapped && !osk_dismissed &&
++		    papp_osk_auto_allowed()) {
 +			fbtk_set_zorder(osk, INT_MIN);
 +			fbtk_set_mapping(osk, true);
 +			osk_auto = true;
 +		}
-+	} else if (osk_auto) {
++	} else {
++		/* the next field to get the caret brings it up again */
++		osk_dismissed = false;
 +		/* hide it unless a text field takes the caret again soon
 +		 * (the caret moving between fields, or to the address bar) */
-+		framebuffer_schedule(100, osk_papp_hide_cb, NULL);
++		if (osk_auto)
++			framebuffer_schedule(100, osk_papp_hide_cb, NULL);
 +	}
 +}
 +
@@ -133,18 +138,20 @@
  static int
  osk_close(fbtk_widget_t *widget, fbtk_callback_info *cbi)
  {
-@@ -116,6 +200,10 @@ osk_close(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+@@ -116,6 +205,12 @@ osk_close(fbtk_widget_t *widget, fbtk_callback_info *cbi)
  		return 0;
  
  	fbtk_set_mapping(osk, false);
 +#ifdef PAPP_NETSURF
++	/* stay closed while this field keeps the caret */
++	osk_dismissed = fbtk_get_root_widget(osk)->u.root.caret.owner != NULL;
 +	osk_auto = false;
 +	osk_papp_move(false);
 +#endif
  
  	return 0;
  }
-@@ -190,6 +278,10 @@ map_osk(void)
+@@ -190,6 +285,10 @@ map_osk(void)
  {
  	fbtk_set_zorder(osk, INT_MIN);
  	fbtk_set_mapping(osk, true);

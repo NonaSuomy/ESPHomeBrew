@@ -1,7 +1,7 @@
 from esphome import automation
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import binary_sensor, display, esp32, lvgl, sensor, speaker, touchscreen
+from esphome.components import binary_sensor, display, esp32, lvgl, sensor, socket, speaker, touchscreen
 
 from esphome.const import CONF_AUTOMATION_ID, CONF_ID, CONF_NAME, CONF_PATH, CONF_THEN, CONF_TRIGGER_ID, CONF_URL
 
@@ -209,6 +209,11 @@ CONFIG_SCHEMA = cv.Schema(
 CONFIG_SCHEMA = cv.All(
     CONFIG_SCHEMA, cv.has_at_most_one_key(CONF_CATALOG_URL, CONF_CATALOGS), validate_catalogs, validate_canvas
 )
+# Room in lwIP's socket pool for the apps' TLS sessions (net_tls_*, at most
+# APP_TLS_MAX in papp_loader.cpp).
+APP_TLS_SESSIONS = 4
+if hasattr(socket, "consume_sockets"):
+    CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, socket.consume_sockets(APP_TLS_SESSIONS, "papp_loader TLS"))
 
 
 async def to_code(config):
@@ -223,6 +228,12 @@ async def to_code(config):
         esp32.require_certificate_bundle()
     elif hasattr(esp32, "require_full_certificate_bundle"):
         esp32.require_full_certificate_bundle()
+    # Apps' TLS connections (net_tls_*) verify servers against the same bundle.
+    esp32.add_idf_sdkconfig_option("CONFIG_MBEDTLS_CERTIFICATE_BUNDLE", True)
+    # ESPHome turns SHA-384/512 off on ESP-IDF 6, but many certificate chains
+    # need them: Let's Encrypt's ECDSA certificates are signed ecdsa-with-SHA384.
+    if hasattr(esp32, "require_mbedtls_sha512"):
+        esp32.require_mbedtls_sha512()
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)

@@ -89,6 +89,40 @@ int count = svc->touch_read_points ? svc->touch_read_points(fingers, 5) : 0;
 - MIDI comes from a class-compliant USB-MIDI cable or keyboard through the `usb_midi` component, when the loader has `usb_midi_id:` set. Bytes that arrived before the app started are dropped. `midi_write` returns -1 when no device is plugged in.
 - `touch_read_points` gives every finger on the panel (the GT911 reports up to 5), first finger first, in the same canvas coordinates as `touch_read`, each with an `id` that stays the same while that finger stays down.
 
+### TLS / HTTPS connections (for app authors)
+
+The loader makes TLS client connections for apps, so an app can speak HTTPS without carrying its own mbedTLS. Five services follow `touch_read_points` (NULL on older loaders):
+
+```c
+if (!svc->net_tls_connect) { /* older loader: no TLS */ }
+int h = svc->net_tls_connect("example.com", 443);   // returns at once
+while (h >= 0 && svc->net_tls_status(h) == 0)       // 0: still connecting
+    svc->delay_ms(10);
+if (h < 0 || svc->net_tls_status(h) < 0) { /* failed: see the device log */ }
+
+static const char req[] = "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n";
+for (int off = 0; off < (int)sizeof req - 1; ) {
+    int n = svc->net_tls_send(h, req + off, sizeof req - 1 - off);
+    if (n < 0) break;                               // 0: would block, send the same bytes again
+    if (n == 0) svc->delay_ms(1); else off += n;
+}
+char buf[1024];
+for (;;) {
+    int n = svc->net_tls_recv(h, buf, sizeof buf);  // 0: nothing yet, -1: closed or failed
+    if (n < 0) break;
+    if (n == 0) { svc->delay_ms(5); continue; }
+    /* use n bytes */
+}
+svc->net_tls_close(h);
+```
+
+- The server's certificate is checked against the firmware's CA bundle and must carry the name you pass, which is also sent as SNI. A server the bundle cannot vouch for (a self-signed certificate, a LAN address) fails; there is no way to skip the check. The loader logs why a connection failed (name not found, the esp-tls error and the certificate flags).
+- Name lookup, the TCP connect and the handshake run on a loader task, so no call blocks the app (each step gives up after about 15 s). Once `net_tls_status` says 1, `net_tls_send` and `net_tls_recv` return at once, like `net_tcp_send` / `net_tcp_recv` but with 0 for "would block" / "nothing yet" and -1 for the end of the stream; afterwards `net_tls_status` tells a clean close (1) from an error (-1).
+- After `net_tls_send` returns 0, call it again with the same bytes (mbedTLS may already hold them).
+- `net_poll` also takes a TLS handle (readable, writable, failed), so an app can wait on TLS and plain sockets the same way.
+- At most 4 sessions at once, connecting ones included. Each holds about 25 KB of the loader's internal RAM while open (mbedTLS's 16 KB input and 4 KB output buffers and its context), a little more and an 8 KB task stack during the handshake. Close sessions you are done with; the loader closes the rest when the app exits.
+- Use a handle from one task at a time.
+
 ### Custom recipes
 
 `custom` mirrors the upstream `tools/build_<game>_papp.ps1` scripts. Every path is relative to the source checkout, and none may leave it. Example (trimmed from `apps/psram_quake/papp.json`):

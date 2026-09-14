@@ -31,6 +31,7 @@
 #include "esp_netif.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
+#include "esp_tls.h"
 #include "esp_mmu_map.h"
 #include "esp_timer.h"
 #include "driver/ppa.h"
@@ -42,6 +43,7 @@
 #endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "hal/mmu_types.h"
 #include "pngAux.h"
@@ -1493,6 +1495,7 @@ void PappLoader::finish_app_() {
     ESP_LOGI(TAG, "PAPP close: app unloaded");
   }
   close_app_sockets_();
+  close_app_tls_();
   this->toggle_wait_release_ = this->toggle_button_ != nullptr;
   this->toggle_close_requested_ = false;
   this->global_close_requested_ = false;
@@ -2992,7 +2995,12 @@ int PappLoader::svc_net_tcp_recv(int handle, void *buf, int len) {
   return got;
 }
 
+static constexpr int APP_TLS_HANDLE_BASE = 0x10000;  // above every lwIP descriptor
+static int poll_app_tls(int handle);
+
 int PappLoader::svc_net_poll(int handle) {
+  if (handle >= APP_TLS_HANDLE_BASE)
+    return poll_app_tls(handle);
   if (!is_app_socket(handle))
     return -1;
   fd_set readable, writable, failed;
@@ -3086,6 +3094,331 @@ void PappLoader::close_app_sockets_() {
       ::close(fd);
       fd = -1;
     }
+  }
+}
+
+// ── TLS (HTTPS) connections for apps ────────────────────────────────────────
+// esp-tls does the work. Name lookup, the TCP connect and the handshake (the
+// server's certificate checked against the firmware's CA bundle, SNI and the
+// expected name from `host`) run on a short-lived task per connection, so the
+// app's task never waits on DNS, the network or the handshake's crypto. Once
+// ready, the socket is switched to non-blocking and the app's calls read and
+// write through esp_tls_conn_read/write, which return at once.
+//
+// Each session costs mbedTLS's record buffers (CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN
+// and _OUT_CONTENT_LEN, 16 KB and 4 KB by default) plus its context, about
+// 25 KB of internal RAM, more during the handshake, and an lwIP socket (the
+// component reserves APP_TLS_MAX in __init__.py).
+static constexpr int APP_TLS_MAX = 4;
+static constexpr int APP_TLS_TIMEOUT_MS = 15000;
+static constexpr uint32_t APP_TLS_TASK_STACK = 8192;
+static constexpr size_t APP_TLS_HOST_MAX = 253;  // the longest DNS name
+
+enum AppTlsState : int8_t { TLS_CONNECTING = 0, TLS_READY = 1, TLS_FAILED = -1, TLS_CLOSED = 2 };
+
+struct AppTlsSession {
+  int handle{-1};         // the app's handle; -1 when the app holds none
+  bool worker{false};     // a connect task still owns this slot
+  AppTlsState state{TLS_FAILED};
+  esp_tls_t *tls{nullptr};
+};
+
+struct AppTlsJob {
+  int slot;
+  int handle;
+  uint16_t port;
+  char host[APP_TLS_HOST_MAX + 1];
+};
+
+static AppTlsSession s_app_tls[APP_TLS_MAX];
+static SemaphoreHandle_t s_app_tls_lock = nullptr;  // created by populate_services
+static uint32_t s_app_tls_generation = 0;
+
+// Every session change and every esp_tls call on an app's session happens
+// under s_app_tls_lock, so a close from one task cannot free a session another
+// is reading. The calls under it do not block (the sockets are non-blocking).
+class AppTlsLock {
+ public:
+  explicit AppTlsLock(TickType_t wait = pdMS_TO_TICKS(1000))
+      : held_(s_app_tls_lock != nullptr && xSemaphoreTake(s_app_tls_lock, wait) == pdTRUE) {}
+  ~AppTlsLock() {
+    if (this->held_)
+      xSemaphoreGive(s_app_tls_lock);
+  }
+  AppTlsLock(const AppTlsLock &) = delete;
+  AppTlsLock &operator=(const AppTlsLock &) = delete;
+  bool held() const { return this->held_; }
+
+ private:
+  bool held_;
+};
+
+static AppTlsSession *find_app_tls(int handle) {
+  if (handle < APP_TLS_HANDLE_BASE)
+    return nullptr;
+  for (auto &session : s_app_tls) {
+    if (session.handle == handle)
+      return &session;
+  }
+  return nullptr;
+}
+
+#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+static void app_tls_connect_task(void *arg) {
+  auto *job = static_cast<AppTlsJob *>(arg);
+  const int64_t started_us = esp_timer_get_time();
+  esp_tls_t *tls = nullptr;
+  bool ready = false;
+  uint32_t ip = 0;
+  if (!PappLoader::svc_net_resolve(job->host, &ip)) {
+    ESP_LOGW(TAG, "PAPP TLS: %s not found", job->host);
+  } else if ((tls = esp_tls_init()) == nullptr) {
+    ESP_LOGW(TAG, "PAPP TLS: out of memory for %s", job->host);
+  } else {
+    char address[16];
+    std::snprintf(address, sizeof(address), "%u.%u.%u.%u", static_cast<unsigned>(ip >> 24),
+                  static_cast<unsigned>((ip >> 16) & 0xFF), static_cast<unsigned>((ip >> 8) & 0xFF),
+                  static_cast<unsigned>(ip & 0xFF));
+    esp_tls_cfg_t cfg{};
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.common_name = job->host;  // SNI and the name the certificate must carry
+    cfg.timeout_ms = APP_TLS_TIMEOUT_MS;
+    int fd = -1;
+    if (esp_tls_conn_new_sync(address, static_cast<int>(std::strlen(address)), job->port, &cfg, tls) == 1 &&
+        esp_tls_get_conn_sockfd(tls, &fd) == ESP_OK && fd >= 0 && set_nonblocking(fd)) {
+      ready = true;
+      ESP_LOGI(TAG, "PAPP TLS: %s:%u ready (%lld ms)", job->host, job->port,
+               static_cast<long long>((esp_timer_get_time() - started_us) / 1000));
+    } else {
+      esp_tls_error_handle_t error = nullptr;
+      if (esp_tls_get_error_handle(tls, &error) == ESP_OK && error != nullptr) {
+        ESP_LOGW(TAG, "PAPP TLS: %s:%u failed: %s (TLS error -0x%04x, certificate flags 0x%x)", job->host, job->port,
+                 esp_err_to_name(error->last_error), static_cast<unsigned>(-error->esp_tls_error_code),
+                 static_cast<unsigned>(error->esp_tls_flags));
+      } else {
+        ESP_LOGW(TAG, "PAPP TLS: %s:%u failed", job->host, job->port);
+      }
+    }
+  }
+
+  bool kept = false;
+  {
+    AppTlsLock lock(portMAX_DELAY);
+    AppTlsSession &session = s_app_tls[job->slot];
+    if (lock.held()) {
+      session.worker = false;
+      if (session.handle == job->handle) {  // the app has not closed it meanwhile
+        session.state = ready ? TLS_READY : TLS_FAILED;
+        if (ready) {
+          session.tls = tls;
+          kept = true;
+        }
+      }
+    }
+  }
+  if (!kept && tls != nullptr)
+    esp_tls_conn_destroy(tls);
+  std::free(job);
+  vTaskDelete(nullptr);
+}
+#endif
+
+int PappLoader::svc_net_tls_connect(const char *host, uint16_t port) {
+#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+  if (host == nullptr || *host == '\0' || port == 0 || std::strlen(host) > APP_TLS_HOST_MAX)
+    return -1;
+  auto *job = static_cast<AppTlsJob *>(std::calloc(1, sizeof(AppTlsJob)));
+  if (job == nullptr)
+    return -1;
+  AppTlsLock lock;
+  int slot = -1;
+  for (int i = 0; lock.held() && i < APP_TLS_MAX; i++) {
+    if (s_app_tls[i].handle < 0 && !s_app_tls[i].worker && s_app_tls[i].tls == nullptr) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot < 0) {
+    ESP_LOGW(TAG, "PAPP TLS: no free session for %s (at most %d)", host, APP_TLS_MAX);
+    std::free(job);
+    return -1;
+  }
+  // A new number each time, so a stale handle never reaches a later session.
+  s_app_tls_generation = (s_app_tls_generation + 1) & 0xFFFF;
+  const int handle = APP_TLS_HANDLE_BASE + static_cast<int>(s_app_tls_generation) * APP_TLS_MAX + slot;
+  job->slot = slot;
+  job->handle = handle;
+  job->port = port;
+  std::memcpy(job->host, host, std::strlen(host) + 1);
+  AppTlsSession &session = s_app_tls[slot];
+  session.handle = handle;
+  session.worker = true;
+  session.state = TLS_CONNECTING;
+  session.tls = nullptr;
+  if (xTaskCreatePinnedToCore(&app_tls_connect_task, "papp_tls", APP_TLS_TASK_STACK, job, 5, nullptr,
+                              tskNO_AFFINITY) != pdPASS) {
+    ESP_LOGW(TAG, "PAPP TLS: cannot start a connect task for %s", host);
+    session = AppTlsSession{};
+    std::free(job);
+    return -1;
+  }
+  ESP_LOGI(TAG, "PAPP TLS: connecting to %s:%u", host, port);
+  return handle;
+#else
+  ESP_LOGW(TAG, "PAPP TLS: unavailable, this firmware has no CA bundle (CONFIG_MBEDTLS_CERTIFICATE_BUNDLE)");
+  return -1;
+#endif
+}
+
+int PappLoader::svc_net_tls_status(int handle) {
+  AppTlsLock lock;
+  const AppTlsSession *session = lock.held() ? find_app_tls(handle) : nullptr;
+  if (session == nullptr)
+    return -1;
+  switch (session->state) {
+    case TLS_CONNECTING:
+      return 0;
+    case TLS_READY:
+    case TLS_CLOSED:
+      return 1;
+    default:
+      return -1;
+  }
+}
+
+int PappLoader::svc_net_tls_send(int handle, const void *buf, int len) {
+  if (buf == nullptr || len < 0)
+    return -1;
+  AppTlsLock lock;
+  AppTlsSession *session = lock.held() ? find_app_tls(handle) : nullptr;
+  if (session == nullptr)
+    return -1;
+  if (session->state == TLS_CONNECTING)
+    return 0;
+  if (session->state != TLS_READY || session->tls == nullptr)
+    return -1;
+  if (len == 0)
+    return 0;
+  const ssize_t sent = esp_tls_conn_write(session->tls, buf, static_cast<size_t>(len));
+  if (sent > 0)
+    return static_cast<int>(sent);
+  if (sent == 0 || sent == ESP_TLS_ERR_SSL_WANT_WRITE || sent == ESP_TLS_ERR_SSL_WANT_READ)
+    return 0;
+  ESP_LOGW(TAG, "PAPP TLS: send failed (-0x%04x)", static_cast<unsigned>(-sent));
+  session->state = TLS_FAILED;
+  return -1;
+}
+
+int PappLoader::svc_net_tls_recv(int handle, void *buf, int len) {
+  if (buf == nullptr || len <= 0)
+    return -1;
+  AppTlsLock lock;
+  AppTlsSession *session = lock.held() ? find_app_tls(handle) : nullptr;
+  if (session == nullptr)
+    return -1;
+  if (session->state == TLS_CONNECTING)
+    return 0;
+  if (session->state != TLS_READY || session->tls == nullptr)
+    return -1;
+  const ssize_t got = esp_tls_conn_read(session->tls, buf, static_cast<size_t>(len));
+  if (got > 0)
+    return static_cast<int>(got);
+  if (got == ESP_TLS_ERR_SSL_WANT_READ || got == ESP_TLS_ERR_SSL_WANT_WRITE)
+    return 0;
+#ifdef MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET
+  if (got == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET)  // TLS 1.3 housekeeping, no data
+    return 0;
+#endif
+  // 0 is the server's close_notify; a plain TCP close without one ends the
+  // stream too (HTTP servers often do that after the response).
+  bool closed = got == 0;
+#ifdef MBEDTLS_ERR_SSL_CONN_EOF
+  closed = closed || got == MBEDTLS_ERR_SSL_CONN_EOF;
+#endif
+#ifdef MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY
+  closed = closed || got == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
+#endif
+  if (!closed)
+    ESP_LOGW(TAG, "PAPP TLS: receive failed (-0x%04x)", static_cast<unsigned>(-got));
+  session->state = closed ? TLS_CLOSED : TLS_FAILED;
+  return -1;
+}
+
+void PappLoader::svc_net_tls_close(int handle) {
+  esp_tls_t *tls = nullptr;
+  {
+    AppTlsLock lock;
+    AppTlsSession *session = lock.held() ? find_app_tls(handle) : nullptr;
+    if (session == nullptr)
+      return;
+    // A connect task still running sees the handle gone and frees its own
+    // connection; the slot stays taken until then.
+    tls = session->tls;
+    session->handle = -1;
+    session->tls = nullptr;
+    session->state = TLS_FAILED;
+  }
+  if (tls != nullptr)
+    esp_tls_conn_destroy(tls);
+}
+
+// net_poll for a TLS handle; see psram_app.h.
+static int poll_app_tls(int handle) {
+  AppTlsLock lock;
+  const AppTlsSession *session = lock.held() ? find_app_tls(handle) : nullptr;
+  if (session == nullptr)
+    return -1;
+  switch (session->state) {
+    case TLS_CONNECTING:
+      return 0;
+    case TLS_CLOSED:
+      return 1;  // net_tls_recv reports the close
+    case TLS_READY:
+      break;
+    default:
+      return 4;
+  }
+  int fd = -1;
+  if (session->tls == nullptr || esp_tls_get_conn_sockfd(session->tls, &fd) != ESP_OK || fd < 0)
+    return 4;
+  int ready = esp_tls_get_bytes_avail(session->tls) > 0 ? 1 : 0;
+  fd_set readable, writable, failed;
+  FD_ZERO(&readable);
+  FD_ZERO(&writable);
+  FD_ZERO(&failed);
+  FD_SET(fd, &readable);
+  FD_SET(fd, &writable);
+  FD_SET(fd, &failed);
+  timeval now{0, 0};
+  if (::select(fd + 1, &readable, &writable, &failed, &now) < 0)
+    return ready | 4;
+  return ready | (FD_ISSET(fd, &readable) ? 1 : 0) | (FD_ISSET(fd, &writable) ? 2 : 0) |
+         (FD_ISSET(fd, &failed) ? 4 : 0);
+}
+
+void PappLoader::close_app_tls_() {
+  if (s_app_tls_lock == nullptr)
+    return;
+  esp_tls_t *open[APP_TLS_MAX] = {};
+  {
+    AppTlsLock lock(pdMS_TO_TICKS(2000));
+    if (!lock.held()) {
+      ESP_LOGW(TAG, "PAPP TLS: sessions left open (lock busy)");
+      return;
+    }
+    for (int i = 0; i < APP_TLS_MAX; i++) {
+      AppTlsSession &session = s_app_tls[i];
+      if (session.handle >= 0)
+        ESP_LOGI(TAG, "PAPP TLS: closing a session the app left open");
+      open[i] = session.tls;
+      session.handle = -1;
+      session.tls = nullptr;
+      session.state = TLS_FAILED;
+    }
+  }
+  for (esp_tls_t *tls : open) {
+    if (tls != nullptr)
+      esp_tls_conn_destroy(tls);
   }
 }
 
@@ -3304,6 +3637,13 @@ void PappLoader::populate_services(app_services_t *services) {
   services->midi_read = &PappLoader::svc_midi_read;
   services->midi_write = &PappLoader::svc_midi_write;
   services->touch_read_points = &PappLoader::svc_touch_read_points;
+  if (s_app_tls_lock == nullptr)
+    s_app_tls_lock = xSemaphoreCreateMutex();
+  services->net_tls_connect = &PappLoader::svc_net_tls_connect;
+  services->net_tls_status = &PappLoader::svc_net_tls_status;
+  services->net_tls_send = &PappLoader::svc_net_tls_send;
+  services->net_tls_recv = &PappLoader::svc_net_tls_recv;
+  services->net_tls_close = &PappLoader::svc_net_tls_close;
 }
 
 esp_err_t psram_app_load(const char *path, psram_app_handle_t *out_handle) {

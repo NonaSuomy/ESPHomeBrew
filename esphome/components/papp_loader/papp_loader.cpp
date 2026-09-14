@@ -3139,18 +3139,20 @@ static uint32_t s_app_tls_generation = 0;
 // is reading. The calls under it do not block (the sockets are non-blocking).
 class AppTlsLock {
  public:
-  explicit AppTlsLock(TickType_t wait = pdMS_TO_TICKS(1000))
-      : held_(s_app_tls_lock != nullptr && xSemaphoreTake(s_app_tls_lock, wait) == pdTRUE) {}
+  explicit AppTlsLock(TickType_t wait = pdMS_TO_TICKS(1000)) : lock_(s_app_tls_lock) {
+    if (this->lock_ != nullptr && xSemaphoreTake(this->lock_, wait) != pdTRUE)
+      this->lock_ = nullptr;
+  }
   ~AppTlsLock() {
-    if (this->held_)
-      xSemaphoreGive(s_app_tls_lock);
+    if (this->lock_ != nullptr)
+      xSemaphoreGive(this->lock_);
   }
   AppTlsLock(const AppTlsLock &) = delete;
   AppTlsLock &operator=(const AppTlsLock &) = delete;
-  bool held() const { return this->held_; }
+  bool held() const { return this->lock_ != nullptr; }
 
  private:
-  bool held_;
+  SemaphoreHandle_t lock_;  // the lock taken (close_app_tls_ may replace s_app_tls_lock)
 };
 
 static AppTlsSession *find_app_tls(int handle) {
@@ -3202,19 +3204,20 @@ static void app_tls_connect_task(void *arg) {
   }
 
   bool kept = false;
-  {
-    AppTlsLock lock(portMAX_DELAY);
+  for (;;) {
+    AppTlsLock lock;  // retried, so a lock replaced by close_app_tls_ is picked up
+    if (!lock.held())
+      continue;
     AppTlsSession &session = s_app_tls[job->slot];
-    if (lock.held()) {
-      session.worker = false;
-      if (session.handle == job->handle) {  // the app has not closed it meanwhile
-        session.state = ready ? TLS_READY : TLS_FAILED;
-        if (ready) {
-          session.tls = tls;
-          kept = true;
-        }
+    session.worker = false;
+    if (session.handle == job->handle) {  // the app has not closed it meanwhile
+      session.state = ready ? TLS_READY : TLS_FAILED;
+      if (ready) {
+        session.tls = tls;
+        kept = true;
       }
     }
+    break;
   }
   if (!kept && tls != nullptr)
     esp_tls_conn_destroy(tls);
@@ -3403,7 +3406,17 @@ void PappLoader::close_app_tls_() {
   {
     AppTlsLock lock(pdMS_TO_TICKS(2000));
     if (!lock.held()) {
-      ESP_LOGW(TAG, "PAPP TLS: sessions left open (lock busy)");
+      // Only a task deleted inside a TLS call leaves the lock taken. Give up on
+      // its sessions (their memory is lost, the rest works) and start a new
+      // lock, so later apps still get TLS. Connect tasks still running find
+      // their handle gone and free their own connections.
+      ESP_LOGW(TAG, "PAPP TLS: lock still taken after the app exited; abandoning its sessions");
+      for (auto &session : s_app_tls) {
+        session.handle = -1;
+        session.tls = nullptr;
+        session.state = TLS_FAILED;
+      }
+      s_app_tls_lock = xSemaphoreCreateMutex();
       return;
     }
     for (int i = 0; i < APP_TLS_MAX; i++) {

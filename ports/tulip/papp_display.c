@@ -4,9 +4,12 @@
 // Tulip's display engine (tulip/shared/display.c) composites its background,
 // sprites and text frame buffer (TFB) one 12-pixel band at a time into an
 // RGB332 bounce buffer (display_bounce_empty), exactly as Tulip's RGB panel
-// driver and SDL window do. This port builds Tulip at 800x480 (see
-// patches/0001-display-800x480.patch), the loader's canvas, so each band is
+// driver and SDL window do. Tulip is built at its own 1024x600 and asks the
+// loader for a canvas that size (display_set_canvas), so each band is
 // converted to RGB565 straight into the loader's framebuffer and shown 1:1.
+// A loader without that (or without the PSRAM for it) keeps its 800x480
+// canvas: frames are then composed in a buffer of our own and the loader
+// scales them down, and touches are scaled back up to Tulip's size.
 //
 // The same task polls the loader's input every frame and feeds Tulip the way
 // its desktop build does: keys to send_key_to_micropython() (REPL, editor,
@@ -21,15 +24,17 @@
 #include "lvgl.h"
 
 #define FRAME_US (1000000 / 30)
-#define CANVAS_W 800
-#define CANVAS_H 480
-
-#if H_RES != CANVAS_W || V_RES != CANVAS_H
-#error "Tulip must be built at 800x480 for the PAPP canvas (patches/0001-display-800x480.patch)"
-#endif
+// The loader's canvas when it cannot give us H_RES x V_RES.
+#define LEGACY_W 800
+#define LEGACY_H 480
+#define SCALED_SCALE ((float)LEGACY_W / (float)H_RES)
 
 static uint16_t s_lut[256];          // RGB332 -> RGB565
 static uint8_t *s_band = NULL;       // one FONT_HEIGHT-row RGB332 band
+// NULL: frames go straight to the loader's H_RES x V_RES canvas. Otherwise
+// Tulip's frame is composed here and the loader scales it to 800x480.
+static uint16_t *s_scaled_frame = NULL;
+static int s_scaled_y0 = 0;          // top of the scaled frame in the canvas
 static void *s_task = NULL;
 static volatile int s_stop = 0;
 static volatile int s_stopped = 1;
@@ -264,7 +269,8 @@ static void poll_gamepad(int64_t now)
 }
 
 // ── Touch ───────────────────────────────────────────────────────────────────
-// The loader reports touches in its 800x480 canvas space: Tulip's own.
+// The loader reports touches in its canvas space: Tulip's own at H_RES x
+// V_RES, else the 800x480 canvas the scaled frame sits in.
 
 static int s_touching = 0;
 
@@ -275,6 +281,12 @@ static void poll_touch(void)
     }
     int x = 0, y = 0;
     const int down = papp_svc->touch_read(&x, &y);
+    if (down && s_scaled_frame != NULL) {
+        x = (int)((float)x / SCALED_SCALE);
+        y = (int)((float)(y - s_scaled_y0) / SCALED_SCALE);
+        x = x < 0 ? 0 : (x >= H_RES ? H_RES - 1 : x);
+        y = y < 0 ? 0 : (y >= V_RES ? V_RES - 1 : y);
+    }
     if (down) {
         last_touch_x[0] = (int16_t)x;
         last_touch_y[0] = (int16_t)y;
@@ -313,7 +325,7 @@ void lvgl_keyboard_read(lv_indev_t *indev_drv, lv_indev_data_t *data)
 
 static void draw_frame(void)
 {
-    uint16_t *fb = papp_svc->display_get_framebuffer();
+    uint16_t *fb = s_scaled_frame != NULL ? s_scaled_frame : papp_svc->display_get_framebuffer();
     if (fb == NULL) {
         return;
     }
@@ -321,13 +333,38 @@ static void draw_frame(void)
         display_bounce_empty(s_band, y * H_RES, H_RES * FONT_HEIGHT, NULL);
         for (int row = 0; row < FONT_HEIGHT; row++) {
             const uint8_t *src = s_band + row * H_RES;
-            uint16_t *dst = fb + (y + row) * CANVAS_W;
+            uint16_t *dst = fb + (y + row) * H_RES;
             for (int x = 0; x < H_RES; x++) {
                 dst[x] = s_lut[src[x]];
             }
         }
     }
-    papp_svc->display_flush();
+    if (s_scaled_frame != NULL) {
+        papp_svc->display_write_frame_custom(s_scaled_frame, H_RES, V_RES, SCALED_SCALE, false);
+    } else {
+        papp_svc->display_flush();
+    }
+}
+
+// Tulip's own size if the loader can show it 1:1; else a frame buffer of our
+// own that the loader scales to its 800x480 canvas.
+static int setup_canvas(void)
+{
+    if (papp_svc->display_set_canvas != NULL && papp_svc->display_set_canvas(H_RES, V_RES) == 0) {
+        papp_svc->log_printf("TULIP: %dx%d canvas, shown 1:1\n", H_RES, V_RES);
+        return 0;
+    }
+    s_scaled_frame = (uint16_t *)papp_alloc_raw((size_t)H_RES * V_RES * sizeof(uint16_t), 0);
+    if (s_scaled_frame == NULL) {
+        papp_svc->log_printf("TULIP: no %dx%d canvas and no memory to scale a frame\n", H_RES, V_RES);
+        return -1;
+    }
+    // As the loader places it: scaled, rounded, centred in the canvas.
+    const int out_h = (int)(V_RES * SCALED_SCALE + 0.5f);
+    s_scaled_y0 = (LEGACY_H - out_h) / 2;
+    papp_svc->log_printf("TULIP: the loader keeps 800x480; %dx%d frames scaled to %dx%d\n", H_RES, V_RES, LEGACY_W,
+                         out_h);
+    return 0;
 }
 
 static void display_task(void *arg)
@@ -399,6 +436,10 @@ int papp_display_start(void)
         papp_svc->log_printf("TULIP: no display (framebuffer %p)\n", (void *)s_band);
         return -1;
     }
+    // Before the display task starts: nothing draws yet.
+    if (setup_canvas() != 0) {
+        return -1;
+    }
     papp_svc->display_clear(0x0000);
     s_stop = 0;
     s_stopped = 0;
@@ -426,4 +467,6 @@ void papp_display_stop(void)
     }
     papp_free_raw(s_band);
     s_band = NULL;
+    papp_free_raw(s_scaled_frame);
+    s_scaled_frame = NULL;
 }

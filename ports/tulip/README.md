@@ -11,12 +11,12 @@ are fetched at pinned commits (`apps/psram_tulip/papp.json`: tulipcc, and its
 | `gen_tulip.py` | Prebuild: MicroPython's generated headers (qstrs, modules, root pointers, version), the LVGL binding (`lv_mpy.c`), frozen Python (bytecode via a host-built `mpy-cross`) and Tulip's `/sys` files as a tar |
 | `mpconfigport.h`, `mphalport.h`, `papp_mphal.c`, `papp_modtime.c` | The MicroPython port: config, console, clocks |
 | `papp_main.c` | `app_entry`, the MicroPython task (heap, LVGL, `_boot.py`, REPL), quitting |
-| `papp_display.c` | Tulip's compositor into the loader's 800x480 canvas (30 fps target), keyboard, gamepad and touch input |
+| `papp_display.c` | Tulip's compositor into a 1024x600 loader canvas, or scaled to 800x480 on older loaders (30 fps target), keyboard, gamepad and touch input |
 | `papp_audio.c` | AMY rendered into the loader's speaker (44.1 kHz), AMY's platform hooks |
 | `papp_vfs.c` | `_papp`: `/sd` (files by name), the block device for Tulip's filesystem image, `/sys` tar, `quit()` |
 | `papp_syscalls.c` | newlib: heap (PSRAM, freed on quit), files, time, spinlocks |
 | `py/_boot.py` | Replaces Tulip's `_boot.py`: filesystems, `/sys`, then Tulip's own start-up |
-| `patches/` | Tulip at 800x480, `tulip.board()` = `"PAPP"`, AMY's queue lock |
+| `patches/` | `tulip.board()` = `"PAPP"`, AMY's queue lock |
 
 ## Tasks and memory
 

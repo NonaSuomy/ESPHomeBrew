@@ -4,7 +4,8 @@
 // Tasks (all created through the loader's task_create service):
 //   mp       MicroPython: _boot.py, boot.py, the REPL. Core 0, PSRAM stack.
 //   display  Tulip's compositor (display_bounce_empty) into the loader's
-//            800x480 RGB565 canvas, ~30 fps, plus input polling. Core 1.
+//            1024x600 RGB565 canvas (scaled to 800x480 on older loaders),
+//            ~30 fps, plus input polling. Core 1.
 //   audio    AMY rendering (amy_simple_fill_buffer) into the loader's
 //            speaker at 44.1 kHz. Core 1.
 #pragma once

@@ -400,11 +400,13 @@ def lint(units_path: Path) -> None:
                "frontends/framebuffer/fbtk/text.c", "frontends/framebuffer/fbtk/event.c")
     serious = re.compile(r"implicit|incompatible|int-conversion|return-mismatch|uninitialized|overflow|"
                          r"array-bounds|format|sign-compare|unused-variable")
+    checked = shown = 0
     for unit in units:
         src = unit["src"].replace("\\", "/")
         own = "/ports/netsurf/" in src
         if not own and not src.endswith(patched):
             continue
+        checked += 1
         result = subprocess.run([unit["compiler"], *unit["flags"], "-Wall", "-Wextra", "-Wno-unused-parameter",
                                  "-Wno-sign-compare", "-fsyntax-only", unit["src"]],
                                 capture_output=True, text=True)
@@ -413,6 +415,8 @@ def lint(units_path: Path) -> None:
             lines = [l for l in lines if serious.search(l) and "/ports/netsurf/" not in l]
         for line in lines[:20]:
             log("lint: " + re.sub(r"^\S*/(ports/netsurf/|src-[^/]+/)", "", line)[:240])
+        shown += len(lines)
+    log(f"lint: {checked} files checked, {shown} warnings")
 
 
 def main() -> int:

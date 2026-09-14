@@ -17,7 +17,7 @@
 extern float papp_mouse_x;
 extern float papp_mouse_y;
 void Move_Video_Mouse(float xrel, float yrel);
-void papp_video_mode_size(int* w, int* h);
+void papp_video_page_origin(int* x, int* y);
 void Process_Network(); // common/wsproto.cpp
 
 // Loader key numbers for keys that are not printable ASCII (papp_loader.cpp).
@@ -214,7 +214,8 @@ private:
         MouseButtons = buttons;
     }
 
-    // The touch panel reports the 800x480 canvas; the game page sits centred in it.
+    // The touch panel reports canvas coordinates; the game page sits centred
+    // in the canvas (at 0,0 on a 640x400 canvas, at 80,40 on an 800x480 one).
     void Poll_Touch()
     {
         if (papp_svc->touch_read == nullptr) {
@@ -224,10 +225,10 @@ private:
         const bool touching = papp_svc->touch_read(&x, &y) != 0;
         const long long now = papp_time_us();
         if (touching) {
-            int w, h;
-            papp_video_mode_size(&w, &h);
-            const float gx = (float)(x - (800 - w) / 2);
-            const float gy = (float)(y - (480 - h) / 2);
+            int ox, oy;
+            papp_video_page_origin(&ox, &oy);
+            const float gx = (float)(x - ox);
+            const float gy = (float)(y - oy);
             Move_Video_Mouse(gx - papp_mouse_x, gy - papp_mouse_y);
             LastTouch = now;
         }

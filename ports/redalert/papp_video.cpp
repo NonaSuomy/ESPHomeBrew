@@ -1,9 +1,16 @@
 // Video backend for the Red Alert PAPP (replaces common/video_sdl2.cpp).
 //
 // The game draws 8-bit paletted pages (640x400 by default). The visible page
-// is converted through a 256-entry RGB565 table into the loader's 800x480
-// canvas, centred, with the mouse cursor drawn on top, whenever the game
-// presents a frame (Frame_Limiter -> Video_Render_Frame).
+// is converted through a 256-entry RGB565 table into the loader's canvas,
+// centred, with the mouse cursor drawn on top, whenever the game presents a
+// frame (Frame_Limiter -> Video_Render_Frame).
+//
+// The canvas is one of CANVAS_SIZES, picked from what the loader offers (the
+// store's Screen setting, else the listing's recommended 640x400): 640x400
+// holds the page exactly, with no border to convert or flush; 800x480 is the
+// canvas every PAPP had before. Red Alert's UI is laid out for 640x400 (the
+// sidebar, radar, tabs, dialogs and movies use fixed coordinates), so the
+// page itself never grows with the canvas.
 #include "papp_port.h"
 
 #include "common/video.h"
@@ -12,8 +19,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const int CANVAS_W = 800;
-static const int CANVAS_H = 480;
+// Largest first; the same sizes as "canvas" in apps/psram_redalert/papp.json.
+static const struct
+{
+    int w, h;
+} CANVAS_SIZES[] = {{800, 480}, {640, 400}};
+
+// The canvas in use: 800x480 until Set_Video_Mode switches it.
+static int s_canvas_w = 800;
+static int s_canvas_h = 480;
 
 static uint16_t s_palette[256];
 static int s_mode_w = 640;
@@ -80,18 +94,26 @@ static volatile int s_dropped = 0;
 static volatile long long s_copy_us = 0;
 static long long s_wait_us = 0; // presenter: time asleep waiting for a frame
 
+// Where a w x h page sits on the canvas: centred, never left of or above it.
+static void page_origin(int w, int h, int* ox, int* oy)
+{
+    *ox = (s_canvas_w - w) / 2 > 0 ? (s_canvas_w - w) / 2 : 0;
+    *oy = (s_canvas_h - h) / 2 > 0 ? (s_canvas_h - h) / 2 : 0;
+}
+
 static void render(const Snapshot& f, uint16_t* fb)
 {
-    const int ox = (CANVAS_W - f.w) / 2 > 0 ? (CANVAS_W - f.w) / 2 : 0;
-    const int oy = (CANVAS_H - f.h) / 2 > 0 ? (CANVAS_H - f.h) / 2 : 0;
-    const int cw = f.w < CANVAS_W ? f.w : CANVAS_W;
-    const int ch = f.h < CANVAS_H ? f.h : CANVAS_H;
+    int ox, oy;
+    page_origin(f.w, f.h, &ox, &oy);
+    const int stride = s_canvas_w;
+    const int cw = f.w < s_canvas_w ? f.w : s_canvas_w;
+    const int ch = f.h < s_canvas_h ? f.h : s_canvas_h;
     const uint16_t* pal = f.palette;
     // 4 pixels per 32-bit read, two RGB565 pairs per 32-bit write.
     const bool words = ((f.w | cw | ox) & 3) == 0 && (((uintptr_t)f.pixels | (uintptr_t)fb) & 3) == 0;
     for (int y = 0; y < ch; y++) {
         const unsigned char* src = f.pixels + y * f.w;
-        uint16_t* dst = fb + (oy + y) * CANVAS_W + ox;
+        uint16_t* dst = fb + (oy + y) * stride + ox;
         int x = 0;
         if (words) {
             const uint32_t* __restrict s4 = reinterpret_cast<const uint32_t*>(src);
@@ -116,7 +138,7 @@ static void render(const Snapshot& f, uint16_t* fb)
             const int px = f.cursor_x + x;
             const unsigned char c = f.cursor[y * f.cursor_w + x];
             if (c != 0 && px >= 0 && px < cw) {
-                fb[(oy + py) * CANVAS_W + ox + px] = pal[c];
+                fb[(oy + py) * stride + ox + px] = pal[c];
             }
         }
     }
@@ -387,6 +409,35 @@ VideoSurface* Video::CreateSurface(int w, int h, GBC_Enum flags)
     return new VideoSurfacePAPP(w, h, flags);
 }
 
+// Switch to the largest of CANVAS_SIZES that fits in the loader's offer and
+// holds the w x h page (the smallest one when none fits the offer). A loader
+// without display_set_canvas, or one that refuses, leaves 800x480.
+static void choose_canvas(int w, int h)
+{
+    if (papp_svc->display_get_size == nullptr || papp_svc->display_set_canvas == nullptr) {
+        return;
+    }
+    int offer_w = 0, offer_h = 0;
+    papp_svc->display_get_size(&offer_w, &offer_h);
+    const int count = (int)(sizeof(CANVAS_SIZES) / sizeof(CANVAS_SIZES[0]));
+    int pick = count - 1;
+    for (int i = 0; i < count; i++) {
+        if (CANVAS_SIZES[i].w <= offer_w && CANVAS_SIZES[i].h <= offer_h && CANVAS_SIZES[i].w >= w
+            && CANVAS_SIZES[i].h >= h) {
+            pick = i;
+            break;
+        }
+    }
+    const int cw = CANVAS_SIZES[pick].w, ch = CANVAS_SIZES[pick].h;
+    if (papp_svc->display_set_canvas(cw, ch) == 0) {
+        s_canvas_w = cw;
+        s_canvas_h = ch;
+    }
+    papp_svc->log_printf("RA: offered a %dx%d canvas, using %dx%d\n", offer_w, offer_h, s_canvas_w, s_canvas_h);
+}
+
+// Called once at startup, on the game task, before the first frame (and so
+// before the presenter task that reads the canvas size exists).
 bool Set_Video_Mode(int w, int h, int bits_per_pixel)
 {
     papp_svc->log_printf("RA: video mode %dx%d %d bpp\n", w, h, bits_per_pixel);
@@ -394,14 +445,15 @@ bool Set_Video_Mode(int w, int h, int bits_per_pixel)
     s_mode_h = h;
     papp_mouse_x = w / 2.0f;
     papp_mouse_y = h / 2.0f;
+    choose_canvas(w, h);
     papp_svc->display_clear(0x0000);
-    return w <= CANVAS_W && h <= CANVAS_H;
+    return w <= s_canvas_w && h <= s_canvas_h;
 }
 
-void papp_video_mode_size(int* w, int* h)
+// Where the game page's top-left corner is on the canvas (touch mapping).
+void papp_video_page_origin(int* x, int* y)
 {
-    *w = s_mode_w;
-    *h = s_mode_h;
+    page_origin(s_mode_w, s_mode_h, x, y);
 }
 
 bool Is_Video_Fullscreen()

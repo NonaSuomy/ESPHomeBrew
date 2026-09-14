@@ -1,7 +1,7 @@
 {
   "name": "psram_tulip",
   "title": "Tulip CC",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Tulip Creative Computer (MicroPython, the AMY synthesizer, Tulip's graphics, editor and LVGL UI) as a PAPP, at its full 1024x600 with USB keyboard, touch and the loader's speaker. Work in progress.",
   "author": "shorepine (Tulip, AMY); PAPP port",
   "category": "Tool",

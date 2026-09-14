@@ -328,15 +328,21 @@ static void poll_touch(void)
 // sends the other way.
 
 extern void convert_midi_bytes_to_messages(uint8_t *data, size_t len, uint8_t usb);
+extern void papp_midi_ensure_buffer(void);  // papp_audio.c
+extern uint8_t *sysex_buffer;
 
 static void poll_midi(void)
 {
     if (papp_svc->midi_read == NULL) {
         return;
     }
+    papp_midi_ensure_buffer();
     uint8_t buf[64];
     int n;
     while ((n = papp_svc->midi_read(buf, (int)sizeof(buf))) > 0) {
+        if (sysex_buffer == NULL) {
+            continue;  // no memory for SysEx: drop the bytes rather than crash
+        }
         convert_midi_bytes_to_messages(buf, (size_t)n, 0);
     }
 }

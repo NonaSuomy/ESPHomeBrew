@@ -9,6 +9,7 @@
 // buffer as latency between a key press and the sound).
 #include "papp_port.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "amy.h"
@@ -139,12 +140,31 @@ size_t amy_i2s_write(const uint8_t *buffer, size_t nbytes)
 
 // MIDI (AMY_HOST_MIDI: this is the host): input is read by poll_midi in
 // papp_display.c; output goes to the loader's USB-MIDI device, if it has one.
+// AMY's parser keeps SysEx in sysex_buffer, which each platform's run_midi()
+// allocates. Without it the first F0 from a keyboard (a tempo or transport
+// button sends one) wrote through NULL: a store access fault that rebooted
+// the board.
+#ifndef MAX_SYSEX_BYTES
+#define MAX_SYSEX_BYTES 16384
+#endif
+extern uint8_t *sysex_buffer;
+
+void papp_midi_ensure_buffer(void)
+{
+    if (sysex_buffer == NULL) {
+        sysex_buffer = (uint8_t *)malloc(MAX_SYSEX_BYTES);
+    }
+}
+
 void run_midi(void)
 {
+    papp_midi_ensure_buffer();
 }
 
 void stop_midi(void)
 {
+    free(sysex_buffer);
+    sysex_buffer = NULL;
 }
 
 void midi_out(uint8_t *bytes, uint16_t len)

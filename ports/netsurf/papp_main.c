@@ -44,6 +44,7 @@ void papp_request_quit(int code)
         s_quit_code = code;
         s_quit_at = papp_time_us();
         s_quit = 1;
+        papp_svc->log_printf("NETSURF: quit requested (%d)\n", code);
     }
 }
 
@@ -156,8 +157,10 @@ static void netsurf_task(void *arg)
     argv[argc++] = width_arg;
     argv[argc++] = (char *)"-h";
     argv[argc++] = height_arg;
-    // NetSurf's own log (verbose) when the card has PAPP_NS_DIR/verbose.
-    if (papp_file_exists(PAPP_NS_DIR "/verbose")) {
+    // NetSurf's own log (verbose) when the card has PAPP_NS_DIR/verbose or
+    // verbose.txt (tools that write files over the network need an extension).
+    if (papp_file_exists(PAPP_NS_DIR "/verbose") || papp_file_exists(PAPP_NS_DIR "/verbose.txt")) {
+        papp_svc->log_printf("NETSURF: verbose log on\n");
         argv[argc++] = (char *)"-v";
     }
     argv[argc] = NULL;

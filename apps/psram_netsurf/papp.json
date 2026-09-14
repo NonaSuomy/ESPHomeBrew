@@ -1,7 +1,7 @@
 {
   "name": "psram_netsurf",
   "title": "NetSurf",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "The NetSurf web browser (framebuffer frontend) as a PAPP on the whole panel: http:// and https:// pages over the loader's network and TLS, files on the card and NetSurf's about: pages, with touch, USB keyboard and mouse. Work in progress.",
   "author": "The NetSurf Developers; PAPP port",
   "category": "Tool",

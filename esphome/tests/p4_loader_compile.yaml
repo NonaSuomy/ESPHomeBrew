@@ -97,6 +97,7 @@ papp_loader:
   path: /sd/roms/papp/app.papp
   display_id: main_display
   touchscreen_id: touch_panel
+  usb_midi_id: usb_midi_port
   # Several library sources; store_page_config.yaml keeps the single catalog_url form.
   catalogs:
     - name: SD / USB

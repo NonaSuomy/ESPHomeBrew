@@ -22,6 +22,9 @@
 #ifdef PAPP_LOADER_USE_USB_HIDX
 #include "esphome/components/usb_hidx/usb_hidx.h"
 #endif
+#ifdef PAPP_LOADER_USE_USB_MIDI
+#include "esphome/components/usb_midi/usb_midi.h"
+#endif
 
 #include "papp_canvas.h"
 #include "papp_data.h"
@@ -213,6 +216,9 @@ class PappLoader : public Component {
 #ifdef PAPP_LOADER_USE_USB_HIDX
   void set_usb_hidx(usb_hidx::USBHIDXComponent *usb_hidx) { this->usb_hidx_ = usb_hidx; }
 #endif
+#ifdef PAPP_LOADER_USE_USB_MIDI
+  void set_usb_midi(usb_midi::UsbMidi *usb_midi) { this->usb_midi_ = usb_midi; }
+#endif
   void set_button(uint8_t index, binary_sensor::BinarySensor *sensor) {
     if (index < BUTTON_COUNT)
       this->buttons_[index] = sensor;
@@ -238,6 +244,10 @@ class PappLoader : public Component {
   static void svc_display_write_rect(int x, int y, int w, int h, const uint16_t *data);
   static void svc_display_get_size(int *width, int *height);
   static int svc_display_set_canvas(int width, int height);
+  static int svc_midi_read(uint8_t *buf, int len);
+  static int svc_midi_write(const uint8_t *data, int len);
+  static int svc_touch_read_points(papp_touch_point_t *points, int max);
+  void snapshot_touches_();
   static int svc_sprite_blit(uint16_t *framebuf, uint32_t fb_w, uint32_t fb_h,
                              uint32_t x, uint32_t y, const uint16_t *sprite,
                              uint32_t sp_w, uint32_t sp_h, uint16_t colorkey);
@@ -385,6 +395,9 @@ class PappLoader : public Component {
 #ifdef PAPP_LOADER_USE_USB_HIDX
   usb_hidx::USBHIDXComponent *usb_hidx_{nullptr};
 #endif
+#ifdef PAPP_LOADER_USE_USB_MIDI
+  usb_midi::UsbMidi *usb_midi_{nullptr};
+#endif
   binary_sensor::BinarySensor *buttons_[BUTTON_COUNT]{};
   binary_sensor::BinarySensor *toggle_button_{nullptr};
   binary_sensor::BinarySensor *launch_button_{nullptr};
@@ -466,6 +479,12 @@ class PappLoader : public Component {
   bool launch_button_state_{false};
   bool launch_wait_release_{false};
   bool touch_active_{false};
+  // The fingers on the panel, copied in loop() (the touchscreen's own list is
+  // not safe to read from the app task); guarded by touch_points_lock_.
+  static constexpr int MAX_TOUCH_POINTS = 5;
+  touchscreen::TouchPoint touch_points_[MAX_TOUCH_POINTS]{};
+  int touch_point_count_{0};
+  portMUX_TYPE touch_points_lock_ = portMUX_INITIALIZER_UNLOCKED;
   // Set by the on-screen close control.  It is deliberately independent of
   // the normal PAPP X/action input so every loader-backed app gets the same
   // exit request, including apps that do not draw their own controls.

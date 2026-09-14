@@ -55,6 +55,7 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual((info["author"], info["controls"]), ("giltal", ["A: fire"]))
             self.assertEqual(info["upstream"], {"project": "PrBoom", "version": "2.5.0", "url": "https://example.com/prboom"})
             self.assertEqual((info["icon"]["width"], info["icon"]["height"], info["icon"]["type"]), (96, 96, "image/png"))
+            self.assertNotIn("canvas", info)
             self.assertEqual(bp.store_info("psram_x", {}, folder), {})
             (folder / "big.png").write_bytes(png(512, 64))
             (folder / "wide.png").write_bytes(png(1280, 600))
@@ -70,6 +71,20 @@ class ManifestTests(unittest.TestCase):
             for manifest in bad:
                 with self.subTest(manifest=str(manifest)[:40]), self.assertRaises(ValueError):
                     bp.store_info("psram_x", manifest, folder)
+
+    def test_canvas_field_is_checked(self):
+        """A canvas of true, or of the sizes the app draws, gives it the store's Screen setting."""
+        folder = Path(".")
+        self.assertIs(bp.store_info("psram_x", {"canvas": True}, folder)["canvas"], True)
+        self.assertEqual(bp.store_info("psram_x", {"canvas": ["1024x600", "800x480", "640x480"]}, folder)["canvas"],
+                         ["1024x600", "800x480", "640x480"])
+        self.assertEqual(bp.canvas_info("x", ["320x240", "4096x4096"]), ["320x240", "4096x4096"])
+        bad = [False, None, "1024x600", 1, [], ["1024x600"] * 2, ["1024x600", "1024x600"], ["1024 x 600"],
+               ["1024X600"], ["1024x601"], ["1023x600"], ["318x240"], ["320x238"], ["8192x600"], ["x600"], [1024],
+               ["-1024x600"], [True], [f"{w}x480" for w in range(640, 660, 2)]]
+        for canvas in bad:
+            with self.subTest(canvas=canvas), self.assertRaises(ValueError):
+                bp.store_info("psram_x", {"canvas": canvas}, folder)
 
     def test_data_blocks_are_checked(self):
         good = {"repo": "https://github.com/o/r", "ref": "a" * 40, "license": "shareware",

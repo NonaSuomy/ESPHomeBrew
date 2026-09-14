@@ -14,7 +14,8 @@ For every .papp in the folder:
   the download.
 - When the app is also in the store (same name, with or without the psram_
   prefix, e.g. doom.papp and psram_doom), its title, icon, about, controls,
-  licence, upstream project and data list are copied from the store listing.
+  licence, upstream project, canvas sizes and data list are copied from the
+  store listing.
 - A <stem>.png next to the .papp (at most 256x256, 64 KB) becomes the icon.
 - Fields already in an existing <stem>.json are kept, so it can be edited by
   hand and the tool run again. --force starts from scratch.
@@ -45,7 +46,7 @@ import make_catalog as mc  # noqa: E402
 DEFAULT_STORE = "https://nonasuomy.github.io/papp-conversions/"
 # What describes the app rather than one build of it: the store build's source
 # commit, changelog and version are left out, since this .papp may differ.
-COPIED_FIELDS = ("title", "description", "author", "category", "license", "about", "controls", "upstream")
+COPIED_FIELDS = ("title", "description", "author", "category", "license", "about", "controls", "upstream", "canvas")
 MAX_ICON_BYTES = 64 * 1024
 MAX_ICON_SIDE = 256
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"

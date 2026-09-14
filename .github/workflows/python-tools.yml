@@ -3,9 +3,9 @@ name: Python tools
 on:
   push:
     branches: [main]
-    paths: ["tools/esp_bridge/**", "tools/device_bridge/**", "tools/build_papp.py", "tools/make_catalog.py", "apps/**", "esphome/components/papp_loader/papp_data.h", "tests/**", ".github/workflows/python-tools.yml"]
+    paths: ["tools/esp_bridge/**", "tools/device_bridge/**", "tools/build_papp.py", "tools/make_catalog.py", "apps/**", "esphome/components/papp_loader/papp_data.h", "esphome/components/papp_loader/papp_canvas.h", "tools/make_listing.py", "tests/**", ".github/workflows/python-tools.yml"]
   pull_request:
-    paths: ["tools/esp_bridge/**", "tools/device_bridge/**", "tools/build_papp.py", "tools/make_catalog.py", "apps/**", "esphome/components/papp_loader/papp_data.h", "tests/**", ".github/workflows/python-tools.yml"]
+    paths: ["tools/esp_bridge/**", "tools/device_bridge/**", "tools/build_papp.py", "tools/make_catalog.py", "apps/**", "esphome/components/papp_loader/papp_data.h", "esphome/components/papp_loader/papp_canvas.h", "tools/make_listing.py", "tests/**", ".github/workflows/python-tools.yml"]
   workflow_dispatch:
 
 permissions:
@@ -26,6 +26,12 @@ jobs:
         run: |
           g++ -std=gnu++17 -Wall -Wextra -Werror -O2 -I esphome/components/papp_loader tests/cpp/test_papp_data.cpp -o "$RUNNER_TEMP/test_papp_data"
           "$RUNNER_TEMP/test_papp_data"
+
+      # Canvas geometry (where an app's canvas and the close control go, sizes, per-app keys).
+      - name: papp_canvas.h host tests
+        run: |
+          g++ -std=gnu++17 -Wall -Wextra -Werror -O2 -I esphome/components/papp_loader tests/cpp/test_papp_canvas.cpp -o "$RUNNER_TEMP/test_papp_canvas"
+          "$RUNNER_TEMP/test_papp_canvas"
 
       # Download every pinned app data file and check its size and sha256, so a
       # bad pin fails here instead of in Publish store on main.

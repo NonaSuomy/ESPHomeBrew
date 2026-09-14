@@ -61,14 +61,11 @@ namespace esphome {
 namespace papp_loader {
 
 static const char *const TAG = "papp_loader";
-static constexpr int VIRTUAL_WIDTH = 800;
-static constexpr int VIRTUAL_HEIGHT = 480;
+// The canvas (the app's framebuffer, centred on the panel) is runtime state:
+// see papp_canvas.h and geometry_. Apps start at canvas::LEGACY_WIDTH x
+// LEGACY_HEIGHT (800x480) and may switch with display_set_canvas.
 static constexpr int EMU_WIDTH = 320;
 static constexpr int EMU_HEIGHT = 240;
-static constexpr int LCD_WIDTH = 1024;
-static constexpr int LCD_HEIGHT = 600;
-static constexpr int LCD_X_OFFSET = (LCD_WIDTH - VIRTUAL_WIDTH) / 2;
-static constexpr int LCD_Y_OFFSET = (LCD_HEIGHT - VIRTUAL_HEIGHT) / 2;
 static constexpr size_t MMU_PAGE_SIZE = 0x10000;
 static constexpr size_t MAX_NETWORK_PAPP_SIZE = 16 * 1024 * 1024;
 static constexpr size_t HTTP_READ_BUFFER_SIZE = 16 * 1024;
@@ -127,16 +124,12 @@ static bool send_screen_stream_bytes(int socket_fd, const void *data, size_t len
   return true;
 }
 
-// The PAPP canvas occupies the centered 800x480 area. Put the shared close
-// control in the unused right-hand margin so it cannot cover gameplay. The
-// panel's raw draw path is hardware-flipped, so the raw destination is the
-// 180-degree counterpart of the desired physical screen position.
-static constexpr int CLOSE_BUTTON_SCREEN_X = LCD_X_OFFSET + VIRTUAL_WIDTH + 12;
-static constexpr int CLOSE_BUTTON_SCREEN_Y = LCD_Y_OFFSET + 10;
-static constexpr int CLOSE_BUTTON_SIZE = 58;
-static constexpr int CLOSE_BUTTON_HIT_PADDING = 10;
-static constexpr int CLOSE_BUTTON_RAW_X = LCD_WIDTH - CLOSE_BUTTON_SCREEN_X - CLOSE_BUTTON_SIZE;
-static constexpr int CLOSE_BUTTON_RAW_Y = LCD_HEIGHT - CLOSE_BUTTON_SCREEN_Y - CLOSE_BUTTON_SIZE;
+// The shared close control. With the 800x480 canvas it sits in the unused
+// right-hand margin so it cannot cover gameplay; a canvas too wide for that
+// gets it over its top-right corner (canvas::Geometry). The panel's raw draw
+// path is hardware-flipped, so the raw destination is the 180-degree
+// counterpart of the desired physical screen position.
+static constexpr int CLOSE_BUTTON_SIZE = canvas::CLOSE_SIZE;
 alignas(64) static uint16_t close_overlay_buffer[CLOSE_BUTTON_SIZE * CLOSE_BUTTON_SIZE] = {};
 
 // A PAPP may request a large game stack.  Those stacks must live in PSRAM and
@@ -260,15 +253,50 @@ void PappLoader::setup() {
     return;
   }
 
-  this->framebuffer_ = static_cast<uint16_t *>(heap_caps_aligned_calloc(
-      64, 1, VIRTUAL_WIDTH * VIRTUAL_HEIGHT * sizeof(uint16_t),
-      MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
-  this->rotated_framebuffer_ = static_cast<uint16_t *>(heap_caps_aligned_calloc(
-      64, 1, VIRTUAL_WIDTH * VIRTUAL_HEIGHT * sizeof(uint16_t),
-      MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
-  this->ppa_framebuffer_ = static_cast<uint16_t *>(heap_caps_aligned_calloc(
-      64, 1, VIRTUAL_WIDTH * VIRTUAL_HEIGHT * sizeof(uint16_t),
-      MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
+  // The panel: the YAML size, else the display's own. A display that reports
+  // less than the 800x480 canvas (or no size at all) is taken to be the
+  // 1024x600 panel this loader was written for.
+  const bool panel_configured = this->panel_config_w_ > 0 && this->panel_config_h_ > 0;
+  int panel_w = panel_configured ? this->panel_config_w_ : this->display_->get_native_width();
+  int panel_h = panel_configured ? this->panel_config_h_ : this->display_->get_native_height();
+  const bool panel_known = panel_w >= canvas::LEGACY_WIDTH && panel_h >= canvas::LEGACY_HEIGHT;
+  if (!panel_known) {
+    ESP_LOGW(TAG, "Display reports %dx%d, less than the %dx%d canvas; assuming a %dx%d panel", panel_w, panel_h,
+             canvas::LEGACY_WIDTH, canvas::LEGACY_HEIGHT, canvas::FALLBACK_PANEL_WIDTH, canvas::FALLBACK_PANEL_HEIGHT);
+    panel_w = canvas::FALLBACK_PANEL_WIDTH;
+    panel_h = canvas::FALLBACK_PANEL_HEIGHT;
+  }
+  panel_w = std::min(panel_w, canvas::MAX_SIDE);
+  panel_h = std::min(panel_h, canvas::MAX_SIDE);
+  this->geometry_.panel_w = panel_w;
+  this->geometry_.panel_h = panel_h;
+  this->geometry_.canvas_w = canvas::LEGACY_WIDTH;
+  this->geometry_.canvas_h = canvas::LEGACY_HEIGHT;
+
+  // Frame buffers for the largest canvas, the whole panel (canvas sizes are
+  // even), allocated once. Short of PSRAM, every app stays at 800x480.
+  if (!this->allocate_frame_buffers_(panel_w - panel_w % 2, panel_h - panel_h % 2) &&
+      (panel_w - panel_w % 2 != canvas::LEGACY_WIDTH || panel_h - panel_h % 2 != canvas::LEGACY_HEIGHT)) {
+    ESP_LOGW(TAG, "No PSRAM for %dx%d frame buffers; apps are limited to %dx%d", panel_w, panel_h,
+             canvas::LEGACY_WIDTH, canvas::LEGACY_HEIGHT);
+    this->allocate_frame_buffers_(canvas::LEGACY_WIDTH, canvas::LEGACY_HEIGHT);
+  }
+  // The canvas offered to apps that ask (display_get_size): the YAML one, else
+  // the whole panel, or 800x480 when the panel's size is not known.
+  int offer_w = this->default_canvas_w_, offer_h = this->default_canvas_h_;
+  if (offer_w <= 0 || offer_h <= 0) {
+    offer_w = panel_known || panel_configured ? this->max_canvas_w_ : canvas::LEGACY_WIDTH;
+    offer_h = panel_known || panel_configured ? this->max_canvas_h_ : canvas::LEGACY_HEIGHT;
+  }
+  if (!canvas::size_ok(offer_w, offer_h, this->max_canvas_w_, this->max_canvas_h_)) {
+    ESP_LOGW(TAG, "Default canvas %dx%d does not fit (even sizes from %dx%d to %dx%d); using %dx%d", offer_w, offer_h,
+             canvas::MIN_WIDTH, canvas::MIN_HEIGHT, this->max_canvas_w_, this->max_canvas_h_, this->max_canvas_w_,
+             this->max_canvas_h_);
+    offer_w = this->max_canvas_w_;
+    offer_h = this->max_canvas_h_;
+  }
+  this->default_canvas_w_ = offer_w;
+  this->default_canvas_h_ = offer_h;
   this->emu_buffer_ = static_cast<uint16_t *>(heap_caps_aligned_calloc(
       64, 1, EMU_WIDTH * EMU_HEIGHT * sizeof(uint16_t),
       MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
@@ -391,8 +419,9 @@ void PappLoader::setup() {
   ESP_LOGCONFIG(TAG, "  Path: %s", this->path_.c_str());
   const std::string mapped = runtime_path(this->path_.c_str());
   ESP_LOGCONFIG(TAG, "  SD path: %s", mapped.c_str());
-  ESP_LOGCONFIG(TAG, "  Display: %dx%d virtual, centered on %dx%d LCD", VIRTUAL_WIDTH, VIRTUAL_HEIGHT,
-                LCD_WIDTH, LCD_HEIGHT);
+  ESP_LOGCONFIG(TAG, "  Display: %dx%d panel; apps draw %dx%d unless they pick a canvas (up to %dx%d, offered %dx%d)",
+                this->geometry_.panel_w, this->geometry_.panel_h, canvas::LEGACY_WIDTH, canvas::LEGACY_HEIGHT,
+                this->max_canvas_w_, this->max_canvas_h_, this->default_canvas_w_, this->default_canvas_h_);
 #ifdef PAPP_LOADER_USE_USB_HIDX
   const char *usb_status = this->usb_hidx_ ? "configured" : "disabled";
 #else
@@ -414,6 +443,117 @@ void PappLoader::setup() {
     // normal ESPHome loop owns USB before the PAPP worker starts.
     this->set_timeout("papp_autostart", 5000, [this]() { this->launch_pending_ = true; });
   }
+}
+
+// ── Canvas size ──────────────────────────────────────────────────────────────
+
+void PappLoader::free_frame_buffers_() {
+  heap_caps_free(this->framebuffer_);
+  heap_caps_free(this->rotated_framebuffer_);
+  heap_caps_free(this->ppa_framebuffer_);
+  this->framebuffer_ = nullptr;
+  this->rotated_framebuffer_ = nullptr;
+  this->ppa_framebuffer_ = nullptr;
+  this->frame_alloc_bytes_ = 0;
+}
+
+// The three canvas buffers, each big enough for a width x height canvas and
+// whole cache lines (PPA output and cache syncs work in those).
+bool PappLoader::allocate_frame_buffers_(int width, int height) {
+  this->free_frame_buffers_();
+  const size_t bytes = canvas::align_bytes(canvas::frame_bytes(width, height));
+  auto allocate = [bytes]() {
+    return static_cast<uint16_t *>(
+        heap_caps_aligned_calloc(canvas::CACHE_LINE, 1, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
+  };
+  this->framebuffer_ = allocate();
+  this->rotated_framebuffer_ = allocate();
+  this->ppa_framebuffer_ = allocate();
+  if (this->framebuffer_ == nullptr || this->rotated_framebuffer_ == nullptr || this->ppa_framebuffer_ == nullptr) {
+    this->free_frame_buffers_();
+    return false;
+  }
+  this->frame_alloc_bytes_ = bytes;
+  this->max_canvas_w_ = width;
+  this->max_canvas_h_ = height;
+  return true;
+}
+
+void PappLoader::apply_canvas_(int width, int height, bool blank_panel) {
+  this->geometry_.canvas_w = width;
+  this->geometry_.canvas_h = height;
+  // Nothing of the old canvas may show through: its rows have another stride.
+  std::memset(this->framebuffer_, 0, this->frame_alloc_bytes_);
+  std::memset(this->rotated_framebuffer_, 0, this->frame_alloc_bytes_);
+  // Written back now so no dirty line can later land on PPA output, and
+  // dropped from the cache so reads see what the PPA writes.
+  esp_cache_msync(this->rotated_framebuffer_, this->frame_alloc_bytes_,
+                  ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+  this->direct_frame_[2] = 0;  // the direct path clears its border again
+  this->last_frame_direct_ = false;
+  if (blank_panel && this->display_ != nullptr) {
+    // The old canvas, its border and the close control may be anywhere: clear
+    // the whole panel, in bands of the (now black) rotated buffer.
+    const int panel_w = this->geometry_.panel_w, panel_h = this->geometry_.panel_h;
+    const int rows = std::max(1, static_cast<int>(this->frame_alloc_bytes_ / sizeof(uint16_t) / panel_w));
+    for (int y = 0; y < panel_h; y += rows) {
+      this->display_->draw_pixels_at(0, y, panel_w, std::min(rows, panel_h - y),
+                                     reinterpret_cast<const uint8_t *>(this->rotated_framebuffer_),
+                                     display::COLOR_ORDER_RGB, display::COLOR_BITNESS_565, false);
+    }
+  }
+}
+
+// Called by the app (display_set_canvas), normally from its drawing task.
+int PappLoader::set_canvas_(int width, int height) {
+  if (this->framebuffer_ == nullptr || !canvas::size_ok(width, height, this->max_canvas_w_, this->max_canvas_h_)) {
+    ESP_LOGW(TAG, "PAPP canvas %dx%d refused: even sizes from %dx%d to %dx%d", width, height, canvas::MIN_WIDTH,
+             canvas::MIN_HEIGHT, this->max_canvas_w_, this->max_canvas_h_);
+    return -1;
+  }
+  if (this->display_mutex_ != nullptr)
+    xSemaphoreTakeRecursive(this->display_mutex_, portMAX_DELAY);
+  const bool change = width != this->geometry_.canvas_w || height != this->geometry_.canvas_h;
+  if (change)
+    this->apply_canvas_(width, height, true);
+  this->canvas_chosen_ = true;
+  if (this->display_mutex_ != nullptr)
+    xSemaphoreGiveRecursive(this->display_mutex_);
+  if (change) {
+    const canvas::Geometry &g = this->geometry_;
+    ESP_LOGI(TAG, "PAPP canvas: %dx%d at (%d,%d) on the %dx%d panel, close control %s", width, height, g.x(), g.y(),
+             g.panel_w, g.panel_h, g.close_beside() ? "beside it" : "over its top-right corner");
+  }
+  return 0;
+}
+
+// Before an app starts (and after one ends): the 800x480 canvas again, with
+// no app loop running. Waits only briefly for the display lock: an app task
+// that is gone may have died holding it.
+void PappLoader::restore_legacy_canvas_() {
+  this->canvas_chosen_ = false;
+  if (this->framebuffer_ == nullptr ||
+      (this->geometry_.canvas_w == canvas::LEGACY_WIDTH && this->geometry_.canvas_h == canvas::LEGACY_HEIGHT))
+    return;
+  const bool locked = this->display_mutex_ != nullptr &&
+                      xSemaphoreTakeRecursive(this->display_mutex_, pdMS_TO_TICKS(200)) == pdTRUE;
+  this->apply_canvas_(canvas::LEGACY_WIDTH, canvas::LEGACY_HEIGHT, true);
+  if (locked)
+    xSemaphoreGiveRecursive(this->display_mutex_);
+}
+
+void PappLoader::prepare_canvas_for_app_(const std::string &source) {
+  this->restore_legacy_canvas_();
+  const std::string app = canvas::app_key(source);
+  const std::string setting = this->get_app_canvas(app);
+  int w = 0, h = 0;
+  const bool from_setting = !setting.empty() && canvas::parse_size(setting, &w, &h) &&
+                            canvas::size_ok(w, h, this->max_canvas_w_, this->max_canvas_h_);
+  this->offered_canvas_w_ = from_setting ? w : this->default_canvas_w_;
+  this->offered_canvas_h_ = from_setting ? h : this->default_canvas_h_;
+  ESP_LOGI(TAG, "PAPP canvas for %s: %dx%d until the app picks one; it is offered %dx%d (%s)", app.c_str(),
+           canvas::LEGACY_WIDTH, canvas::LEGACY_HEIGHT, this->offered_canvas_w_, this->offered_canvas_h_,
+           from_setting ? "its Screen setting" : "device default");
 }
 
 // Runs on the LVGL thread (the main loop). Copies the snapshot into a plain
@@ -802,6 +942,7 @@ bool PappLoader::start_loaded_app_(psram_app_handle_t app, const std::string &so
 
   ESP_LOGI(TAG, "Starting PAPP in worker task: %s", source.c_str());
   this->begin_report_(source);
+  this->prepare_canvas_for_app_(source);
 
 #ifdef PAPP_LOADER_USE_LVGL
   // LVGL must not draw over the PAPP framebuffer. Pause it from the ESPHome
@@ -1355,8 +1496,12 @@ void PappLoader::finish_app_() {
   this->launcher_a_state_ = false;
   this->launcher_touch_state_ = false;
 #endif
+  // The next app starts at 800x480 again. An app that had another canvas is
+  // blanked from the whole panel here, so none of it shows around the next
+  // one (or under a launcher without LVGL).
+  this->restore_legacy_canvas_();
   // LVGL invalidation below redraws the launcher immediately. Avoid an extra
-  // full 800x480 PAPP flush here; that transfer can leave the last game frame
+  // full PAPP flush here; that transfer can leave the last game frame
   // visible while the close path waits for a second display transaction.
   this->restore_lvgl_();
   this->send_report_(closed_by_user ? "closed" : "exited", result, this->report_source_);
@@ -1364,7 +1509,7 @@ void PappLoader::finish_app_() {
 
 void PappLoader::clear_(uint16_t color) {
   if (this->framebuffer_ != nullptr)
-    std::fill_n(this->framebuffer_, VIRTUAL_WIDTH * VIRTUAL_HEIGHT, color);
+    std::fill_n(this->framebuffer_, static_cast<size_t>(this->geometry_.canvas_w) * this->geometry_.canvas_h, color);
 }
 
 void PappLoader::draw_close_overlay_() {
@@ -1405,7 +1550,7 @@ void PappLoader::draw_close_overlay_() {
   }
 
   this->display_->draw_pixels_at(
-      CLOSE_BUTTON_RAW_X, CLOSE_BUTTON_RAW_Y, CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE,
+      this->geometry_.close_raw_x(), this->geometry_.close_raw_y(), CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE,
       reinterpret_cast<const uint8_t *>(close_overlay_buffer), display::COLOR_ORDER_RGB,
       display::COLOR_BITNESS_565, false);
 }
@@ -1416,7 +1561,7 @@ void PappLoader::clear_close_overlay_() {
 
   std::fill_n(close_overlay_buffer, CLOSE_BUTTON_SIZE * CLOSE_BUTTON_SIZE, 0x0000);
   this->display_->draw_pixels_at(
-      CLOSE_BUTTON_RAW_X, CLOSE_BUTTON_RAW_Y, CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE,
+      this->geometry_.close_raw_x(), this->geometry_.close_raw_y(), CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE,
       reinterpret_cast<const uint8_t *>(close_overlay_buffer), display::COLOR_ORDER_RGB,
       display::COLOR_BITNESS_565, false);
 }
@@ -1426,18 +1571,37 @@ void PappLoader::poll_close_button_() {
     return;
 
   auto touch = this->touchscreen_->get_touch();
-  if (!touch.has_value() || (touch->state & touchscreen::STATE_RELEASING) != 0)
-    return;
-
-  const int close_left = CLOSE_BUTTON_SCREEN_X - CLOSE_BUTTON_HIT_PADDING;
-  const int close_top = CLOSE_BUTTON_SCREEN_Y - CLOSE_BUTTON_HIT_PADDING;
-  const int close_right = CLOSE_BUTTON_SCREEN_X + CLOSE_BUTTON_SIZE + CLOSE_BUTTON_HIT_PADDING;
-  const int close_bottom = CLOSE_BUTTON_SCREEN_Y + CLOSE_BUTTON_SIZE + CLOSE_BUTTON_HIT_PADDING;
-  if (touch->x >= close_left && touch->x < close_right && touch->y >= close_top && touch->y < close_bottom) {
-    this->begin_close_();
-    ESP_LOGI(TAG, "PAPP on-screen close requested");
+  if (!touch.has_value() || (touch->state & touchscreen::STATE_RELEASING) != 0) {
+    this->close_hold_since_us_ = 0;
     return;
   }
+  this->close_touch_(touch->x, touch->y);
+}
+
+// A touch on the close control; true when it asked the app to close. Beside
+// the canvas the control is drawn and a touch closes at once. A canvas too
+// wide for that margin (a full-panel one) has app controls in that corner
+// (Tulip's power and shuffle buttons), so the control is not drawn there:
+// taps reach the app and only a touch held CLOSE_HOLD_US closes.
+bool PappLoader::close_touch_(int x, int y) {
+  static constexpr int64_t CLOSE_HOLD_US = 2000000;
+  const canvas::Geometry geometry = this->geometry_;
+  if (!geometry.in_close(x, y)) {
+    this->close_hold_since_us_ = 0;
+    return false;
+  }
+  if (!geometry.close_beside()) {
+    const int64_t now = esp_timer_get_time();
+    if (this->close_hold_since_us_ == 0)
+      this->close_hold_since_us_ = now;
+    if (now - this->close_hold_since_us_ < CLOSE_HOLD_US)
+      return false;
+  }
+  if (!this->global_close_requested_) {
+    this->begin_close_();
+    ESP_LOGI(TAG, "PAPP on-screen close requested");
+  }
+  return true;
 }
 
 void PappLoader::flush_framebuffer_() {
@@ -1452,18 +1616,23 @@ void PappLoader::flush_framebuffer_() {
   const uint16_t *display_buffer = this->rotated_framebuffer_;
   this->last_frame_direct_ = false;
   bool ppa_ok = false;
+  const int canvas_w = this->geometry_.canvas_w;
+  const int canvas_h = this->geometry_.canvas_h;
   if (this->ppa_srm_client_ != nullptr && this->ppa_framebuffer_ != nullptr) {
-    const size_t frame_bytes = VIRTUAL_WIDTH * VIRTUAL_HEIGHT * sizeof(uint16_t);
+    // Whole cache lines: 768,000 bytes for 800x480, as before.
+    const size_t frame_bytes =
+        canvas::sync_bytes(canvas::frame_bytes(canvas_w, canvas_h), this->frame_alloc_bytes_);
     esp_cache_msync(this->framebuffer_, frame_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     ppa_srm_oper_config_t cfg = {
         .in = {
-            .buffer = this->framebuffer_, .pic_w = VIRTUAL_WIDTH, .pic_h = VIRTUAL_HEIGHT,
-            .block_w = VIRTUAL_WIDTH, .block_h = VIRTUAL_HEIGHT,
+            .buffer = this->framebuffer_,
+            .pic_w = static_cast<uint32_t>(canvas_w), .pic_h = static_cast<uint32_t>(canvas_h),
+            .block_w = static_cast<uint32_t>(canvas_w), .block_h = static_cast<uint32_t>(canvas_h),
             .block_offset_x = 0, .block_offset_y = 0, .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
         },
         .out = {
             .buffer = this->ppa_framebuffer_, .buffer_size = frame_bytes,
-            .pic_w = VIRTUAL_WIDTH, .pic_h = VIRTUAL_HEIGHT,
+            .pic_w = static_cast<uint32_t>(canvas_w), .pic_h = static_cast<uint32_t>(canvas_h),
             .block_offset_x = 0, .block_offset_y = 0, .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
         },
         .rotation_angle = PPA_SRM_ROTATION_ANGLE_180,
@@ -1480,11 +1649,11 @@ void PappLoader::flush_framebuffer_() {
   }
   if (!ppa_ok) {
     // Fallback for boards/IDF builds without a working PPA SRM client.
-    for (int y = 0; y < VIRTUAL_HEIGHT; y++) {
-      const uint16_t *src = this->framebuffer_ + y * VIRTUAL_WIDTH;
-      uint16_t *dst = this->rotated_framebuffer_ + (VIRTUAL_HEIGHT - 1 - y) * VIRTUAL_WIDTH;
-      for (int x = 0; x < VIRTUAL_WIDTH; x++)
-        dst[VIRTUAL_WIDTH - 1 - x] = src[x];
+    for (int y = 0; y < canvas_h; y++) {
+      const uint16_t *src = this->framebuffer_ + static_cast<size_t>(y) * canvas_w;
+      uint16_t *dst = this->rotated_framebuffer_ + static_cast<size_t>(canvas_h - 1 - y) * canvas_w;
+      for (int x = 0; x < canvas_w; x++)
+        dst[canvas_w - 1 - x] = src[x];
     }
     this->direct_frame_[2] = 0;  // the direct path must clear its border again
   }
@@ -1498,15 +1667,17 @@ void PappLoader::send_display_buffer_(const uint16_t *display_buffer, int64_t fl
   // One motion sample per second is enough for remote diagnosis and keeps the
   // raw video traffic small enough that it cannot starve the audio stream.
   static int64_t last_stream_frame_us = 0;
+  const canvas::Geometry geometry = this->geometry_;
   if (this->stream_client_connected_ && this->stream_mutex_ != nullptr && display_buffer != nullptr &&
       flush_start_us - last_stream_frame_us >= 1000000) {
     if (xSemaphoreTake(this->stream_mutex_, 0) == pdTRUE) {
-      constexpr uint16_t x_step = VIRTUAL_WIDTH / SCREEN_STREAM_WIDTH;
-      constexpr uint16_t y_step = VIRTUAL_HEIGHT / SCREEN_STREAM_HEIGHT;
-      for (uint16_t y = 0; y < SCREEN_STREAM_HEIGHT; y++) {
-        const uint16_t *source = display_buffer + (y * y_step) * VIRTUAL_WIDTH;
+      // A 100x60 sample of the canvas (every 8th pixel for 800x480).
+      const int x_step = geometry.canvas_w / SCREEN_STREAM_WIDTH;
+      const int y_step = geometry.canvas_h / SCREEN_STREAM_HEIGHT;
+      for (int y = 0; y < SCREEN_STREAM_HEIGHT; y++) {
+        const uint16_t *source = display_buffer + static_cast<size_t>(y * y_step) * geometry.canvas_w;
         uint16_t *target = this->stream_framebuffer_ + y * SCREEN_STREAM_WIDTH;
-        for (uint16_t x = 0; x < SCREEN_STREAM_WIDTH; x++)
+        for (int x = 0; x < SCREEN_STREAM_WIDTH; x++)
           target[x] = source[x * x_step];
       }
       this->stream_frame_sequence_++;
@@ -1515,14 +1686,20 @@ void PappLoader::send_display_buffer_(const uint16_t *display_buffer, int64_t fl
       xSemaphoreGive(this->stream_mutex_);
     }
   }
+  // The frame is turned 180 degrees, so it goes to the canvas's mirrored
+  // corner: (112, 60) for 800x480 on 1024x600, (0, 0) for a full-panel canvas.
   this->display_->draw_pixels_at(
-      LCD_X_OFFSET, LCD_Y_OFFSET, VIRTUAL_WIDTH, VIRTUAL_HEIGHT,
+      geometry.raw_x(), geometry.raw_y(), geometry.canvas_w, geometry.canvas_h,
       reinterpret_cast<const uint8_t *>(display_buffer), display::COLOR_ORDER_RGB,
       display::COLOR_BITNESS_565, false);
-  if (this->launched_)
-    this->draw_close_overlay_();
-  else
-    this->clear_close_overlay_();
+  // Over the canvas (close_touch_) the control is neither drawn nor cleared:
+  // either would cover the app's own corner.
+  if (geometry.close_beside()) {
+    if (this->launched_)
+      this->draw_close_overlay_();
+    else
+      this->clear_close_overlay_();
+  }
 
   const int64_t flush_us = esp_timer_get_time() - flush_start_us;
   static uint32_t flush_frames = 0;
@@ -1574,8 +1751,9 @@ void PappLoader::screen_stream_task_() {
     const int client_fd = accept(server_fd, reinterpret_cast<sockaddr *>(&peer), &peer_length);
     if (client_fd < 0)
       continue;
-    // A full 800x480 RGB565 frame is 768 KB. Allow slower hosts and TCP
-    // back-pressure to drain it without truncating the diagnostic frame.
+    // A full 800x480 RGB565 frame is 768 KB (a 1024x600 canvas 1.2 MB). Allow
+    // slower hosts and TCP back-pressure to drain it without truncating the
+    // diagnostic frame.
     timeval send_timeout{5, 0};
     setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
     this->stream_client_connected_ = true;
@@ -1647,37 +1825,44 @@ void PappLoader::screen_stream_task_() {
   }
 }
 
-// Sends one PAPPSS01 packet: the app's own 800x480 canvas (logical
-// orientation, the same RGB565 layout as the PAPPFB01 thumbnails), or an empty
-// 0x0 packet when no app is running. The copy lives in PSRAM only while it is
-// sent.
+// Sends one PAPPSS01 packet: the app's own canvas (800x480 unless it chose
+// another size; logical orientation, the same RGB565 layout as the PAPPFB01
+// thumbnails), the menu, or an empty 0x0 packet. The copy lives in PSRAM only
+// while it is sent.
 bool PappLoader::send_screenshot_(int client_fd) {
   static uint32_t screenshot_sequence = 0;
-  constexpr size_t frame_bytes = VIRTUAL_WIDTH * VIRTUAL_HEIGHT * sizeof(uint16_t);
   uint16_t *copy = nullptr;
-  if (this->launched_ && !this->papp_loading_ && this->framebuffer_ != nullptr)
-    copy = static_cast<uint16_t *>(heap_caps_malloc(frame_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (copy != nullptr) {
-    // The app draws without this lock; holding it only keeps a flush (and its
-    // rotation into the panel buffer) from running during the copy.
+  uint16_t width = 0;
+  uint16_t height = 0;
+  size_t bytes = 0;
+  if (this->launched_ && !this->papp_loading_ && this->framebuffer_ != nullptr) {
+    // The app draws without this lock; holding it keeps a flush (and its
+    // rotation into the panel buffer) or a canvas switch from running during
+    // the copy.
     const bool locked = this->display_mutex_ != nullptr &&
                         xSemaphoreTakeRecursive(this->display_mutex_, pdMS_TO_TICKS(200)) == pdTRUE;
-    if (this->last_frame_direct_) {
-      // The frame went straight to the panel buffer, turned 180 degrees:
-      // reading it backwards turns it upright again.
-      const uint16_t *source = this->rotated_framebuffer_;
-      const size_t pixels = static_cast<size_t>(VIRTUAL_WIDTH) * VIRTUAL_HEIGHT;
-      for (size_t i = 0; i < pixels; i++)
-        copy[i] = source[pixels - 1 - i];
-    } else {
-      std::memcpy(copy, this->framebuffer_, frame_bytes);
+    const int canvas_w = this->geometry_.canvas_w;
+    const int canvas_h = this->geometry_.canvas_h;
+    const size_t frame_bytes = canvas::frame_bytes(canvas_w, canvas_h);
+    copy = static_cast<uint16_t *>(heap_caps_malloc(frame_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (copy != nullptr) {
+      if (this->last_frame_direct_) {
+        // The frame went straight to the panel buffer, turned 180 degrees:
+        // reading it backwards turns it upright again.
+        const uint16_t *source = this->rotated_framebuffer_;
+        const size_t pixels = static_cast<size_t>(canvas_w) * canvas_h;
+        for (size_t i = 0; i < pixels; i++)
+          copy[i] = source[pixels - 1 - i];
+      } else {
+        std::memcpy(copy, this->framebuffer_, frame_bytes);
+      }
+      width = static_cast<uint16_t>(canvas_w);
+      height = static_cast<uint16_t>(canvas_h);
+      bytes = frame_bytes;
     }
     if (locked)
       xSemaphoreGiveRecursive(this->display_mutex_);
   }
-  uint16_t width = copy != nullptr ? VIRTUAL_WIDTH : 0;
-  uint16_t height = copy != nullptr ? VIRTUAL_HEIGHT : 0;
-  size_t bytes = copy != nullptr ? frame_bytes : 0;
 #if defined(PAPP_LOADER_USE_LVGL) && defined(LV_USE_SNAPSHOT) && LV_USE_SNAPSHOT
   if (copy == nullptr && !this->launched_) {
     // No app: the main loop snapshots the menu; wait for it briefly. A shot
@@ -1936,23 +2121,32 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
 
   const int64_t render_start_us = esp_timer_get_time();
 
-  int out_w = std::max(1, static_cast<int>(in_w * scale + 0.5f));
-  int out_h = std::max(1, static_cast<int>(in_h * scale + 0.5f));
-  out_w = std::min(out_w, VIRTUAL_WIDTH);
-  out_h = std::min(out_h, VIRTUAL_HEIGHT);
-  const int x0 = (VIRTUAL_WIDTH - out_w) / 2;
-  const int y0 = (VIRTUAL_HEIGHT - out_h) / 2;
+  // The frame scaled, at most the canvas, centred in it. Recomputed under the
+  // display lock by the direct path, so a canvas switch never mixes sizes.
+  int canvas_w = 0, canvas_h = 0, out_w = 0, out_h = 0, x0 = 0, y0 = 0;
+  auto fit = [&]() {
+    canvas_w = this->geometry_.canvas_w;
+    canvas_h = this->geometry_.canvas_h;
+    out_w = std::min(std::max(1, static_cast<int>(in_w * scale + 0.5f)), canvas_w);
+    out_h = std::min(std::max(1, static_cast<int>(in_h * scale + 0.5f)), canvas_h);
+    x0 = (canvas_w - out_w) / 2;
+    y0 = (canvas_h - out_h) / 2;
+  };
 
   // Fast path: one PPA pass scales the frame, turns it 180 degrees for the
-  // panel and writes it centred into rotated_framebuffer_, which goes straight
-  // to the display. Its black border is only cleared when the frame's place
-  // changes. This replaces scaling into a scratch buffer, clearing and copying
-  // into the canvas, then a second PPA pass to rotate the whole canvas (about
-  // 3 MB of memory traffic per frame at 320x240 x2).
+  // panel and writes it centred into rotated_framebuffer_ (canvas-sized),
+  // which goes straight to the display. Its black border is only cleared when
+  // the frame's place changes; a frame that fills the canvas has none. This
+  // replaces scaling into a scratch buffer, clearing and copying into the
+  // canvas, then a second PPA pass to rotate the whole canvas (about 3 MB of
+  // memory traffic per frame at 320x240 x2).
   if (!byte_swap && this->ppa_srm_client_ != nullptr && this->rotated_framebuffer_ != nullptr) {
     if (this->display_mutex_ != nullptr)
       xSemaphoreTakeRecursive(this->display_mutex_, portMAX_DELAY);
-    const size_t frame_bytes = static_cast<size_t>(VIRTUAL_WIDTH) * VIRTUAL_HEIGHT * sizeof(uint16_t);
+    fit();
+    // Whole cache lines (768,000 bytes for 800x480, as before).
+    const size_t frame_bytes =
+        canvas::sync_bytes(canvas::frame_bytes(canvas_w, canvas_h), this->frame_alloc_bytes_);
     const uint16_t place[4] = {static_cast<uint16_t>(x0), static_cast<uint16_t>(y0), static_cast<uint16_t>(out_w),
                                static_cast<uint16_t>(out_h)};
     if (std::memcmp(place, this->direct_frame_, sizeof(place)) != 0) {
@@ -1973,10 +2167,10 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
         },
         .out = {
             .buffer = this->rotated_framebuffer_, .buffer_size = frame_bytes,
-            .pic_w = VIRTUAL_WIDTH, .pic_h = VIRTUAL_HEIGHT,
+            .pic_w = static_cast<uint32_t>(canvas_w), .pic_h = static_cast<uint32_t>(canvas_h),
             // Turned 180 degrees, the block lands mirrored in the frame.
-            .block_offset_x = static_cast<uint32_t>(VIRTUAL_WIDTH - x0 - out_w),
-            .block_offset_y = static_cast<uint32_t>(VIRTUAL_HEIGHT - y0 - out_h),
+            .block_offset_x = static_cast<uint32_t>(canvas_w - x0 - out_w),
+            .block_offset_y = static_cast<uint32_t>(canvas_h - y0 - out_h),
             .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
         },
         .rotation_angle = PPA_SRM_ROTATION_ANGLE_180,
@@ -2005,15 +2199,17 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
     }
   }
 
+  fit();
   bool ppa_scaled = false;
   // The common PAPP path is an exact 2x 400x240 -> 800x480 frame. Let the
   // P4 SRM unit do that copy/scale instead of touching 384,000 pixels on the
   // worker CPU. The old scaler remains below for arbitrary emulator sizes,
   // fractional scales, and byte-swapped input.
   if (!byte_swap && this->ppa_srm_client_ != nullptr && this->ppa_framebuffer_ != nullptr &&
-      out_w == VIRTUAL_WIDTH && out_h == VIRTUAL_HEIGHT && x0 == 0 && y0 == 0) {
+      out_w == canvas_w && out_h == canvas_h && x0 == 0 && y0 == 0) {
     const size_t input_bytes = static_cast<size_t>(in_w) * in_h * sizeof(uint16_t);
-    const size_t output_bytes = static_cast<size_t>(VIRTUAL_WIDTH) * VIRTUAL_HEIGHT * sizeof(uint16_t);
+    const size_t output_bytes =
+        canvas::sync_bytes(canvas::frame_bytes(canvas_w, canvas_h), this->frame_alloc_bytes_);
     esp_cache_msync(const_cast<uint16_t *>(buffer), input_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     ppa_srm_oper_config_t cfg = {
         .in = {
@@ -2023,7 +2219,7 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
         },
         .out = {
             .buffer = this->framebuffer_, .buffer_size = output_bytes,
-            .pic_w = VIRTUAL_WIDTH, .pic_h = VIRTUAL_HEIGHT,
+            .pic_w = static_cast<uint32_t>(canvas_w), .pic_h = static_cast<uint32_t>(canvas_h),
             .block_offset_x = 0, .block_offset_y = 0, .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
         },
         .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
@@ -2045,7 +2241,7 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
   // This avoids the much more expensive nearest-neighbour loop over the
   // entire scaled image while preserving the existing canvas contract.
   if (!ppa_scaled && !byte_swap && this->ppa_srm_client_ != nullptr && this->ppa_framebuffer_ != nullptr &&
-      out_w <= VIRTUAL_WIDTH && out_h <= VIRTUAL_HEIGHT) {
+      out_w <= canvas_w && out_h <= canvas_h) {
     const size_t input_bytes = static_cast<size_t>(in_w) * in_h * sizeof(uint16_t);
     const size_t output_bytes = static_cast<size_t>(out_w) * out_h * sizeof(uint16_t);
     esp_cache_msync(const_cast<uint16_t *>(buffer), input_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
@@ -2071,8 +2267,8 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
       esp_cache_msync(this->ppa_framebuffer_, output_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
       this->clear_(0x0000);
       for (int row = 0; row < out_h; row++) {
-        std::memcpy(this->framebuffer_ + (y0 + row) * VIRTUAL_WIDTH + x0,
-                    this->ppa_framebuffer_ + row * out_w,
+        std::memcpy(this->framebuffer_ + static_cast<size_t>(y0 + row) * canvas_w + x0,
+                    this->ppa_framebuffer_ + static_cast<size_t>(row) * out_w,
                     static_cast<size_t>(out_w) * sizeof(uint16_t));
       }
       ppa_scaled = true;
@@ -2088,7 +2284,7 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
         uint16_t pixel = buffer[src_y * in_w + src_x];
         if (byte_swap)
           pixel = static_cast<uint16_t>((pixel >> 8) | (pixel << 8));
-        this->framebuffer_[(y0 + y) * VIRTUAL_WIDTH + x0 + x] = pixel;
+        this->framebuffer_[static_cast<size_t>(y0 + y) * canvas_w + x0 + x] = pixel;
       }
     }
   }
@@ -2283,33 +2479,25 @@ int PappLoader::read_touch_(int *x, int *y) {
       ESP_LOGI(TAG, "PAPP touch RELEASED");
       this->touch_active_ = false;
     }
+    this->close_hold_since_us_ = 0;
     return 0;
   }
 
   const int physical_x = touch->x;
   const int physical_y = touch->y;
-  const int close_left = CLOSE_BUTTON_SCREEN_X - CLOSE_BUTTON_HIT_PADDING;
-  const int close_top = CLOSE_BUTTON_SCREEN_Y - CLOSE_BUTTON_HIT_PADDING;
-  const int close_right = CLOSE_BUTTON_SCREEN_X + CLOSE_BUTTON_SIZE + CLOSE_BUTTON_HIT_PADDING;
-  const int close_bottom = CLOSE_BUTTON_SCREEN_Y + CLOSE_BUTTON_SIZE + CLOSE_BUTTON_HIT_PADDING;
-  if (physical_x >= close_left && physical_x < close_right && physical_y >= close_top && physical_y < close_bottom) {
-    if (!this->global_close_requested_) {
-      this->begin_close_();
-      ESP_LOGI(TAG, "PAPP on-screen close requested");
-    }
+  const canvas::Geometry geometry = this->geometry_;
+  if (this->close_touch_(physical_x, physical_y)) {
     this->touch_active_ = true;
     return 0;
   }
 
-  if (physical_x < LCD_X_OFFSET || physical_x >= LCD_X_OFFSET + VIRTUAL_WIDTH ||
-      physical_y < LCD_Y_OFFSET || physical_y >= LCD_Y_OFFSET + VIRTUAL_HEIGHT) {
+  int canvas_x = 0;
+  int canvas_y = 0;
+  if (!geometry.to_canvas(physical_x, physical_y, &canvas_x, &canvas_y)) {
     if (!this->touch_active_)
       ESP_LOGD(TAG, "PAPP touch outside canvas: physical=(%d,%d)", physical_x, physical_y);
     return 0;
   }
-
-  const int canvas_x = physical_x - LCD_X_OFFSET;
-  const int canvas_y = physical_y - LCD_Y_OFFSET;
 
   // The touchscreen component already reports panel-oriented coordinates.
   // The PAPP framebuffer is rotated later during display flush, but applying
@@ -2435,7 +2623,24 @@ void PappLoader::svc_display_set_scale(float sx, float sy) {
 }
 void PappLoader::svc_display_write_frame_rgb565(const uint16_t *buffer) {
   if (active_ != nullptr && active_->framebuffer_ != nullptr && buffer != nullptr)
-    std::memcpy(active_->framebuffer_, buffer, VIRTUAL_WIDTH * VIRTUAL_HEIGHT * sizeof(uint16_t));
+    std::memcpy(active_->framebuffer_, buffer,
+                canvas::frame_bytes(active_->geometry_.canvas_w, active_->geometry_.canvas_h));
+}
+void PappLoader::svc_display_get_size(int *width, int *height) {
+  int w = canvas::LEGACY_WIDTH;
+  int h = canvas::LEGACY_HEIGHT;
+  if (active_ != nullptr) {
+    // The app's own choice once it made one, else what it is offered.
+    w = active_->canvas_chosen_ ? active_->geometry_.canvas_w : active_->offered_canvas_w_;
+    h = active_->canvas_chosen_ ? active_->geometry_.canvas_h : active_->offered_canvas_h_;
+  }
+  if (width != nullptr)
+    *width = w;
+  if (height != nullptr)
+    *height = h;
+}
+int PappLoader::svc_display_set_canvas(int width, int height) {
+  return active_ != nullptr ? active_->set_canvas_(width, height) : -1;
 }
 void PappLoader::svc_display_write_frame_custom(const uint16_t *buffer, uint16_t in_w, uint16_t in_h,
                                                 float scale, bool byte_swap) {
@@ -2445,14 +2650,16 @@ void PappLoader::svc_display_write_frame_custom(const uint16_t *buffer, uint16_t
 void PappLoader::svc_display_write_rect(int x, int y, int w, int h, const uint16_t *data) {
   if (active_ == nullptr || active_->framebuffer_ == nullptr || data == nullptr)
     return;
+  const int canvas_w = active_->geometry_.canvas_w;
+  const int canvas_h = active_->geometry_.canvas_h;
   for (int row = 0; row < h; row++) {
     const int dst_y = y + row;
-    if (dst_y < 0 || dst_y >= VIRTUAL_HEIGHT)
+    if (dst_y < 0 || dst_y >= canvas_h)
       continue;
     for (int col = 0; col < w; col++) {
       const int dst_x = x + col;
-      if (dst_x >= 0 && dst_x < VIRTUAL_WIDTH)
-        active_->framebuffer_[dst_y * VIRTUAL_WIDTH + dst_x] = data[row * w + col];
+      if (dst_x >= 0 && dst_x < canvas_w)
+        active_->framebuffer_[dst_y * canvas_w + dst_x] = data[row * w + col];
     }
   }
 }
@@ -3028,6 +3235,8 @@ void PappLoader::populate_services(app_services_t *services) {
   services->net_tcp_recv = &PappLoader::svc_net_tcp_recv;
   services->net_poll = &PappLoader::svc_net_poll;
   services->net_resolve = &PappLoader::svc_net_resolve;
+  services->display_get_size = &PappLoader::svc_display_get_size;
+  services->display_set_canvas = &PappLoader::svc_display_set_canvas;
 }
 
 esp_err_t psram_app_load(const char *path, psram_app_handle_t *out_handle) {
@@ -3977,11 +4186,16 @@ int psram_app_run(psram_app_handle_t handle) {
   esp_cache_msync(handle->exec_ptr, handle->code_alloc,
                   ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_INST);
 
-  app_services_t services{};
-  PappLoader::populate_services(&services);
+  // Zeroed room after the table: an app built against a newer psram_app.h
+  // reads NULL for services appended after this loader, not stack garbage.
+  struct {
+    app_services_t services;
+    void *appended_later[PAPP_SERVICES_SPARE_SLOTS];
+  } table{};
+  PappLoader::populate_services(&table.services);
   auto entry = reinterpret_cast<papp_entry_fn_t>(static_cast<uint8_t *>(handle->exec_ptr) + handle->header.entry_off);
   ESP_LOGI(TAG, "Calling PAPP entry point at %p", reinterpret_cast<void *>(entry));
-  const int result = entry(&services);
+  const int result = entry(&table.services);
 
   unmap_exec_alias(handle);
   return result;

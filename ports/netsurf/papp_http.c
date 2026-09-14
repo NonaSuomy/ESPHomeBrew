@@ -121,7 +121,7 @@ struct http_ctx {
     char message[200];  // error/progress text handed to NetSurf
     // for the device log
     unsigned id;
-    int64_t started;
+    int64_t t_start;
     int64_t dns_started;
     long long bytes;
 };
@@ -538,7 +538,7 @@ static void finish_with(struct http_ctx *c, fetch_msg_type type, const char *tex
     } else if (type == FETCH_AUTH) {
         msg.data.auth.realm = text;
     }
-    const int ms = (int)((papp_time_us() - c->started) / 1000);
+    const int ms = (int)((papp_time_us() - c->t_start) / 1000);
     switch (type) {
     case FETCH_FINISHED:
         flog(c, "done: %lld bytes in %d ms", c->bytes, ms);
@@ -922,7 +922,7 @@ static void header_line(struct http_ctx *c, char *line, size_t len)
         }
         c->http10 = strncmp(line, "HTTP/1.0", 8) == 0;
         c->conn_close = c->http10;  // HTTP/1.0 closes unless it says keep-alive
-        flog(c, "HTTP %ld (%d ms)", c->http_code, (int)((papp_time_us() - c->started) / 1000));
+        flog(c, "HTTP %ld (%d ms)", c->http_code, (int)((papp_time_us() - c->t_start) / 1000));
         fetch_set_http_code(c->fetch, (http_response_code)c->http_code);
         c->state = ST_HEADERS;
         return;
@@ -1399,7 +1399,7 @@ static void *http_setup(struct fetch *parent, nsurl *url, bool only_2xx, bool do
     }
     static unsigned next_id = 0;
     c->id = ++next_id;
-    c->started = papp_time_us();
+    c->t_start = papp_time_us();
     flog(c, "%s %s %s%s", c->post ? "POST" : "GET", c->https ? "https" : "http", c->host,
          c->proxy ? " (proxy)" : "");
     // Keep fetches in the order NetSurf started them.

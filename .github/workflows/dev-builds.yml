@@ -7,10 +7,12 @@ name: Dev builds
 #   https://github.com/<owner>/<repo>/releases/download/dev-builds/psram_redalert.papp
 # The ESP bridge serves those to the device over the LAN (the device cannot
 # verify github.com's TLS chain): @esp-bridge launch url=<that URL>
+# A branch builds only the apps it changes (tools/dev_build_apps.py), so it
+# cannot replace another branch's test build of an app it never touched.
 on:
   push:
     branches: ["claude/**", "nona/**"]
-    paths: ["apps/**", "ports/**", "tools/build_papp.py", ".github/workflows/dev-builds.yml"]
+    paths: ["apps/**", "ports/**", "tools/build_papp.py", "tools/dev_build_apps.py", ".github/workflows/dev-builds.yml"]
   workflow_dispatch:
 
 permissions:
@@ -28,6 +30,8 @@ jobs:
       apps: ${{ steps.build.outputs.apps }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # to compare with main
 
       - name: Cache upstream sources
         uses: actions/cache@v4
@@ -42,9 +46,13 @@ jobs:
         run: |
           git config --global --add safe.directory '*'
           . "$IDF_PATH/export.sh" > /dev/null
-          apps=$(python3 -c 'import json, pathlib; print(" ".join(p.parent.name for p in sorted(pathlib.Path("apps").glob("*/papp.json")) if (m := json.loads(p.read_text())).get("publish", True) is False or m.get("dev_build")))')
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            apps=$(python3 tools/dev_build_apps.py --all)
+          else
+            apps=$(python3 tools/dev_build_apps.py --base origin/main)
+          fi
           echo "apps=$apps" >> "$GITHUB_OUTPUT"
-          if [ -z "$apps" ]; then echo "No work-in-progress apps."; exit 0; fi
+          if [ -z "$apps" ]; then echo "No work-in-progress app changed on this branch."; exit 0; fi
           python3 tools/build_papp.py --out dist $apps
           # Symbol lists (address order) so a crash PC from the device log can
           # be mapped to a function: tools/papp_symbolize.py.

@@ -288,6 +288,7 @@ class PappLoader : public Component {
   static int svc_app_open(const char *target, const char *arg, int return_after);
   static int svc_app_get_arg(char *buf, int len);
   static int svc_app_set_resume_arg(const char *arg);
+  static int svc_file_list_dir(const char *path, char *buf, int len);
   static void *svc_file_open(const char *path, const char *mode);
   static int svc_file_close(void *stream);
   static size_t svc_file_read(void *ptr, size_t size, size_t nmemb, void *stream);

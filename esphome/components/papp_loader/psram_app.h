@@ -433,6 +433,17 @@ typedef struct {
     int  (*app_get_arg)(char *buf, int len);
     int  (*app_set_resume_arg)(const char *arg);
 
+    /* ── Folder listing ─────────────────────────────────────────────────
+     *   file_list_dir  The entries of the folder `path` (a /sd/... path, as
+     *                  for file_open): each name followed by a NUL, a
+     *                  folder's with '/' added before the NUL, one after
+     *                  another in buf. Returns how many entries it wrote, or
+     *                  -1 when the folder cannot be opened. Entries that do
+     *                  not fit in len bytes are left out; "." and ".." are
+     *                  never listed. The order is the file system's.
+     * Appended after app_set_resume_arg: NULL on older loaders. */
+    int  (*file_list_dir)(const char *path, char *buf, int len);
+
 } app_services_t;
 
 /* Size of the largest app_open / app_set_resume_arg argument, NUL included. */

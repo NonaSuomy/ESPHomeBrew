@@ -147,6 +147,20 @@ int len = svc->app_get_arg ? svc->app_get_arg(arg, sizeof arg) : 0;   // 0: none
 - At most two apps wait to be returned to. Opening an app without coming back always works (it replaces the running one). A launch from the menu, a button or a remote command gets an empty argument and forgets any apps waiting.
 - Guard against loops: an app that opens another as soon as it starts with a given argument should not hand that same argument back as its resume argument.
 
+### Folder listing (for app authors)
+
+`file_list_dir` follows the hand-off services (NULL on older loaders). It lists a folder on the card, for file pickers:
+
+```c
+static char names[16384];
+int n = svc->file_list_dir ? svc->file_list_dir("/sd/videos", names, sizeof names) : -1;
+for (const char *p = names; n > 0; n--, p += strlen(p) + 1) {
+    /* p is one entry; a folder ends in '/' */
+}
+```
+
+It returns how many entries it wrote (-1 when the folder cannot be opened). Each name is followed by a NUL; folders get a trailing `/`. Entries that do not fit in the buffer are left out, `.` and `..` never appear, and the order is the file system's (sort them yourself).
+
 ### Custom recipes
 
 `custom` mirrors the upstream `tools/build_<game>_papp.ps1` scripts. Every path is relative to the source checkout, and none may leave it. Example (trimmed from `apps/psram_quake/papp.json`):

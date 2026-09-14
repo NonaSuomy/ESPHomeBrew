@@ -3669,6 +3669,40 @@ int PappLoader::svc_app_set_resume_arg(const char *arg) {
   return 0;
 }
 
+int PappLoader::svc_file_list_dir(const char *path, char *buf, int len) {
+  if (path == nullptr)
+    return -1;
+  const std::string folder = runtime_path(path);
+  DIR *dir = opendir(folder.c_str());
+  if (dir == nullptr)
+    return -1;
+  int count = 0;
+  size_t used = 0;
+  const size_t size = buf != nullptr && len > 0 ? static_cast<size_t>(len) : 0;
+  while (dirent *entry = readdir(dir)) {
+    const char *name = entry->d_name;
+    if (std::strcmp(name, ".") == 0 || std::strcmp(name, "..") == 0)
+      continue;
+    bool is_dir = entry->d_type == DT_DIR;
+    if (entry->d_type == DT_UNKNOWN) {
+      struct stat st{};
+      const std::string full = folder + (folder.empty() || folder.back() == '/' ? "" : "/") + name;
+      is_dir = stat(full.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+    }
+    const size_t need = std::strlen(name) + (is_dir ? 1 : 0) + 1;
+    if (used + need > size)
+      continue;  // does not fit; a shorter name later might
+    std::memcpy(buf + used, name, need - 1 - (is_dir ? 1 : 0));
+    used += need - 1 - (is_dir ? 1 : 0);
+    if (is_dir)
+      buf[used++] = '/';
+    buf[used++] = '\0';
+    count++;
+  }
+  closedir(dir);
+  return count;
+}
+
 void *PappLoader::svc_file_open(const char *path, const char *mode) {
   const std::string mapped = runtime_path(path);
   FILE *file = std::fopen(mapped.c_str(), mode);
@@ -3894,6 +3928,7 @@ void PappLoader::populate_services(app_services_t *services) {
   services->app_open = &PappLoader::svc_app_open;
   services->app_get_arg = &PappLoader::svc_app_get_arg;
   services->app_set_resume_arg = &PappLoader::svc_app_set_resume_arg;
+  services->file_list_dir = &PappLoader::svc_file_list_dir;
 }
 
 esp_err_t psram_app_load(const char *path, psram_app_handle_t *out_handle) {

@@ -541,8 +541,8 @@ static bool build_request(struct http_ctx *c, const char *post_urlenc, const str
     }
 
     buf_printf(&b, "User-Agent: %s\r\n", user_agent_string());
-    buf_add(&b, "Accept: */*\r\n", 13);
-    buf_add(&b, "Accept-Encoding: gzip, deflate\r\n", 32);
+    // Only gzip: some servers send "deflate" without the zlib header.
+    buf_printf(&b, "Accept: */*\r\nAccept-Encoding: gzip\r\n");
     if (nsoption_charp(accept_language) != NULL && nsoption_charp(accept_language)[0] != '\0') {
         buf_printf(&b, "Accept-Language: %s, *;q=0.1\r\n", nsoption_charp(accept_language));
     }

@@ -389,14 +389,18 @@ static int s_dir_state[DIR_COUNT];        // 0 undecided, 1 arrow, 2 typing
 static int64_t s_dir_next[DIR_COUNT];
 static int64_t s_menu_since = 0;
 
-// Buttons: pressed after DECIDE_US unless a keyboard key (or the mouse
-// button the loader also reports as it) explains the press.
+// Buttons: pressed after DECIDE_US unless a keyboard key explains the press.
+// The loader also reports keyboard keys (Space, Enter, X, V, Q, E, Backspace)
+// and the mouse's left/right buttons as these buttons, so once a USB
+// keyboard has been used the buttons are left alone, and A/B once the mouse
+// has clicked.
 enum { BTN_A, BTN_B, BTN_Y, BTN_START, BTN_SELECT, BTN_L, BTN_R, BTN_COUNT };
 static const int s_btn_input[BTN_COUNT] = {PAPP_INPUT_A, PAPP_INPUT_B, PAPP_INPUT_Y, PAPP_INPUT_START,
                                            PAPP_INPUT_SELECT, PAPP_INPUT_L, PAPP_INPUT_R};
 static int64_t s_btn_down_at[BTN_COUNT];
 static int s_btn_state[BTN_COUNT];  // 0 undecided, 1 acted on, 2 ignored
 static int s_mouse_buttons = 0;
+static bool s_mouse_clicked = false;
 
 static bool typed_near(int64_t at)
 {
@@ -446,7 +450,7 @@ static void button_action(int b, bool down)
 
 static bool button_from_mouse(int b)
 {
-    return (b == BTN_A && (s_mouse_buttons & 1)) || (b == BTN_B && (s_mouse_buttons & 2));
+    return (b == BTN_A || b == BTN_B) && (s_mouse_clicked || (s_mouse_buttons & 3) != 0);
 }
 
 static void poll_gamepad(int64_t now)
@@ -541,6 +545,9 @@ static void poll_mouse(nsfb_t *nsfb)
         return;
     }
     const int changed = buttons ^ s_mouse_buttons;
+    if (buttons & 3) {
+        s_mouse_clicked = true;
+    }
     if (buttons & 4) {
         // Middle button held: scroll instead of moving the pointer.
         if (dx != 0 || dy != 0) {

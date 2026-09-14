@@ -162,7 +162,7 @@
  		case NSFB_KEY_RSHIFT:
  			modifier |= FBTK_MOD_RSHIFT;
  			break;
-@@ -1169,7 +1296,11 @@
+@@ -1169,13 +1296,27 @@
  	nsurl *url;
  	nserror error;
  
@@ -174,3 +174,19 @@
  	if (error != NSERROR_OK) {
  		fb_warn_user("Errorcode:", messages_get_errorcode(error));
  	} else {
+ 		browser_window_navigate(bw, url, NULL, BW_NAVIGATE_HISTORY,
+ 				NULL, NULL, NULL);
+ 		nsurl_unref(url);
++#ifdef PAPP_NETSURF
++		{
++			/* back to the page, so keys and the d-pad scroll it */
++			struct gui_window *gw;
++			for (gw = window_list; gw != NULL; gw = gw->next) {
++				if (gw->bw == bw)
++					fbtk_set_focus(gw->browser);
++			}
++		}
++#endif
+ 	}
+ 
+ 	return 0;

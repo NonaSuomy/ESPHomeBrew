@@ -71,7 +71,30 @@ Sources come from the `source` repository at a pinned commit, and so does the PA
 - `-march=rv32imafc_zicsr_zifencei -mabi=ilp32f -mcmodel=medany` are always added. Everything else comes from `cflags`, and from `cxxflags` for `.cpp` files. g++ links if there is any C++.
 - `groups` lists source files per directory. `prefix` keeps object names unique when two directories have a file with the same name (the build refuses a collision), and a group's `includes` apply only to its files.
 - `newlib: true` links `-lc -lgcc -lm` and wraps `malloc`/`free`/`calloc`/`realloc`, their `_r` variants and the `__retarget_lock_*` functions, so newlib's heap goes through the loader, as the upstream scripts do.
-- Only the directories named in `source.path`, `groups` and `includes` (plus the SDK files) are checked out.
+- Only the directories named in `source.path`, `groups`, `includes` and `paths` (plus the SDK files) are checked out. `paths` lists extra upstream files a `prebuild` step reads.
+- `"files": ["core/**/*.c"]` also finds files in subfolders; each object is named after its path (`core_lv_obj.o`), so same-named files in different folders do not collide.
+
+#### Submodules
+
+A plain fetch does not bring an upstream's git submodules along. `submodules` checks each one out inside the source tree at its own pinned commit:
+
+```json
+"submodules": [
+  { "path": "micropython", "repo": "https://github.com/micropython/micropython", "ref": "<full commit SHA>" }
+]
+```
+
+When the upstream tree records the submodule, `ref` must be the commit it pins; the build refuses anything else. Paths in `groups`, `includes` and `paths` that fall inside a submodule become its sparse checkout, and patches may change files in it (patch paths are relative to the source root, e.g. `micropython/py/gc.c`).
+
+#### Prebuild
+
+Some upstreams generate sources before compiling (MicroPython's qstr headers, frozen Python, bindings). `prebuild` lists commands run in the source checkout after the patches:
+
+```json
+"prebuild": [["{python}", "{repo}/ports/tulip/gen_tulip.py", "--src", "{src}", "--gen", "{gen}", "--units", "{units}"]]
+```
+
+`{src}` is the checkout, `{repo}` this repository, `{gen}` the folder `.papp-gen` inside the checkout (emptied first; compile its files with a group whose `dir` is `.papp-gen`), `{units}` a JSON list of every compile unit with its compiler and flags (for generators that preprocess the sources), `{python}` the Python running the build and `{jobs}` the parallel job count. The build's `SOURCE_DATE_EPOCH` applies, so generated files are reproducible too.
 
 ### App data
 

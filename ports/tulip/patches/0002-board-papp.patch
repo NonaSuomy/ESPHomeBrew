@@ -1,0 +1,11 @@
+--- a/tulip/shared/modtulip.c
++++ b/tulip/shared/modtulip.c
+@@ -71,6 +71,8 @@
+     return mp_obj_new_str("N16R8", strlen("N16R8"));
+ #elif defined N32R8
+     return mp_obj_new_str("N32R8", strlen("N32R8"));
++#elif defined TULIP_PAPP
++    return mp_obj_new_str("PAPP", strlen("PAPP"));
+ #elif defined TULIP_DESKTOP
+     return mp_obj_new_str("DESKTOP", strlen("DESKTOP"));    
+ #elif defined TULIP_WEB

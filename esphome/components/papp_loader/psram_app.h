@@ -172,7 +172,10 @@ typedef struct {
     /* ── Touch (GT911) ───────────────────────────────────────────────── */
     /* Read the capacitive touch panel. Coordinates are reported in the
      * LANDSCAPE native-framebuffer space after the panel's 180-degree display
-     * transform — x in [0,799], y in [0,479], matching a full PAPP canvas.
+     * transform, inside the app's canvas: x in [0, width-1], y in
+     * [0, height-1] — [0,799] x [0,479] unless the app chose another canvas
+     * with display_set_canvas. Touches outside the canvas (and on the
+     * loader's close control beside it) are not reported.
      * Returns 1 if currently touched (and fills *x,*y), 0 if not. Either
      * pointer may be NULL. */
     int (*touch_read)(int *x, int *y);
@@ -260,6 +263,52 @@ typedef struct {
     int  (*net_tcp_recv)(int handle, void *buf, int len);
     int  (*net_poll)(int handle);
     int  (*net_resolve)(const char *host, uint32_t *ip);
+
+    /* ── Display canvas size ─────────────────────────────────────────── */
+    /* The canvas is the part of the panel an app draws. Every app starts
+     * with the ABI v1 canvas of 800x480, centred on the panel, so apps that
+     * never call these two services behave exactly as before. The canvas
+     * size applies to everything on the display side: display_get_framebuffer
+     * (width x height RGB565, stride = width), display_flush, display_clear,
+     * display_write_frame_rgb565 (one full canvas), display_write_rect
+     * (clipped to the canvas), display_write_frame_custom / display_emu_flush
+     * (the scaled frame is centred in the canvas and at most its size),
+     * touch_read (canvas coordinates) and the loader's screenshots.
+     *
+     *   display_get_size    The canvas this app should use: the user's
+     *                       per-app Screen setting from the store, else the
+     *                       device's default canvas (YAML canvas_width /
+     *                       canvas_height, normally the whole panel, e.g.
+     *                       1024x600). Once the app has switched with
+     *                       display_set_canvas it reports the canvas in use.
+     *                       Either pointer may be NULL.
+     *   display_set_canvas  Switch to a width x height canvas. Both must be
+     *                       even, at least 320x240 and at most the panel
+     *                       (display_get_size's answer always qualifies).
+     *                       Returns 0 on success; -1 refuses the size and
+     *                       leaves the canvas as it was. A change clears the
+     *                       framebuffer and the whole panel to black; asking
+     *                       for the current size changes nothing. Call it
+     *                       before drawing, from the task that draws, and
+     *                       read display_get_framebuffer afterwards. On a
+     *                       canvas too wide for the close control beside it,
+     *                       the control is not drawn: taps in the canvas's
+     *                       top-right corner reach the app and only a 2 s
+     *                       hold there closes it, so offer your own exit.
+     *
+     * Typical use:
+     *     int w = 800, h = 480;
+     *     if (svc->display_get_size && svc->display_set_canvas) {
+     *         svc->display_get_size(&w, &h);
+     *         if (svc->display_set_canvas(w, h) != 0) { w = 800; h = 480; }
+     *     }
+     *     uint16_t *fb = svc->display_get_framebuffer();   // w x h
+     * An app with fixed sizes picks the largest of its own that fits in
+     * display_get_size's answer and passes that to display_set_canvas.
+     * Appended after net_resolve — null-check before calling (an older
+     * launcher leaves them NULL and the canvas is always 800x480). */
+    void (*display_get_size)(int *width, int *height);
+    int  (*display_set_canvas)(int width, int height);
 
 } app_services_t;
 

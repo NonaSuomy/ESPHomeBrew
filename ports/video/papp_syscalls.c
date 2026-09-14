@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/times.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -310,6 +311,8 @@ int _fstat(int fd, struct stat *st)
 }
 
 int _stat(const char *path, struct stat *st) { (void)path; memset(st, 0, sizeof(*st)); errno = ENOENT; return -1; }
+int _fcntl(int fd, int cmd, int arg) { (void)fd; (void)cmd; (void)arg; errno = EBADF; return -1; }
+int _fcntl_r(struct _reent *r, int fd, int cmd, int arg) { (void)r; return _fcntl(fd, cmd, arg); }
 int _unlink(const char *path) { (void)path; errno = EACCES; return -1; }
 int _link(const char *a, const char *b) { (void)a; (void)b; errno = EMLINK; return -1; }
 int _rename(const char *a, const char *b) { (void)a; (void)b; errno = EACCES; return -1; }
@@ -359,6 +362,20 @@ int _gettimeofday(struct timeval *tv, void *tz)
     return 0;
 }
 int _gettimeofday_r(struct _reent *r, struct timeval *tv, void *tz) { (void)r; return _gettimeofday(tv, tz); }
+
+// clock() (FFmpeg's random seed fallback): time since boot as CPU time.
+clock_t _times(struct tms *buf)
+{
+    const clock_t ticks = (clock_t)(papp_time_us() / (1000000 / CLOCKS_PER_SEC));
+    if (buf != NULL) {
+        buf->tms_utime = ticks;
+        buf->tms_stime = 0;
+        buf->tms_cutime = 0;
+        buf->tms_cstime = 0;
+    }
+    return ticks;
+}
+clock_t _times_r(struct _reent *r, struct tms *buf) { (void)r; return _times(buf); }
 
 int clock_gettime(clockid_t clock_id, struct timespec *tp)
 {

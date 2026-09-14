@@ -193,6 +193,7 @@
         "aacpsdsp_float.c",
         "aacsbr.c",
         "aactab.c",
+        "ac3_channel_layout_tab.c",
         "ac3_parser.c",
         "adts_header.c",
         "adts_parser.c",
@@ -432,7 +433,11 @@
     "-Wl,--wrap=exit",
     "-Wl,--wrap=posix_memalign",
     "-Wl,--wrap=memalign",
-    "-Wl,--wrap=aligned_alloc"
+    "-Wl,--wrap=aligned_alloc",
+    "-Wl,-u,__fixsfdi",
+    "-Wl,-u,__fixdfdi",
+    "-Wl,-u,__floatdisf",
+    "-Wl,-u,__floatdidf"
   ],
   "newlib": true
 }

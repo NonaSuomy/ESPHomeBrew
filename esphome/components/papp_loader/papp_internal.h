@@ -22,6 +22,8 @@ bool is_network_url(const char *value);
 esp_err_t fetch_http_text(const char *url, std::string *out, size_t max_bytes = MAX_CATALOG_SIZE);
 // Creates the folders between `root` and the file `target`.
 bool make_parent_dirs(const std::string &root, const std::string &target);
+// Removes the folder at a runtime (VFS) path if it is empty; false otherwise.
+bool remove_empty_folder(const std::string &path);
 
 }  // namespace papp_loader
 }  // namespace esphome

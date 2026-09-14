@@ -28,6 +28,7 @@
 
 #include "papp_canvas.h"
 #include "papp_data.h"
+#include "papp_files.h"
 #include "papp_handoff.h"
 #include "psram_app.h"
 
@@ -289,6 +290,15 @@ class PappLoader : public Component {
   static int svc_app_get_arg(char *buf, int len);
   static int svc_app_set_resume_arg(const char *arg);
   static int svc_file_list_dir(const char *path, char *buf, int len);
+  // File management (psram_app.h file_mkdir / file_remove / file_rename / file_stat).
+  static int svc_file_mkdir(const char *path);
+  static int svc_file_remove(const char *path);
+  static int svc_file_rename(const char *from, const char *to);
+  static int svc_file_stat(const char *path, papp_file_stat_t *out);
+  // The runtime (VFS) path for an app's path, or "" when files::clean_app_path
+  // refuses it (outside /sd and the data roots, "..", ...). *root gets the
+  // runtime path of the storage root it is on (/sdcard, /usb0).
+  static std::string app_file_path_(const char *path, std::string *root = nullptr);
   static void *svc_file_open(const char *path, const char *mode);
   static int svc_file_close(void *stream);
   static size_t svc_file_read(void *ptr, size_t size, size_t nmemb, void *stream);
@@ -323,8 +333,13 @@ class PappLoader : public Component {
   static void papp_catalog_task_entry_(void *arg);
   static void papp_info_task_entry_(void *arg);
   static void papp_install_task_entry_(void *arg);
-  esp_err_t sync_app_data_(const std::string &papp_url);
+  // Downloads the app's missing data files. Each one downloaded is recorded
+  // in the install manifest of `app` (default: the .papp's name), so Uninstall
+  // can offer to delete it.
+  esp_err_t sync_app_data_(const std::string &papp_url, const std::string &app = std::string());
   std::string find_data_file_(const std::string &target) const;
+  // data_root, then each data_search root not already listed.
+  std::vector<std::string> data_roots_() const;
   esp_err_t download_data_file_(const data::DataFile &file, const std::string &path, uint32_t done_before,
                                 uint32_t total, size_t index, size_t count);
   void finish_app_();
@@ -381,6 +396,9 @@ class PappLoader : public Component {
   // Back to 800x480 for the next app, and what display_get_size offers it.
   void prepare_canvas_for_app_(const std::string &source);
   void restore_legacy_canvas_();
+  // The canvas size the app's listing recommends ("" for none): from the
+  // store's listings, else the .json next to a .papp on the card.
+  std::string listing_recommended_canvas_(const std::string &source) const;
   std::string settings_path_() const;
   void render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t in_h, float scale, bool byte_swap);
   void log_render_time_(int64_t render_start_us, uint16_t in_w, uint16_t in_h, float scale);
@@ -608,6 +626,18 @@ class PappLoader : public Component {
     bool canvas_any{false};
     std::vector<std::string> canvas_sizes;
     bool supports_canvas() const { return this->canvas_any || !this->canvas_sizes.empty(); }
+    // The size it recommends ("canvas_recommended", or "recommended" in an
+    // object "canvas"): the Screen setting's default instead of the device's.
+    std::string canvas_recommended;
+    // What it needs on the card ("requires"), plus the data files the store
+    // downloads for it (download = true). The detail page checks them.
+    struct RequiredFile {
+      std::string path;  // as the app sees it: /sd/roms/doom/doom1.wad, a folder/ or a pattern
+      std::string note;
+      bool optional{false};
+      bool download{false};
+    };
+    std::vector<RequiredFile> required_files;
     uint32_t size{0}, data_size{0};
     std::string sha256;
     std::string sidecar;            // the raw JSON, saved next to an installed copy
@@ -651,6 +681,26 @@ class PappLoader : public Component {
   volatile esp_err_t install_result_{ESP_OK};
   void start_install_(int index);
   void poll_install_();
+  // ── Install manifest and Uninstall (papp_store.cpp) ──
+  // <install_dir>/<app>.installed.json lists every data file the store
+  // downloaded for the app (path and size); Uninstall deletes only those.
+  std::string manifest_path_(const std::string &app) const;
+  void record_download_(const std::string &app, const std::string &path, uint32_t size, const std::string &sha256);
+  // The manifest's files still on the card at their recorded size: what
+  // Uninstall would delete (path, size).
+  std::vector<std::pair<std::string, uint32_t>> downloaded_files_(const std::string &app) const;
+  // Where a listing's required path is on the card (a data root's path to
+  // it), or "" when it is on none of them.
+  std::string find_required_(const std::string &path) const;
+
+ public:
+  // Removes an installed app: <install_dir>/<app>.papp and its listing, and
+  // with delete_data the data files the store downloaded for it (listed in
+  // its install manifest; files changed since, and everything else, stay).
+  // Refused (false) while an app is loading or running or an install runs.
+  bool uninstall_app(const std::string &app, bool delete_data);
+
+ protected:
   void list_catalog_folder_();
   TaskHandle_t papp_catalog_task_handle_{nullptr};
   volatile bool catalog_loading_{false};
@@ -720,8 +770,24 @@ class PappLoader : public Component {
   // The detail page's Screen button: the app's settings key and label, and
   // one press (the next choice, saved).
   std::string detail_app_key_(int index) const;
-  std::string screen_label_(const std::string &app);
+  std::string screen_label_(int index);
+  // The Screen button's choices for this app ("" = no saved setting) and the
+  // recommended size that "" stands for ("" when there is none).
+  std::vector<std::string> screen_options_(int index, std::string *recommended) const;
   void cycle_screen_setting_(int index);
+  // Uninstall's confirmation, a dialog over the detail page: a title, a text,
+  // a check box for the downloaded data (when there is any) and two buttons.
+  lv_obj_t *dialog_{nullptr};
+  std::vector<lv_obj_t *> dialog_items_;  // touch and d-pad targets, top to bottom
+  std::vector<uint8_t> dialog_actions_;
+  uint8_t dialog_focus_{0};
+  bool dialog_delete_data_{false};
+  std::string dialog_app_;  // the app it asks about
+  void open_uninstall_dialog_(int index);
+  void close_dialog_();
+  void focus_dialog_item_(uint8_t index);
+  void run_dialog_action_(uint8_t action);
+  static void store_dialog_event_cb_(lv_event_t *event);
   bool handle_store_controls_(uint8_t newly_pressed, bool a_pressed, bool b_pressed, bool l_pressed, bool r_pressed,
                               bool select_pressed);
 #endif

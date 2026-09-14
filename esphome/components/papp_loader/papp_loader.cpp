@@ -552,11 +552,15 @@ void PappLoader::prepare_canvas_for_app_(const std::string &source) {
   int w = 0, h = 0;
   const bool from_setting = !setting.empty() && canvas::parse_size(setting, &w, &h) &&
                             canvas::size_ok(w, h, this->max_canvas_w_, this->max_canvas_h_);
-  this->offered_canvas_w_ = from_setting ? w : this->default_canvas_w_;
-  this->offered_canvas_h_ = from_setting ? h : this->default_canvas_h_;
+  // No setting: the size the app's listing recommends, if it fits.
+  const std::string recommended = from_setting ? std::string() : this->listing_recommended_canvas_(source);
+  const bool from_listing = !recommended.empty() && canvas::parse_size(recommended, &w, &h) &&
+                            canvas::size_ok(w, h, this->max_canvas_w_, this->max_canvas_h_);
+  this->offered_canvas_w_ = from_setting || from_listing ? w : this->default_canvas_w_;
+  this->offered_canvas_h_ = from_setting || from_listing ? h : this->default_canvas_h_;
   ESP_LOGI(TAG, "PAPP canvas for %s: %dx%d until the app picks one; it is offered %dx%d (%s)", app.c_str(),
            canvas::LEGACY_WIDTH, canvas::LEGACY_HEIGHT, this->offered_canvas_w_, this->offered_canvas_h_,
-           from_setting ? "its Screen setting" : "device default");
+           from_setting ? "its Screen setting" : from_listing ? "recommended by its listing" : "device default");
 }
 
 // Runs on the LVGL thread (the main loop). Copies the snapshot into a plain
@@ -3722,6 +3726,106 @@ int PappLoader::svc_file_list_dir(const char *path, char *buf, int len) {
   return count;
 }
 
+// ── File management services ───────────────────────────────────────────────
+// The card (/sd) and the loader's data roots only; papp_files.h checks the path.
+
+std::string PappLoader::app_file_path_(const char *path, std::string *root) {
+  PappLoader *self = active_;
+  if (self == nullptr)
+    return {};
+  std::vector<std::string> roots = self->data_roots_();
+  roots.emplace_back("/sd");
+  std::string clean, matched;
+  if (!files::clean_app_path(path, roots, &clean, &matched)) {
+    ESP_LOGW(TAG, "App file path refused: %.80s", path != nullptr ? path : "(null)");
+    return {};
+  }
+  if (root != nullptr)
+    *root = runtime_path(matched.c_str());
+  return runtime_path(clean.c_str());
+}
+
+// A storage root is a mount point, which FAT cannot stat: it counts as a
+// folder when it can be listed.
+static bool stat_app_path(const std::string &fs_path, const std::string &root, struct stat *st) {
+  if (fs_path != root)
+    return stat(fs_path.c_str(), st) == 0;
+  DIR *dir = opendir(fs_path.c_str());
+  if (dir == nullptr)
+    return false;
+  closedir(dir);
+  *st = {};
+  st->st_mode = S_IFDIR;
+  return true;
+}
+
+int PappLoader::svc_file_mkdir(const char *path) {
+  std::string root;
+  const std::string fs_path = app_file_path_(path, &root);
+  struct stat st{};
+  if (fs_path.empty())
+    return -1;
+  if (fs_path == root)
+    return stat_app_path(fs_path, root, &st) ? 0 : -1;
+  // Each folder below the root, from the top down.
+  for (size_t slash = fs_path.find('/', root.size() + 1);; slash = fs_path.find('/', slash + 1)) {
+    const std::string part = slash == std::string::npos ? fs_path : fs_path.substr(0, slash);
+    if (stat(part.c_str(), &st) == 0) {
+      if (!S_ISDIR(st.st_mode))
+        return -1;  // a file is in the way
+    } else if (mkdir(part.c_str(), 0775) != 0 && errno != EEXIST) {
+      ESP_LOGW(TAG, "App mkdir %s failed (errno %d)", part.c_str(), errno);
+      return -1;
+    }
+    if (slash == std::string::npos)
+      return 0;
+  }
+}
+
+int PappLoader::svc_file_remove(const char *path) {
+  std::string root;
+  const std::string fs_path = app_file_path_(path, &root);
+  struct stat st{};
+  if (fs_path.empty() || fs_path == root || stat(fs_path.c_str(), &st) != 0)
+    return -1;
+  const bool removed = S_ISDIR(st.st_mode) ? remove_empty_folder(fs_path) : unlink(fs_path.c_str()) == 0;
+  if (!removed)
+    ESP_LOGW(TAG, "App remove %s failed (errno %d)", fs_path.c_str(), errno);
+  return removed ? 0 : -1;
+}
+
+int PappLoader::svc_file_rename(const char *from, const char *to) {
+  std::string from_root, to_root;
+  const std::string source = app_file_path_(from, &from_root);
+  const std::string target = app_file_path_(to, &to_root);
+  struct stat st{};
+  if (source.empty() || target.empty() || source == from_root || target == to_root ||
+      stat(source.c_str(), &st) != 0)
+    return -1;
+  if (stat(target.c_str(), &st) == 0)
+    return -1;  // never replaces: FAT refuses that anyway, so every file system behaves alike
+  if (std::rename(source.c_str(), target.c_str()) != 0) {
+    ESP_LOGW(TAG, "App rename %s -> %s failed (errno %d)", source.c_str(), target.c_str(), errno);
+    return -1;
+  }
+  return 0;
+}
+
+int PappLoader::svc_file_stat(const char *path, papp_file_stat_t *out) {
+  if (out == nullptr)
+    return -1;
+  std::memset(out, 0, sizeof(*out));
+  std::string root;
+  const std::string fs_path = app_file_path_(path, &root);
+  struct stat st{};
+  if (fs_path.empty() || !stat_app_path(fs_path, root, &st))
+    return -1;
+  out->is_dir = S_ISDIR(st.st_mode) ? 1 : 0;
+  out->size = out->is_dir ? 0 : static_cast<uint64_t>(st.st_size);
+  out->mtime = st.st_mtime > 0 ? static_cast<int64_t>(st.st_mtime) : 0;
+  return 0;
+}
+
 void *PappLoader::svc_file_open(const char *path, const char *mode) {
   const std::string mapped = runtime_path(path);
   FILE *file = std::fopen(mapped.c_str(), mode);
@@ -3948,6 +4052,10 @@ void PappLoader::populate_services(app_services_t *services) {
   services->app_get_arg = &PappLoader::svc_app_get_arg;
   services->app_set_resume_arg = &PappLoader::svc_app_set_resume_arg;
   services->file_list_dir = &PappLoader::svc_file_list_dir;
+  services->file_mkdir = &PappLoader::svc_file_mkdir;
+  services->file_remove = &PappLoader::svc_file_remove;
+  services->file_rename = &PappLoader::svc_file_rename;
+  services->file_stat = &PappLoader::svc_file_stat;
 }
 
 esp_err_t psram_app_load(const char *path, psram_app_handle_t *out_handle) {
@@ -4528,15 +4636,41 @@ bool make_parent_dirs(const std::string &root, const std::string &target) {
   return true;
 }
 
+// The toolchain's C library has no rmdir(). The FAT VFS driver's rmdir and
+// unlink both come down to FatFs f_unlink, which deletes a folder only when
+// it is empty, so unlink() does the same job; the folder check keeps it to
+// folders.
+bool remove_empty_folder(const std::string &path) {
+  struct stat st{};
+  if (stat(path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))
+    return false;
+  DIR *dir = opendir(path.c_str());
+  if (dir == nullptr)
+    return false;
+  bool empty = true;
+  while (dirent *entry = readdir(dir)) {
+    if (std::strcmp(entry->d_name, ".") != 0 && std::strcmp(entry->d_name, "..") != 0) {
+      empty = false;
+      break;
+    }
+  }
+  closedir(dir);
+  return empty && unlink(path.c_str()) == 0;
+}
+
 // Returns where `target` (relative, e.g. roms/doom/doom1.wad) already exists:
 // under data_root first, then each data_search root; "" when nowhere.
-std::string PappLoader::find_data_file_(const std::string &target) const {
+std::vector<std::string> PappLoader::data_roots_() const {
   std::vector<std::string> roots{this->data_root_};
   for (const auto &root : this->data_search_) {
     if (std::find(roots.begin(), roots.end(), root) == roots.end())
       roots.push_back(root);
   }
-  for (const auto &root : roots) {
+  return roots;
+}
+
+std::string PappLoader::find_data_file_(const std::string &target) const {
+  for (const auto &root : this->data_roots_()) {
     const std::string path = runtime_path(root.c_str()) + "/" + target;
     struct stat st{};
     if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode))
@@ -4545,9 +4679,10 @@ std::string PappLoader::find_data_file_(const std::string &target) const {
   return {};
 }
 
-esp_err_t PappLoader::sync_app_data_(const std::string &papp_url) {
+esp_err_t PappLoader::sync_app_data_(const std::string &papp_url, const std::string &app) {
   if (!this->download_data_)
     return ESP_OK;
+  const std::string app_name = app.empty() ? canvas::app_key(papp_url) : app;
   const std::string list_url = data::list_url_for(papp_url);
   if (list_url.empty())
     return ESP_OK;
@@ -4618,6 +4753,8 @@ esp_err_t PappLoader::sync_app_data_(const std::string &papp_url) {
       return err;
     }
     done += file.size;
+    // Remembered for Uninstall, which deletes only what the store put here.
+    this->record_download_(app_name, this->data_root_ + "/" + file.target, file.size, file.sha256);
   }
   ESP_LOGI(TAG, "App data ready under %s", root.c_str());
   return ESP_OK;

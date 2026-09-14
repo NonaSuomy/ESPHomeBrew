@@ -45,6 +45,20 @@ What a store screen shows before an app is downloaded:
 
 - `author` (up to 60 characters), `category` (30), `license` (60), `about` (2000) and `changelog` (4000) are text; `controls` is 1–20 lines of up to 60 characters; `upstream` names the original project the port comes from (`project` up to 60 characters, optional `version` up to 30 and an `https://` `url`), shown next to the `source` repo and commit the app is built from. The fields follow the Homebrew App Store (hb-app.store) listing.
 - `canvas` says the app chooses its canvas size ([below](#canvas-size-for-app-authors)), which gives it a **Screen** setting on its store page: `true` when it draws at whatever size `display_get_size` offers, or a list of the sizes it can draw, such as `["1024x600", "800x480"]` (up to 8, each even and at least 320x240; only those that fit the panel are offered). Leave it out for apps that keep 800×480; the setting would do nothing for them.
+- To recommend one size, make `canvas` an object: `{"sizes": ["800x480", "1024x600"], "recommended": "800x480"}`, or `{"recommended": "800x480"}` for an app that takes any size. The recommended size must be one of `sizes`. The Screen setting then shows it with "(Recommended)", and an app with no saved setting gets it from `display_get_size` instead of the device's default canvas (when it fits the panel). The published listing keeps `canvas` as `true` or the list, which older loaders read, and adds `"canvas_recommended": "800x480"`.
+- `requires` lists what the app needs on the card, including files the store cannot download (commercial game data). The app's store page shows each one with a tick when the loader finds it and a cross when not:
+
+  ```json
+  "requires": [
+    {"path": "/sd/roms/openlara/DATA/*.PHD", "note": "Tomb Raider 1 PC levels: copy the game's DATA folder"},
+    {"path": "/sd/roms/openlara/FMV/", "note": "The game's movies", "optional": true}
+  ]
+  ```
+
+  - `path` is where the app looks, as it opens it: `/sd/` and a path of up to 200 ASCII characters. A trailing `/` means a folder. The last part may be a pattern with `*` and `?` (case is ignored), which needs at least one match. No `.` or `..` parts, backslashes or colons.
+  - `note` (optional, up to 80 characters) says what it is. `optional: true` marks something the app runs without (shown in amber rather than red when missing).
+  - Up to 24 entries. The loader looks for each one under every data root (`data_root`, then `data_search`, such as `/sd` and `/usb0`), only when the app's page opens.
+  - The files under `data` (below), which the store downloads, count as required too: Publish store adds each one to the listing's `requires` as `{"path": "/sd/<target>", "download": true}`.
 - `icon` is a PNG in the app's folder, at most 256×256 and 64 KB; `screenshots` lists up to three PNGs of at most 1024×600 and 300 KB. Use your own or freely licensed art, not official game logos.
 - Publish store puts all of it, with the icon as base64, the `.papp` size and the data size, into `store.json` and into a sidecar next to each app (`psram_doom-0.1.1.json`, found by swapping `.papp` for `.json`). The icon is also published as `psram_doom-0.1.1.png`, which the web page shows, and screenshots as `psram_doom-0.1.1-screen1.png`, … (listed by URL only, to keep the JSON small). A LAN server or SD folder can carry the same sidecar next to its `.papp` files.
 
@@ -57,7 +71,7 @@ An app draws on a canvas centred on the panel. It starts with 800×480, the size
 ```c
 int w = 800, h = 480;
 if (svc->display_get_size && svc->display_set_canvas) {   // NULL on older loaders
-    svc->display_get_size(&w, &h);          // the user's Screen setting, else the device default
+    svc->display_get_size(&w, &h);          // the Screen setting, else the listing's recommended size, else the device default
     if (svc->display_set_canvas(w, h) != 0) {
         w = 800;                            // refused: still 800x480
         h = 480;
@@ -161,6 +175,29 @@ for (const char *p = names; n > 0; n--, p += strlen(p) + 1) {
 
 It returns how many entries it wrote (-1 when the folder cannot be opened). Each name is followed by a NUL; folders get a trailing `/`. Entries that do not fit in the buffer are left out, `.` and `..` never appear, and the order is the file system's (sort them yourself).
 
+### File management (for app authors)
+
+Four services follow `file_list_dir` (NULL on older loaders), for apps that manage files on the card, such as an archive extractor:
+
+```c
+papp_file_stat_t st;
+if (svc->file_mkdir && svc->file_stat && svc->file_rename && svc->file_remove) {
+    svc->file_mkdir("/sd/roms/game/levels");               // and any missing parents
+    if (svc->file_stat("/sd/roms/game/levels/1.dat", &st) == 0 && !st.is_dir)
+        svc->log_printf("%llu bytes\n", (unsigned long long)st.size);
+    svc->file_rename("/sd/roms/game/levels/1.tmp", "/sd/roms/game/levels/1.dat");
+    svc->file_remove("/sd/roms/game/levels/1.tmp");         // a file, or an empty folder
+}
+```
+
+- Each returns 0 on success and -1 on an error.
+- Paths are absolute, like `file_open`'s: `/sd/...` or a folder under one of the loader's data roots (`/usb0/...`). Anything else is refused, and so is a path with a `.` or `..` part, a backslash or a colon. A trailing `/` is ignored.
+- Unlike `file_open`'s read fallback, no other root is tried: each call acts on exactly the path given.
+- `file_mkdir` creates the folder and any missing parents; 0 also when it already exists, -1 when a file is in the way.
+- `file_remove` deletes a file, or a folder only when it is empty. A root itself (`/sd`) is never removed.
+- `file_rename` renames or moves; it never replaces an existing file (-1), and cannot move between two roots (`/sd` to `/usb0`): copy those.
+- `file_stat` fills a `papp_file_stat_t` (`size`, `is_dir`, and `mtime` in seconds since 1970 where the file system keeps one, else 0); -1 when the path does not exist.
+
 ### Custom recipes
 
 `custom` mirrors the upstream `tools/build_<game>_papp.ps1` scripts. Every path is relative to the source checkout, and none may leave it. Example (trimmed from `apps/psram_quake/papp.json`):
@@ -224,7 +261,7 @@ An app that needs files on the card lists them under `data`. Publish store puts 
 }
 ```
 
-`path` is the file in `repo` at `ref`. `target` is where it goes under the device's data root. `size` and `sha256` pin the exact bytes: CI refuses anything else. Only list files that may be redistributed.
+`path` is the file in `repo` at `ref`. `target` is where it goes under the device's data root. `size` and `sha256` pin the exact bytes: CI refuses anything else. Only list files that may be redistributed. The store page lists these under the app's required files, and the loader remembers each one it downloads, so **Uninstall** can offer to delete them ([esphome-store.md](esphome-store.md#store-view-esphomebrew)).
 
 ## What the build does
 

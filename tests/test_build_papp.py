@@ -86,6 +86,43 @@ class ManifestTests(unittest.TestCase):
             with self.subTest(canvas=canvas), self.assertRaises(ValueError):
                 bp.store_info("psram_x", {"canvas": canvas}, folder)
 
+    def test_canvas_can_recommend_a_size(self):
+        """An object canvas names the Screen setting's default; the listing keeps a plain canvas for old loaders."""
+        folder = Path(".")
+        info = bp.store_info("psram_x", {"canvas": {"sizes": ["800x480", "1024x600"], "recommended": "800x480"}}, folder)
+        self.assertEqual((info["canvas"], info["canvas_recommended"]), (["800x480", "1024x600"], "800x480"))
+        info = bp.store_info("psram_x", {"canvas": {"recommended": "960x540"}}, folder)
+        self.assertEqual((info["canvas"], info["canvas_recommended"]), (True, "960x540"))
+        # The old forms are unchanged and recommend nothing.
+        self.assertNotIn("canvas_recommended", bp.store_info("psram_x", {"canvas": True}, folder))
+        self.assertNotIn("canvas_recommended", bp.store_info("psram_x", {"canvas": ["1024x600"]}, folder))
+        bad = [{}, {"sizes": ["800x480"]}, {"sizes": ["800x480"], "recommended": "1024x600"},
+               {"recommended": "801x480"}, {"recommended": 800}, {"sizes": True, "recommended": "800x480"},
+               {"sizes": [], "recommended": "800x480"}, {"recommended": "800x480", "default": "800x480"}]
+        for canvas in bad:
+            with self.subTest(canvas=canvas), self.assertRaises(ValueError):
+                bp.store_info("psram_x", {"canvas": canvas}, folder)
+
+    def test_requires_is_checked(self):
+        """What an app needs on the card: /sd paths, folders and last-part patterns."""
+        folder = Path(".")
+        requires = [{"path": "/sd/roms/openlara/DATA/LEVEL1.PHD", "note": " Tomb Raider 1 PC data ", "optional": False},
+                    {"path": "/sd/roms/openlara/FMV/", "optional": True},
+                    {"path": "/sd/roms/quake/id1/*.pak"}]
+        self.assertEqual(bp.store_info("psram_x", {"requires": requires}, folder)["requires"], [
+            {"path": "/sd/roms/openlara/DATA/LEVEL1.PHD", "note": "Tomb Raider 1 PC data"},
+            {"path": "/sd/roms/openlara/FMV/", "optional": True},
+            {"path": "/sd/roms/quake/id1/*.pak"}])
+        bad = [[], {"path": "/sd/x"}, ["/sd/x"], [{"note": "no path"}], [{"path": "/usb0/x"}], [{"path": "roms/x"}],
+               [{"path": "/sd/"}], [{"path": "/sd/../etc"}], [{"path": "/sd/a/./b"}], [{"path": "/sd/a//b"}],
+               [{"path": "/sd/a\\b"}], [{"path": "/sd/c:x"}], [{"path": "/sd/*/x.wad"}], [{"path": "/sd/x", "note": ""}],
+               [{"path": "/sd/x", "note": "n" * 81}], [{"path": "/sd/x", "optional": "yes"}],
+               [{"path": "/sd/x", "size": 4}], [{"path": "/sd/x"}, {"path": "/sd/x"}], [{"path": "/sd/été"}],
+               [{"path": "/sd/" + "x" * 200}], [{"path": f"/sd/{i}"} for i in range(bp.MAX_REQUIRES + 1)]]
+        for value in bad:
+            with self.subTest(requires=str(value)[:40]), self.assertRaises(ValueError):
+                bp.store_info("psram_x", {"requires": value}, folder)
+
     def test_data_blocks_are_checked(self):
         good = {"repo": "https://github.com/o/r", "ref": "a" * 40, "license": "shareware",
                 "files": [{"path": "SDcard/roms/doom/doom1.wad", "target": "roms/doom/doom1.wad",

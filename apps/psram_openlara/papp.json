@@ -26,6 +26,10 @@
     "project": "OpenLara",
     "url": "https://github.com/XProger/OpenLara"
   },
+  "requires": [
+    {"path": "/sd/roms/openlara/DATA/*.PHD", "note": "Tomb Raider 1 PC levels: copy the game's DATA folder"},
+    {"path": "/sd/roms/openlara/FMV/", "note": "The game's movies", "optional": true}
+  ],
   "icon": "icon.png",
   "publish": true,
   "dev_build": true,

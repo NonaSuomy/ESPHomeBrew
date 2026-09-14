@@ -82,6 +82,16 @@ typedef struct {
     uint8_t id;
 } papp_touch_point_t;
 
+/* What file_stat reports about a file or folder. */
+typedef struct {
+    uint64_t size;      /* bytes; 0 for a folder                          */
+    int64_t  mtime;     /* last change, seconds since 1970; 0 if unknown  */
+    uint32_t is_dir;    /* 1 for a folder, 0 for a file                   */
+    uint32_t reserved;  /* 0                                              */
+} papp_file_stat_t;
+
+_Static_assert(sizeof(papp_file_stat_t) == 24, "papp_file_stat_t must be 24 bytes");
+
 /* ── Memory Capability Flags (matches ESP-IDF MALLOC_CAP_*) ─────────── */
 
 #define PAPP_MEM_CAP_SPIRAM   (1 << 10)  /* MALLOC_CAP_SPIRAM */
@@ -294,6 +304,8 @@ typedef struct {
      *
      *   display_get_size    The canvas this app should use: the user's
      *                       per-app Screen setting from the store, else the
+     *                       size its store listing recommends (canvas
+     *                       "recommended", when it fits), else the
      *                       device's default canvas (YAML canvas_width /
      *                       canvas_height, normally the whole panel, e.g.
      *                       1024x600). Once the app has switched with
@@ -443,6 +455,34 @@ typedef struct {
      *                  never listed. The order is the file system's.
      * Appended after app_set_resume_arg: NULL on older loaders. */
     int  (*file_list_dir)(const char *path, char *buf, int len);
+
+    /* ── File management (folders, delete, rename, stat) ────────────────
+     * For apps that manage files on the card, such as an archive
+     * extractor. Paths are absolute, as for file_open: /sd/... (the card)
+     * or a folder under one of the loader's data roots (/usb0/...). A
+     * path anywhere else, or with a "." or ".." component, a backslash or
+     * a colon, is refused. A trailing '/' is ignored. Unlike file_open's
+     * read fallback, no other root is tried: each call acts on exactly the
+     * path given. All return 0 on success and -1 on an error or a refused
+     * path.
+     *   file_mkdir   Create the folder `path` and any missing parents. 0
+     *                also when it already exists; -1 when something in the
+     *                way is a file.
+     *   file_remove  Delete the file `path`, or the folder `path` if it is
+     *                empty. A root itself (/sd) is never removed.
+     *   file_rename  Rename or move `from` to `to` (both checked). A file
+     *                already at `to` is not replaced: -1. Moving between
+     *                two roots (/sd to /usb0) is not possible: copy it.
+     *   file_stat    Fill *out for the file or folder `path`: its size, 1 in
+     *                is_dir for a folder, and its last change time where the
+     *                file system has one (FAT keeps it to 2 s, in the time
+     *                zone the card was written in). -1 when it does not
+     *                exist; *out is then zeroed.
+     * Appended after file_list_dir: NULL on older loaders. */
+    int  (*file_mkdir)(const char *path);
+    int  (*file_remove)(const char *path);
+    int  (*file_rename)(const char *from, const char *to);
+    int  (*file_stat)(const char *path, papp_file_stat_t *out);
 
 } app_services_t;
 

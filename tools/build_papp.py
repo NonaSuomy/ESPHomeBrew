@@ -472,36 +472,108 @@ CANVAS_MAX_SIDE = 4096
 MAX_CANVAS_SIZES = 8
 
 
+def canvas_size(name: str, size: object) -> str:
+    """One canvas size, "WIDTHxHEIGHT": even, from 320x240 up."""
+    match = CANVAS_SIZE.fullmatch(size) if isinstance(size, str) else None
+    width, height = (int(match[1]), int(match[2])) if match else (0, 0)
+    if (not match or width < CANVAS_MIN[0] or height < CANVAS_MIN[1] or width > CANVAS_MAX_SIDE
+            or height > CANVAS_MAX_SIDE or width % 2 or height % 2):
+        raise ValueError(f"{name}: canvas size {size!r} must be WIDTHxHEIGHT, even, at least "
+                         f"{CANVAS_MIN[0]}x{CANVAS_MIN[1]}")
+    return f"{width}x{height}"
+
+
 def canvas_info(name: str, canvas: object) -> bool | list[str]:
     """The listing's "canvas": the app picks its canvas with display_get_size /
     display_set_canvas (psram_app.h), so the store offers it a Screen setting.
 
     true: it draws at whatever size display_get_size offers. A list names the
     sizes it can draw ("1024x600", "800x480", ...), and only those are offered.
-    Apps without it keep the 800x480 canvas.
+    Apps without it keep the 800x480 canvas. (An object with a recommended
+    size goes through canvas_listing.)
     """
     if canvas is True:
         return True
     if not isinstance(canvas, list) or not 1 <= len(canvas) <= MAX_CANVAS_SIZES:
-        raise ValueError(f"{name}: canvas must be true or a list of 1 to {MAX_CANVAS_SIZES} sizes such as \"1024x600\"")
+        raise ValueError(f"{name}: canvas must be true, a list of 1 to {MAX_CANVAS_SIZES} sizes such as "
+                         "\"1024x600\", or {\"sizes\": [...], \"recommended\": \"800x480\"}")
     sizes: list[str] = []
     for size in canvas:
-        match = CANVAS_SIZE.fullmatch(size) if isinstance(size, str) else None
-        width, height = (int(match[1]), int(match[2])) if match else (0, 0)
-        if (not match or width < CANVAS_MIN[0] or height < CANVAS_MIN[1] or width > CANVAS_MAX_SIDE
-                or height > CANVAS_MAX_SIDE or width % 2 or height % 2):
-            raise ValueError(f"{name}: canvas size {size!r} must be WIDTHxHEIGHT, even, at least "
-                             f"{CANVAS_MIN[0]}x{CANVAS_MIN[1]}")
-        text = f"{width}x{height}"
+        text = canvas_size(name, size)
         if text in sizes:
             raise ValueError(f"{name}: canvas lists {text} twice")
         sizes.append(text)
     return sizes
 
 
+def canvas_listing(name: str, canvas: object) -> dict:
+    """The listing fields for papp.json's "canvas".
+
+    Besides true and a list of sizes, "canvas" may be an object that also
+    names the size the store should use when the user has not chosen one:
+    {"sizes": ["800x480", "1024x600"], "recommended": "800x480"}, or
+    {"recommended": "800x480"} for an app that takes any size. The listing
+    keeps "canvas" as true or the list, which every loader reads, and carries
+    the recommendation as "canvas_recommended".
+    """
+    if not isinstance(canvas, dict):
+        return {"canvas": canvas_info(name, canvas)}
+    if "recommended" not in canvas or set(canvas) - {"sizes", "recommended"}:
+        raise ValueError(f"{name}: a canvas object has \"recommended\" and optional \"sizes\", nothing else")
+    sizes = canvas_info(name, canvas["sizes"]) if "sizes" in canvas else True
+    if sizes is True and "sizes" in canvas:
+        raise ValueError(f"{name}: canvas sizes must be a list; leave it out for any size")
+    recommended = canvas_size(name, canvas["recommended"])
+    if sizes is not True and recommended not in sizes:
+        raise ValueError(f"{name}: the recommended canvas {recommended} is not one of its sizes {sizes}")
+    return {"canvas": sizes, "canvas_recommended": recommended}
+
+
+# What an app needs on the card, shown with a tick or a cross on its store
+# page: /sd/<path>, a folder ending in '/', or a pattern ('*', '?') in the
+# last part. The loader looks for it under every data root.
+MAX_REQUIRES = 24
+REQUIRES_NOTE_LIMIT = 80
+REQUIRES_SEGMENT = re.compile(r"[^/\\:\x00-\x1f\x7f]+")
+
+
+def requires_info(name: str, requires: object) -> list[dict]:
+    """The listing's "requires": [{"path": "/sd/...", "note": "...", "optional": true}]."""
+    if not isinstance(requires, list) or not 1 <= len(requires) <= MAX_REQUIRES:
+        raise ValueError(f"{name}: requires must list 1 to {MAX_REQUIRES} files or folders")
+    out: list[dict] = []
+    for item in requires:
+        if not isinstance(item, dict) or "path" not in item or set(item) - {"path", "note", "optional"}:
+            raise ValueError(f"{name}: each requires entry is {{\"path\", optional \"note\" and \"optional\"}}")
+        path = item["path"]
+        if not isinstance(path, str) or not path.startswith("/sd/") or len(path) > 200 or not path.isascii():
+            raise ValueError(f"{name}: requires path {path!r} must be an ASCII /sd/... path of up to 200 characters")
+        parts = path[len("/sd/"):].removesuffix("/").split("/")
+        for i, part in enumerate(parts):
+            if (not REQUIRES_SEGMENT.fullmatch(part) or part in (".", "..")
+                    or (i < len(parts) - 1 and any(c in part for c in "*?"))):
+                raise ValueError(f"{name}: requires path {path!r}: bad part {part!r} (patterns only in the last part)")
+        entry = {"path": path}
+        if "note" in item:
+            note = item["note"]
+            if not isinstance(note, str) or not note.strip() or len(note) > REQUIRES_NOTE_LIMIT:
+                raise ValueError(f"{name}: requires note must be text of 1 to {REQUIRES_NOTE_LIMIT} characters")
+            entry["note"] = note.strip()
+        if "optional" in item:
+            if not isinstance(item["optional"], bool):
+                raise ValueError(f"{name}: requires optional must be true or false")
+            if item["optional"]:
+                entry["optional"] = True
+        if any(e["path"] == path for e in out):
+            raise ValueError(f"{name}: requires lists {path} twice")
+        out.append(entry)
+    return out
+
+
 def store_info(name: str, manifest: dict, app_dir: Path) -> dict:
     """The store listing extras from papp.json: author, category, license, about,
-    changelog, controls, upstream, canvas, icon and screenshots.
+    changelog, controls, upstream, canvas (and canvas_recommended), requires,
+    icon and screenshots.
 
     All optional. Images are PNGs in the app's folder: an icon of at most
     256x256 and 64 KB, and up to three screenshots of at most 1024x600 and
@@ -523,7 +595,9 @@ def store_info(name: str, manifest: dict, app_dir: Path) -> dict:
     if "upstream" in manifest:
         info["upstream"] = upstream_info(name, manifest["upstream"])
     if "canvas" in manifest:
-        info["canvas"] = canvas_info(name, manifest["canvas"])
+        info.update(canvas_listing(name, manifest["canvas"]))
+    if "requires" in manifest:
+        info["requires"] = requires_info(name, manifest["requires"])
     if "icon" in manifest:
         info["icon"] = listing_png(name, app_dir, manifest["icon"], "icon", MAX_ICON_BYTES, MAX_ICON_SIDE, MAX_ICON_SIDE)
     if "screenshots" in manifest:

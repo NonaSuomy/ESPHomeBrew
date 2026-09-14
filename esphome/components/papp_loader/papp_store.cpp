@@ -10,12 +10,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
 #include <memory>
 #include <new>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "esp_heap_caps.h"
 #include "esphome/components/json/json_util.h"
@@ -48,7 +51,16 @@ static constexpr uint32_t COLOR_UPDATE = 0xF59E0B;
 // Transparent icon pixels are blended onto the tile colour (PNGdec takes 0xBBGGRR).
 static constexpr uint32_t ICON_BLEND_BGR = 0x331C11;
 
-enum DetailAction : uint8_t { ACTION_STREAM, ACTION_INSTALL, ACTION_LAUNCH, ACTION_SCREEN, ACTION_BACK };
+enum DetailAction : uint8_t {
+  ACTION_STREAM,
+  ACTION_INSTALL,
+  ACTION_LAUNCH,
+  ACTION_SCREEN,
+  ACTION_BACK,
+  ACTION_UNINSTALL,
+};
+// The buttons of Uninstall's confirmation.
+enum DialogAction : uint8_t { DIALOG_TOGGLE_DATA, DIALOG_CONFIRM, DIALOG_CANCEL };
 
 // The listing next to a .papp: the same name with .json.
 static std::string sidecar_for(const std::string &papp) {
@@ -59,6 +71,14 @@ static std::string sidecar_for(const std::string &papp) {
   for (char &c : ext)
     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   return ext == ".papp" ? path.substr(0, path.size() - 5) + ".json" : std::string();
+}
+
+// <install_dir>/<app>.installed.json: the data files the store downloaded.
+static constexpr const char *MANIFEST_SUFFIX = ".installed.json";
+
+static bool is_manifest_name(const std::string &file) {
+  const size_t n = std::strlen(MANIFEST_SUFFIX);
+  return file.size() > n && file.compare(file.size() - n, n, MANIFEST_SUFFIX) == 0;
 }
 
 static esp_err_t read_small_file(const std::string &path, std::string *out, size_t max_bytes) {
@@ -79,8 +99,24 @@ static esp_err_t read_small_file(const std::string &path, std::string *out, size
   return ESP_OK;
 }
 
-static bool parse_app_info(const std::string &text, PappLoader::AppInfo *info) {
-  return json::parse_json(text, [info](JsonObject root) -> bool {
+// A listing's canvas sizes: ["1024x600", "800x480"].
+static void parse_canvas_sizes(JsonArray sizes, std::vector<std::string> *out) {
+  for (JsonVariant entry : sizes) {
+    const char *value = entry | "";
+    int w = 0, h = 0;
+    if (canvas::parse_size(value, &w, &h))
+      out->emplace_back(canvas::format_size(w, h));
+  }
+}
+
+static std::string parse_canvas_size(const char *value) {
+  int w = 0, h = 0;
+  return value != nullptr && canvas::parse_size(value, &w, &h) ? canvas::format_size(w, h) : std::string();
+}
+
+// icon: decode the base64 icon too (not needed to read a size at launch).
+static bool parse_app_info(const std::string &text, PappLoader::AppInfo *info, bool icon = true) {
+  return json::parse_json(text, [info, icon](JsonObject root) -> bool {
     info->name = root["name"] | "";
     info->title = root["title"] | "";
     info->version = root["version"] | "";
@@ -97,17 +133,46 @@ static bool parse_app_info(const std::string &text, PappLoader::AppInfo *info) {
       if (*value != '\0')
         info->controls.emplace_back(value);
     }
-    // "canvas": true, or the sizes the app draws: ["1024x600", "800x480"].
+    // "canvas": true, or the sizes the app draws: ["1024x600", "800x480"], or
+    // {"sizes": [...], "recommended": "800x480"} (no sizes: any). The store
+    // publishes the recommendation as "canvas_recommended", next to a plain
+    // "canvas" that older loaders read.
     if (root["canvas"].is<bool>()) {
       info->canvas_any = root["canvas"].as<bool>();
+    } else if (root["canvas"].is<JsonObject>()) {
+      JsonArray sizes = root["canvas"]["sizes"].as<JsonArray>();  // named: no dangling-reference warning
+      parse_canvas_sizes(sizes, &info->canvas_sizes);
+      info->canvas_any = sizes.isNull();
+      info->canvas_recommended = parse_canvas_size(root["canvas"]["recommended"] | "");
     } else {
-      JsonArray sizes = root["canvas"].as<JsonArray>();  // a named array: no dangling-reference warning
-      for (JsonVariant entry : sizes) {
-        const char *value = entry | "";
-        int w = 0, h = 0;
-        if (canvas::parse_size(value, &w, &h))
-          info->canvas_sizes.emplace_back(canvas::format_size(w, h));
-      }
+      JsonArray sizes = root["canvas"].as<JsonArray>();
+      parse_canvas_sizes(sizes, &info->canvas_sizes);
+    }
+    if (info->canvas_recommended.empty())
+      info->canvas_recommended = parse_canvas_size(root["canvas_recommended"] | "");
+    // "requires": what the app needs on the card. The data files the store
+    // downloads count too (the store lists them there; a listing that only
+    // has them under "data" gets them from there).
+    JsonArray required = root["requires"].as<JsonArray>();
+    for (JsonVariant entry : required) {
+      PappLoader::AppInfo::RequiredFile file;
+      file.path = entry["path"] | "";
+      file.note = entry["note"] | "";
+      file.optional = entry["optional"] | false;
+      file.download = entry["download"] | false;
+      if (files::parse_required(file.path, nullptr) && info->required_files.size() < 96)
+        info->required_files.push_back(std::move(file));
+    }
+    JsonArray data_files = root["data"]["files"].as<JsonArray>();
+    for (JsonVariant entry : data_files) {
+      PappLoader::AppInfo::RequiredFile file;
+      file.path = std::string("/sd/") + (entry["target"] | "");
+      file.download = true;
+      bool listed = false;
+      for (const auto &have : info->required_files)
+        listed = listed || have.path == file.path;
+      if (!listed && files::parse_required(file.path, nullptr) && info->required_files.size() < 96)
+        info->required_files.push_back(std::move(file));
     }
     const char *project = root["upstream"]["project"] | "";
     const char *upstream_version = root["upstream"]["version"] | "";
@@ -122,13 +187,13 @@ static bool parse_app_info(const std::string &text, PappLoader::AppInfo *info) {
         short_repo = short_repo.substr(at + 11);
       info->source = short_repo + (*ref != '\0' ? std::string(" @ ") + std::string(ref).substr(0, 7) : "");
     }
-    const char *icon = root["icon"]["base64"] | "";
-    const size_t icon_len = std::strlen(icon);
+    const char *icon_base64 = icon ? (root["icon"]["base64"] | "") : "";
+    const size_t icon_len = std::strlen(icon_base64);
     if (icon_len > 0) {
       info->icon_png.resize(icon_len * 3 / 4 + 4);
       size_t decoded = 0;
       if (mbedtls_base64_decode(info->icon_png.data(), info->icon_png.size(), &decoded,
-                                reinterpret_cast<const unsigned char *>(icon), icon_len) == 0) {
+                                reinterpret_cast<const unsigned char *>(icon_base64), icon_len) == 0) {
         info->icon_png.resize(decoded);
       } else {
         info->icon_png.clear();
@@ -323,12 +388,13 @@ std::vector<std::pair<std::string, std::string>> PappLoader::scan_installed_(con
     return installed;
   while (dirent *entry = readdir(folder)) {
     const std::string file = entry->d_name;
-    if (file.size() < 6 || file.compare(file.size() - 5, 5, ".json") != 0)
+    if (file.size() < 6 || file.compare(file.size() - 5, 5, ".json") != 0 || file == "settings.json" ||
+        is_manifest_name(file))
       continue;
     std::string text;
     AppInfo info;
-    if (read_small_file(install_dir + "/" + file, &text, INFO_MAX_BYTES) == ESP_OK && parse_app_info(text, &info) &&
-        !info.name.empty())
+    if (read_small_file(install_dir + "/" + file, &text, INFO_MAX_BYTES) == ESP_OK &&
+        parse_app_info(text, &info, false) && !info.name.empty())
       installed.emplace_back(info.name, info.version);
   }
   closedir(folder);
@@ -416,6 +482,238 @@ bool PappLoader::set_app_canvas(const std::string &app, const std::string &size)
   return ok;
 }
 
+// The size an app's listing recommends, for display_get_size when it has no
+// Screen setting. Runs on the main loop as the app starts.
+std::string PappLoader::listing_recommended_canvas_(const std::string &source) const {
+  const std::string key = canvas::app_key(source);
+  const AppInfo *found = nullptr;
+  for (size_t i = 0; i < this->app_info_.size() && i < this->catalog_entries_.size() && found == nullptr; i++) {
+    const AppInfo &info = this->app_info_[i];
+    if (info.has_info && (this->catalog_entries_[i].second == source || (!info.name.empty() && info.name == key)))
+      found = &info;
+  }
+  AppInfo sidecar_info;
+  if (found == nullptr && !is_network_url(source.c_str())) {
+    // The listing next to the .papp (an installed copy's, say).
+    std::string text;
+    const std::string sidecar = sidecar_for(source);
+    if (!sidecar.empty() && read_small_file(sidecar, &text, INFO_MAX_BYTES) == ESP_OK &&
+        parse_app_info(text, &sidecar_info, false))
+      found = &sidecar_info;
+  }
+  if (found == nullptr || !found->supports_canvas())
+    return {};
+  return canvas::recommended(this->max_canvas_w_, this->max_canvas_h_,
+                             found->canvas_any ? std::vector<std::string>() : found->canvas_sizes,
+                             found->canvas_recommended);
+}
+
+// ── Install manifest ────────────────────────────────────────────────────────
+// <install_dir>/<app>.installed.json lists the data files the store
+// downloaded for an app, so Uninstall can offer to delete exactly those:
+//   {"app": "psram_doom", "files": [{"path": "/sd/roms/doom/doom1.wad",
+//                                    "size": 4196020, "sha256": "1d7d..."}]}
+// No "name" field: older loaders would take it for an installed app's listing.
+
+static constexpr size_t MANIFEST_MAX_BYTES = 16 * 1024;
+
+// Writes a small file at a /sd/... or /usb0/... path, creating its folders.
+static bool write_text_file(const std::string &path, const std::string &text) {
+  const size_t cut = path.find('/', 1);
+  if (cut == std::string::npos)
+    return false;
+  const std::string storage = runtime_path(path.substr(0, cut).c_str());
+  const std::string target = path.substr(cut + 1);
+  bool ok = make_parent_dirs(storage, target);
+  FILE *file = ok ? std::fopen((storage + "/" + target).c_str(), "wb") : nullptr;
+  ok = file != nullptr && std::fwrite(text.data(), 1, text.size(), file) == text.size();
+  if (file != nullptr)
+    ok = std::fclose(file) == 0 && ok;
+  return ok;
+}
+
+std::string PappLoader::manifest_path_(const std::string &app) const {
+  return this->install_dir_ + "/" + app + MANIFEST_SUFFIX;
+}
+
+// Called from the install and load tasks after each verified download.
+void PappLoader::record_download_(const std::string &app, const std::string &path, uint32_t size,
+                                  const std::string &sha256) {
+  if (!data::safe_target(app) || app.find('/') != std::string::npos)
+    return;
+  const std::string manifest = this->manifest_path_(app);
+  std::string text;
+  JsonDocument doc;
+  if (read_small_file(manifest, &text, MANIFEST_MAX_BYTES) != ESP_OK || deserializeJson(doc, text) ||
+      !doc.is<JsonObject>())
+    doc.to<JsonObject>();
+  JsonObject root = doc.as<JsonObject>();
+  root["app"] = app;
+  JsonArray list = root["files"].is<JsonArray>() ? root["files"].as<JsonArray>() : root["files"].to<JsonArray>();
+  for (size_t i = 0; i < list.size();) {
+    if (path == (list[i]["path"] | ""))
+      list.remove(i);  // downloaded again: the new entry replaces it
+    else
+      i++;
+  }
+  JsonObject entry = list.add<JsonObject>();
+  entry["path"] = path;
+  entry["size"] = size;
+  entry["sha256"] = sha256;
+  std::string out;
+  serializeJsonPretty(doc, out);
+  out.push_back('\n');
+  if (!write_text_file(manifest, out))
+    ESP_LOGW(TAG, "Could not write %s; Uninstall will not know about %s", manifest.c_str(), path.c_str());
+}
+
+std::vector<std::pair<std::string, uint32_t>> PappLoader::downloaded_files_(const std::string &app) const {
+  std::vector<std::pair<std::string, uint32_t>> result;
+  std::string text;
+  if (!data::safe_target(app) || read_small_file(this->manifest_path_(app), &text, MANIFEST_MAX_BYTES) != ESP_OK)
+    return result;
+  std::vector<std::string> roots = this->data_roots_();
+  roots.emplace_back("/sd");
+  json::parse_json(text, [&result, &roots](JsonObject root) -> bool {
+    JsonArray list = root["files"].as<JsonArray>();
+    for (JsonVariant entry : list) {
+      const std::string path = entry["path"] | "";
+      const uint32_t size = entry["size"] | 0u;
+      std::string clean, storage;
+      struct stat st{};
+      // Only files still exactly as the store left them: a file the user
+      // replaced since (a full game over the shareware one) is theirs.
+      if (!files::clean_app_path(path.c_str(), roots, &clean, &storage) || clean == storage ||
+          stat(runtime_path(clean.c_str()).c_str(), &st) != 0 || !S_ISREG(st.st_mode) ||
+          static_cast<uint64_t>(st.st_size) != size)
+        continue;
+      result.emplace_back(clean, size);
+    }
+    return true;
+  });
+  return result;
+}
+
+// ── Required files ──────────────────────────────────────────────────────────
+
+// Where a listing's "requires" path is: the path under the first data root
+// that has it (data_root, then data_search), "" when none does. A stat per
+// root, or one folder listing for a pattern; the detail page calls it.
+std::string PappLoader::find_required_(const std::string &path) const {
+  files::Required req;
+  if (!files::parse_required(path, &req))
+    return {};
+  for (const auto &root : this->data_roots_()) {
+    const std::string base = runtime_path(root.c_str());
+    struct stat st{};
+    if (!req.is_glob) {
+      if (stat((base + "/" + req.relative()).c_str(), &st) == 0 &&
+          (req.is_dir ? S_ISDIR(st.st_mode) : S_ISREG(st.st_mode)))
+        return root + "/" + req.relative();
+      continue;
+    }
+    const std::string folder = req.folder.empty() ? base : base + "/" + req.folder;
+    DIR *dir = opendir(folder.c_str());
+    if (dir == nullptr)
+      continue;
+    std::string match;
+    while (dirent *entry = readdir(dir)) {
+      if (std::strcmp(entry->d_name, ".") == 0 || std::strcmp(entry->d_name, "..") == 0 ||
+          !files::glob_match(req.name.c_str(), entry->d_name))
+        continue;
+      bool is_dir = entry->d_type == DT_DIR;
+      if (entry->d_type == DT_UNKNOWN)
+        is_dir = stat((folder + "/" + entry->d_name).c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+      if (is_dir == req.is_dir) {
+        match = entry->d_name;
+        break;
+      }
+    }
+    closedir(dir);
+    if (!match.empty())
+      return root + "/" + (req.folder.empty() ? std::string() : req.folder + "/") + match;
+  }
+  return {};
+}
+
+// ── Uninstall ───────────────────────────────────────────────────────────────
+
+bool PappLoader::uninstall_app(const std::string &app, bool delete_data) {
+  if (!data::safe_target(app) || app.find('/') != std::string::npos) {
+    ESP_LOGW(TAG, "Uninstall refused: bad app name %s", app.c_str());
+    return false;
+  }
+  if (this->launched_ || this->papp_loading_) {
+    // The store is hidden while an app runs, but a lambda could still ask.
+    this->set_progress_(false, 0, 0, "%s", "Close the running app before uninstalling");
+    ESP_LOGW(TAG, "Uninstall of %s refused while an app is running (%s)", app.c_str(), this->running_source_.c_str());
+    return false;
+  }
+  if (this->install_task_handle_ != nullptr) {
+    ESP_LOGW(TAG, "Uninstall of %s refused while an install runs", app.c_str());
+    return false;
+  }
+  const std::vector<std::pair<std::string, uint32_t>> data =
+      delete_data ? this->downloaded_files_(app) : std::vector<std::pair<std::string, uint32_t>>();
+
+  const std::string papp = this->install_dir_ + "/" + app + ".papp";
+  struct stat st{};
+  if (stat(runtime_path(papp.c_str()).c_str(), &st) == 0 && unlink(runtime_path(papp.c_str()).c_str()) != 0) {
+    ESP_LOGW(TAG, "Uninstall: could not remove %s (errno %d)", papp.c_str(), errno);
+    this->set_progress_(false, 0, 0, "Could not remove %.60s", papp.c_str());
+    return false;
+  }
+  // The listing next to it is what marks the app installed.
+  unlink(runtime_path((this->install_dir_ + "/" + app + ".json").c_str()).c_str());
+  ESP_LOGI(TAG, "Uninstalled %s: removed %s", app.c_str(), papp.c_str());
+
+  unsigned deleted = 0;
+  uint64_t bytes = 0;
+  if (delete_data) {
+    std::vector<std::string> roots = this->data_roots_();
+    roots.emplace_back("/sd");
+    for (const auto &file : data) {
+      if (unlink(runtime_path(file.first.c_str()).c_str()) != 0) {
+        ESP_LOGW(TAG, "Uninstall: could not delete %s (errno %d)", file.first.c_str(), errno);
+        continue;
+      }
+      ESP_LOGI(TAG, "Uninstall: deleted %s (%u bytes)", file.first.c_str(), static_cast<unsigned>(file.second));
+      deleted++;
+      bytes += file.second;
+      // Folders it leaves empty go too; the first one still in use stops it.
+      std::string clean, storage;
+      if (files::clean_app_path(file.first.c_str(), roots, &clean, &storage) && clean.size() > storage.size()) {
+        for (const auto &folder : files::parent_folders(clean.substr(storage.size() + 1))) {
+          if (!remove_empty_folder(runtime_path((storage + "/" + folder).c_str())))
+            break;
+        }
+      }
+    }
+    // Everything it listed is gone or no longer the store's: forget it.
+    unlink(runtime_path(this->manifest_path_(app).c_str()).c_str());
+  }
+
+  this->installed_.erase(std::remove_if(this->installed_.begin(), this->installed_.end(),
+                                        [&app](const std::pair<std::string, std::string> &item) {
+                                          return item.first == app;
+                                        }),
+                         this->installed_.end());
+  if (deleted > 0) {
+    this->set_progress_(false, 0, 0, "Uninstalled %.40s and deleted %u data file(s), %s", app.c_str(), deleted,
+                        size_text(static_cast<uint32_t>(std::min<uint64_t>(bytes, UINT32_MAX))).c_str());
+  } else {
+    this->set_progress_(false, 0, 0, "Uninstalled %.60s", app.c_str());
+  }
+  if (!this->catalog_url_.empty() && this->catalog_url_[0] == '/') {
+    this->refresh_catalog();  // a folder source may have listed the removed copy
+  } else {
+#ifdef PAPP_LOADER_USE_LVGL
+    this->catalog_ui_pending_ = true;  // badges again; an open detail page reopens with Install
+#endif
+  }
+  return true;
+}
+
 // ── Install ─────────────────────────────────────────────────────────────────
 
 void PappLoader::start_install_(int index) {
@@ -464,7 +762,7 @@ void PappLoader::papp_install_task_entry_(void *arg) {
       self->set_progress_(false, 0, 0, "Install failed: %s", esp_err_to_name(err));
   }
   if (err == ESP_OK && is_network_url(url.c_str()))
-    err = self->sync_app_data_(url);  // reports its own progress and errors
+    err = self->sync_app_data_(url, info.name);  // reports its own progress and errors
   if (err == ESP_OK) {
     // The listing next to the installed copy marks it installed (and at which version).
     const std::string listing = root + "/" + folder + info.name + ".json";
@@ -796,7 +1094,9 @@ void PappLoader::open_detail_(int index) {
   }
   // Only apps whose listing says they choose their canvas size.
   if (info != nullptr && info->supports_canvas())
-    buttons.emplace_back(ACTION_SCREEN, this->screen_label_(this->detail_app_key_(index)));
+    buttons.emplace_back(ACTION_SCREEN, this->screen_label_(index));
+  if (!have.empty())
+    buttons.emplace_back(ACTION_UNINSTALL, LV_SYMBOL_TRASH "  Uninstall");
   buttons.emplace_back(ACTION_BACK, LV_SYMBOL_CLOSE "  Back");
   this->detail_buttons_.clear();
   this->detail_actions_.clear();
@@ -817,8 +1117,10 @@ void PappLoader::open_detail_(int index) {
     lv_obj_remove_flag(button, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_t *label = text_label(button, buttons[i].second, 0xFFFFFF);
     if (buttons[i].first == ACTION_SCREEN) {
-      // Its text changes with each press: keep it to one line inside the button.
-      one_line(label, DETAIL_ICON - 16);
+      // Its text changes with each press, and takes a second line for
+      // "(Recommended)": wrap it inside the button, centred.
+      lv_obj_set_width(label, DETAIL_ICON - 16);
+      lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
       lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     }
     lv_obj_center(label);
@@ -893,6 +1195,31 @@ void PappLoader::open_detail_(int index) {
   };
   if (info != nullptr && !info->about.empty())
     block(info->about, COLOR_TEXT, 0);
+  if (info != nullptr && !info->required_files.empty()) {
+    // What the app needs on the card, looked for now under every data root:
+    // a tick when found (and where, if not on the card), a cross when not.
+    block("Files on the card", COLOR_ACCENT, below == nullptr ? 0 : 18);
+    for (const auto &file : info->required_files) {
+      const std::string found = this->find_required_(file.path);
+      std::string line = std::string(found.empty() ? LV_SYMBOL_CLOSE : LV_SYMBOL_OK) + "  " + file.path;
+      if (!found.empty() && found.rfind("/sd/", 0) != 0)
+        line += "  (on " + found.substr(1, found.find('/', 1) - 1) + ")";
+      std::string about = file.note;
+      auto add_about = [&about](const std::string &part) { about += (about.empty() ? "" : " - ") + part; };
+      if (file.download)
+        add_about(found.empty() ? "the store downloads it at Install or first launch" : "downloaded by the store");
+      if (file.optional)
+        add_about("optional");
+      const uint32_t color = !found.empty() ? COLOR_INSTALLED
+                             : file.optional || file.download ? COLOR_UPDATE
+                                                              : 0xF87171;  // missing: red
+      block(line, color, 6);
+      if (!about.empty()) {
+        block("     " + about, COLOR_MUTED, 0);
+        set_font(below, small_font());
+      }
+    }
+  }
   if (info != nullptr && !info->controls.empty()) {
     std::string lines;
     for (const auto &line : info->controls)
@@ -915,6 +1242,7 @@ void PappLoader::open_detail_(int index) {
 }
 
 void PappLoader::close_detail_() {
+  this->close_dialog_();
   if (this->detail_panel_ != nullptr) {
     // Often called from a click on one of the page's own buttons, so the page
     // is hidden now (nothing draws its icon again) and deleted after the event.
@@ -968,6 +1296,9 @@ void PappLoader::run_detail_action_(uint8_t action) {
     case ACTION_SCREEN:
       this->cycle_screen_setting_(index);
       break;
+    case ACTION_UNINSTALL:
+      this->open_uninstall_dialog_(index);
+      break;
     case ACTION_BACK:
     default:
       this->close_detail_();
@@ -986,34 +1317,47 @@ std::string PappLoader::detail_app_key_(int index) const {
   return canvas::app_key(this->catalog_entries_[index].second);
 }
 
-std::string PappLoader::screen_label_(const std::string &app) {
-  const std::string size = this->get_app_canvas(app);
-  return std::string(LV_SYMBOL_IMAGE "  Screen ") + (size.empty() ? std::string("Default") : size);
+std::vector<std::string> PappLoader::screen_options_(int index, std::string *recommended) const {
+  recommended->clear();
+  if (index < 0 || static_cast<size_t>(index) >= this->app_info_.size() || !this->app_info_[index].supports_canvas())
+    return {};
+  const AppInfo &info = this->app_info_[index];
+  const std::vector<std::string> listed = info.canvas_any ? std::vector<std::string>() : info.canvas_sizes;
+  *recommended = canvas::recommended(this->max_canvas_w_, this->max_canvas_h_, listed, info.canvas_recommended);
+  return canvas::screen_options(canvas::offered(this->max_canvas_w_, this->max_canvas_h_, listed, *recommended),
+                                *recommended);
 }
 
-// One press of Screen: Default, then each size the app can use on this panel,
-// then Default again. Saved at once; the app gets it from its next start.
+// "Screen 1024x600", "Screen Default", or the recommended size (also what
+// an app with no setting gets) with "(Recommended)" under it.
+std::string PappLoader::screen_label_(int index) {
+  std::string recommended;
+  this->screen_options_(index, &recommended);
+  std::string size = this->get_app_canvas(this->detail_app_key_(index));
+  if (size.empty())
+    size = recommended;
+  return std::string(LV_SYMBOL_IMAGE "  Screen ") + (size.empty() ? std::string("Default") : size) +
+         (!size.empty() && size == recommended ? "\n(Recommended)" : "");
+}
+
+// One press of Screen: the next size the app can use on this panel. Without a
+// recommended size the list starts with Default (the device's canvas); with
+// one, that size stands for "no setting" (and choosing it clears the
+// setting). Saved at once; the app gets it from its next start.
 void PappLoader::cycle_screen_setting_(int index) {
-  if (index < 0 || static_cast<size_t>(index) >= this->app_info_.size() || !this->app_info_[index].supports_canvas())
+  std::string recommended;
+  const std::vector<std::string> options = this->screen_options_(index, &recommended);
+  if (options.empty())
     return;
-  const AppInfo &info = this->app_info_[index];
   const std::string app = this->detail_app_key_(index);
-  std::vector<std::string> options{std::string()};
-  for (const auto &size : this->canvas_choices(info.canvas_any ? std::vector<std::string>() : info.canvas_sizes))
-    options.push_back(size);
-  const std::string current = this->get_app_canvas(app);
-  size_t next = 0;  // a size that is no longer offered goes back to Default
-  for (size_t i = 0; i < options.size(); i++) {
-    if (options[i] == current) {
-      next = (i + 1) % options.size();
-      break;
-    }
-  }
-  if (!this->set_app_canvas(app, options[next])) {
+  std::string current = this->get_app_canvas(app);
+  if (!recommended.empty() && current == recommended)
+    current.clear();
+  if (!this->set_app_canvas(app, canvas::next_screen_option(options, current))) {
     this->set_progress_(false, 0, 0, "%s", "Could not save the Screen setting - is the card in?");
     return;
   }
-  const std::string label = this->screen_label_(app);
+  const std::string label = this->screen_label_(index);
   for (size_t i = 0; i < this->detail_buttons_.size() && i < this->detail_actions_.size(); i++) {
     if (this->detail_actions_[i] != ACTION_SCREEN)
       continue;
@@ -1023,11 +1367,207 @@ void PappLoader::cycle_screen_setting_(int index) {
   }
 }
 
+// ── Uninstall's confirmation ────────────────────────────────────────────────
+
+struct DialogContext {
+  PappLoader *loader;
+  uint8_t action;
+};
+
+void PappLoader::store_dialog_event_cb_(lv_event_t *event) {
+  auto *context = static_cast<DialogContext *>(lv_event_get_user_data(event));
+  if (context == nullptr)
+    return;
+  if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+    context->loader->run_dialog_action_(context->action);
+  } else if (lv_event_get_code(event) == LV_EVENT_DELETE) {
+    delete context;
+  }
+}
+
+// A touch and d-pad target in the dialog, styled like the detail page's buttons.
+static lv_obj_t *dialog_item(lv_obj_t *parent, int32_t width, int32_t height, uint32_t color, uint32_t pressed) {
+  lv_obj_t *item = plain_box(parent);
+  lv_obj_set_size(item, width, height);
+  lv_obj_set_style_radius(item, 14, 0);
+  lv_obj_set_style_bg_color(item, lv_color_hex(color), 0);
+  lv_obj_set_style_bg_opa(item, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_color(item, lv_color_hex(pressed), LV_STATE_PRESSED);
+  lv_obj_set_style_border_color(item, lv_color_hex(0xFFFFFF), LV_STATE_FOCUSED);
+  lv_obj_set_style_border_width(item, 3, LV_STATE_FOCUSED);
+  lv_obj_add_flag(item, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_remove_flag(item, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+  return item;
+}
+
+void PappLoader::open_uninstall_dialog_(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= this->app_info_.size() || this->launched_)
+    return;
+  const AppInfo &info = this->app_info_[index];
+  if (!info.has_info || info.name.empty() || this->installed_version_(info.name).empty())
+    return;
+  this->close_dialog_();
+  this->dialog_app_ = info.name;
+  this->dialog_delete_data_ = false;
+  const std::vector<std::pair<std::string, uint32_t>> data = this->downloaded_files_(info.name);
+  uint64_t bytes = 0;
+  for (const auto &file : data)
+    bytes += file.second;
+
+  // A dimmed layer over the detail page (it takes the touches), with the box on it.
+  const int32_t screen_w = lv_display_get_horizontal_resolution(nullptr);
+  const int32_t screen_h = lv_display_get_vertical_resolution(nullptr);
+  lv_obj_t *shade = plain_box(lv_layer_top());
+  lv_obj_set_size(shade, screen_w, screen_h);
+  lv_obj_set_style_bg_color(shade, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(shade, LV_OPA_60, 0);
+  lv_obj_add_flag(shade, LV_OBJ_FLAG_CLICKABLE);
+  this->dialog_ = shade;
+
+  const int32_t box_w = std::min<int32_t>(640, screen_w - 80);
+  const int32_t pad = 28;
+  const int32_t inner = box_w - 2 * pad;
+  lv_obj_t *box = plain_box(shade);
+  lv_obj_set_width(box, box_w);
+  lv_obj_set_style_radius(box, 20, 0);
+  lv_obj_set_style_bg_color(box, lv_color_hex(COLOR_TILE), 0);
+  lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(box, 2, 0);
+  lv_obj_set_style_border_color(box, lv_color_hex(COLOR_TILE_BORDER), 0);
+
+  lv_obj_t *heading = text_label(box, "Uninstall " + (info.title.empty() ? info.name : info.title) + "?", 0xFFFFFF);
+  set_font(heading, title_font());
+  lv_obj_set_pos(heading, pad, pad);
+  one_line(heading, inner);
+  lv_obj_t *text = text_label(box,
+                              "Removes " + this->install_dir_ + "/" + info.name +
+                                  ".papp and its listing. Saves, settings and files you copied yourself stay.",
+                              COLOR_TEXT);
+  lv_obj_set_width(text, inner);
+  lv_label_set_long_mode(text, LV_LABEL_LONG_WRAP);
+  lv_obj_align_to(text, heading, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 14);
+  lv_obj_t *last = text;
+
+  this->dialog_items_.clear();
+  this->dialog_actions_.clear();
+  auto add_item = [this](lv_obj_t *item, uint8_t action) {
+    lv_obj_add_event_cb(item, store_dialog_event_cb_, LV_EVENT_ALL, new DialogContext{this, action});  // NOLINT
+    this->dialog_items_.push_back(item);
+    this->dialog_actions_.push_back(action);
+  };
+  if (!data.empty()) {
+    // Only files from its install manifest that are still as downloaded. A
+    // check box of plain objects: no LVGL checkbox widget needed.
+    lv_obj_t *row = dialog_item(box, inner, 72, COLOR_TILE, 0x172544);
+    lv_obj_align_to(row, last, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 16);
+    lv_obj_t *check = plain_box(row);
+    lv_obj_set_size(check, 32, 32);
+    lv_obj_align(check, LV_ALIGN_LEFT_MID, 10, 0);
+    lv_obj_set_style_radius(check, 6, 0);
+    lv_obj_set_style_bg_color(check, lv_color_hex(0x0B1020), 0);
+    lv_obj_set_style_bg_opa(check, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(check, 2, 0);
+    lv_obj_set_style_border_color(check, lv_color_hex(COLOR_ACCENT), 0);
+    lv_obj_remove_flag(check, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(text_label(check, "", COLOR_ACCENT));  // the tick, when checked
+    char what[112];
+    std::snprintf(what, sizeof(what), "Also delete the data the store downloaded for it: %u file(s), %s",
+                  static_cast<unsigned>(data.size()),
+                  size_text(static_cast<uint32_t>(std::min<uint64_t>(bytes, UINT32_MAX))).c_str());
+    lv_obj_t *label = text_label(row, what, COLOR_TEXT);
+    lv_obj_set_width(label, inner - 64);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, 54, 0);
+    add_item(row, DIALOG_TOGGLE_DATA);
+    last = row;
+  }
+  // Uninstall (red) and Cancel side by side.
+  const int32_t button_w = (inner - 16) / 2;
+  lv_obj_t *confirm = dialog_item(box, button_w, 52, 0xDC2626, 0xB91C1C);
+  lv_obj_align_to(confirm, last, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 24);
+  lv_obj_center(text_label(confirm, LV_SYMBOL_TRASH "  Uninstall", 0xFFFFFF));
+  add_item(confirm, DIALOG_CONFIRM);
+  lv_obj_t *cancel = dialog_item(box, button_w, 52, 0x1E293B, 0x334155);
+  lv_obj_align_to(cancel, confirm, LV_ALIGN_OUT_RIGHT_MID, 16, 0);
+  lv_obj_center(text_label(cancel, LV_SYMBOL_CLOSE "  Cancel", 0xFFFFFF));
+  add_item(cancel, DIALOG_CANCEL);
+
+  lv_obj_update_layout(box);
+  lv_obj_set_height(box, lv_obj_get_y2(confirm) + pad + 4);
+  lv_obj_center(box);
+  // Cancel has the focus, so a second press of A changes nothing by accident.
+  this->focus_dialog_item_(static_cast<uint8_t>(this->dialog_items_.size() - 1));
+}
+
+void PappLoader::close_dialog_() {
+  if (this->dialog_ != nullptr) {
+    // Usually closed from a click on its own button: hidden now, deleted after the event.
+    lv_obj_add_flag(this->dialog_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_delete_async(this->dialog_);
+    this->dialog_ = nullptr;
+  }
+  this->dialog_items_.clear();
+  this->dialog_actions_.clear();
+  this->dialog_focus_ = 0;
+}
+
+void PappLoader::focus_dialog_item_(uint8_t index) {
+  if (this->dialog_items_.empty())
+    return;
+  index = std::min<uint8_t>(index, static_cast<uint8_t>(this->dialog_items_.size() - 1));
+  for (lv_obj_t *item : this->dialog_items_)
+    lv_obj_remove_state(item, LV_STATE_FOCUSED);
+  lv_obj_add_state(this->dialog_items_[index], LV_STATE_FOCUSED);
+  this->dialog_focus_ = index;
+}
+
+void PappLoader::run_dialog_action_(uint8_t action) {
+  if (this->dialog_ == nullptr)
+    return;
+  switch (action) {
+    case DIALOG_TOGGLE_DATA:
+      this->dialog_delete_data_ = !this->dialog_delete_data_;
+      for (size_t i = 0; i < this->dialog_items_.size() && i < this->dialog_actions_.size(); i++) {
+        if (this->dialog_actions_[i] != DIALOG_TOGGLE_DATA)
+          continue;
+        lv_obj_t *check = lv_obj_get_child(this->dialog_items_[i], 0);  // row -> check box -> tick
+        lv_obj_t *mark = check != nullptr ? lv_obj_get_child(check, 0) : nullptr;
+        if (mark != nullptr)
+          lv_label_set_text(mark, this->dialog_delete_data_ ? LV_SYMBOL_OK : "");
+        this->focus_dialog_item_(static_cast<uint8_t>(i));
+      }
+      break;
+    case DIALOG_CONFIRM: {
+      const std::string app = this->dialog_app_;
+      const bool delete_data = this->dialog_delete_data_;
+      this->close_dialog_();
+      this->uninstall_app(app, delete_data);  // rebuilds the page, or says why not
+      break;
+    }
+    case DIALOG_CANCEL:
+    default:
+      this->close_dialog_();
+      break;
+  }
+}
+
 // Returns true when the store view handled the input.
 bool PappLoader::handle_store_controls_(uint8_t newly_pressed, bool a_pressed, bool b_pressed, bool l_pressed,
                                         bool r_pressed, bool select_pressed) {
   const bool up = newly_pressed & (1U << 0), right = newly_pressed & (1U << 1), down = newly_pressed & (1U << 2),
              left = newly_pressed & (1U << 3);
+  if (this->dialog_ != nullptr) {
+    // Uninstall's confirmation: any direction moves, A presses, B cancels.
+    if ((up || left) && this->dialog_focus_ > 0)
+      this->focus_dialog_item_(this->dialog_focus_ - 1);
+    else if (down || right)
+      this->focus_dialog_item_(this->dialog_focus_ + 1);
+    if (a_pressed && this->dialog_focus_ < this->dialog_actions_.size())
+      this->run_dialog_action_(this->dialog_actions_[this->dialog_focus_]);
+    else if (b_pressed)
+      this->close_dialog_();
+    return true;
+  }
   if (this->detail_panel_ != nullptr) {
     if (up && this->detail_focus_ > 0)
       this->focus_detail_button_(this->detail_focus_ - 1);

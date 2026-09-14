@@ -202,6 +202,59 @@ inline std::vector<std::string> choices(int max_w, int max_h, const std::vector<
   return result;
 }
 
+// The listing's recommended size ("800x480"), normalised, when this panel can
+// show it and it is one of the app's `listed` sizes (an app that takes any
+// size, listed empty, may recommend any); "" otherwise.
+inline std::string recommended(int max_w, int max_h, const std::vector<std::string> &listed,
+                               const std::string &wanted) {
+  int w = 0, h = 0;
+  if (wanted.empty() || !parse_size(wanted, &w, &h) || !size_ok(w, h, max_w, max_h))
+    return {};
+  bool found = listed.empty();
+  for (const auto &text : listed) {
+    int lw = 0, lh = 0;
+    found = found || (parse_size(text, &lw, &lh) && lw == w && lh == h);
+  }
+  return found ? format_size(w, h) : std::string();
+}
+
+// The sizes the Screen setting offers: choices(), plus the recommended size
+// (from recommended()) when an app that takes any size names one of its own.
+inline std::vector<std::string> offered(int max_w, int max_h, const std::vector<std::string> &listed,
+                                        const std::string &recommended_size) {
+  std::vector<std::string> sizes = choices(max_w, max_h, listed);
+  if (!recommended_size.empty() && std::find(sizes.begin(), sizes.end(), recommended_size) == sizes.end()) {
+    sizes.push_back(recommended_size);
+    sizes = choices(max_w, max_h, sizes);  // largest first again
+  }
+  return sizes;
+}
+
+// What one press of the store's Screen button steps through, in order. ""
+// stands for "no saved setting". Without a recommended size that is
+// "Default" (the device's canvas) and comes first; with one (`recommended`
+// from above) it is the recommended size, in its place among the others.
+// `offered` is from offered().
+inline std::vector<std::string> screen_options(const std::vector<std::string> &offered,
+                                               const std::string &recommended_size) {
+  std::vector<std::string> options;
+  if (recommended_size.empty())
+    options.emplace_back();
+  for (const auto &size : offered)
+    options.push_back(size == recommended_size ? std::string() : size);
+  return options;
+}
+
+// The option after `current` (the saved setting, "" for none); a setting that
+// is no longer offered goes back to "".
+inline std::string next_screen_option(const std::vector<std::string> &options, const std::string &current) {
+  for (size_t i = 0; i < options.size(); i++) {
+    if (options[i] == current)
+      return options[(i + 1) % options.size()];
+  }
+  return {};
+}
+
 }  // namespace canvas
 }  // namespace papp_loader
 }  // namespace esphome

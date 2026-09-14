@@ -124,7 +124,8 @@ class DataTests(unittest.TestCase):
         rich = app("psram_lvgl", data=False)
         rich.update({"author": "giltal", "category": "Demo", "about": "Longer text.", "controls": ["Touch: everything"],
                      "license": "MIT", "changelog": "0.1.0: first release", "upstream": {"project": "LVGL", "version": "9.2"},
-                     "canvas": ["1024x600", "800x480"],
+                     "canvas": ["1024x600", "800x480"], "canvas_recommended": "800x480",
+                     "requires": [{"path": "/sd/roms/lvgl/assets/", "note": "Pictures", "optional": True}],
                      "screenshots": [{"type": "image/png", "width": 800, "height": 480, "base64": base64.b64encode(mc_png(800, 480)).decode()}],
                      "icon": {"type": "image/png", "width": 48, "height": 48,
                               "base64": base64.b64encode(icon).decode()}})
@@ -147,7 +148,13 @@ class DataTests(unittest.TestCase):
         self.assertEqual((entry["license"], entry["changelog"]), ("MIT", "0.1.0: first release"))
         self.assertEqual(entry["upstream"], {"project": "LVGL", "version": "9.2"})
         self.assertEqual(entry["canvas"], ["1024x600", "800x480"])  # the store's Screen setting
+        self.assertEqual(entry["canvas_recommended"], "800x480")  # its default there
         self.assertNotIn("canvas", store["psram_doom"])
+        self.assertNotIn("canvas_recommended", store["psram_doom"])
+        # Required files: the listing's own, then what the store downloads.
+        self.assertEqual(entry["requires"], [{"path": "/sd/roms/lvgl/assets/", "note": "Pictures", "optional": True}])
+        self.assertEqual(store["psram_doom"]["requires"], [{"path": "/sd/roms/doom/doom1.wad", "download": True},
+                                                          {"path": "/sd/roms/quake/id1/pak0.pak", "download": True}])
         self.assertEqual(entry["screenshots"], [{"width": 800, "height": 480,
                                                  "url": "https://nonasuomy.github.io/papp-conversions/psram_lvgl-0.1.0-screen1.png"}])
         self.assertEqual((self.out / "psram_lvgl-0.1.0-screen1.png").read_bytes(), mc_png(800, 480))
@@ -159,6 +166,19 @@ class DataTests(unittest.TestCase):
         page = (self.out / "index.html").read_text()
         self.assertIn('<img src="psram_lvgl-0.1.0.png"', page)
         self.assertNotIn("base64", page)  # icons stay out of the 64 KB page
+
+
+class RequiresTests(unittest.TestCase):
+    def test_data_files_join_the_required_files_once(self):
+        a = app()
+        self.assertEqual([r["path"] for r in mc.requires_list(a)], ["/sd/roms/doom/doom1.wad", "/sd/roms/quake/id1/pak0.pak"])
+        a["requires"] = [{"path": "/sd/roms/doom/doom1.wad", "note": "Shareware Doom"}, {"path": "/sd/roms/doom/doom.wad",
+                                                                                         "optional": True}]
+        self.assertEqual(mc.requires_list(a), [{"path": "/sd/roms/doom/doom1.wad", "note": "Shareware Doom"},
+                                               {"path": "/sd/roms/doom/doom.wad", "optional": True},
+                                               {"path": "/sd/roms/quake/id1/pak0.pak", "download": True}])
+        self.assertEqual(mc.requires_list(app("psram_lvgl", data=False)), [])
+        self.assertNotIn("requires", mc.store_entry(REPO, app("psram_lvgl", data=False)))
 
 
 def mc_png(width: int, height: int) -> bytes:

@@ -123,6 +123,18 @@ def main() -> int:
             if path.suffix in (".c", ".h") and path.is_file():
                 tokens.update(TOKEN.findall(path.read_text(encoding="utf-8", errors="replace")))
     tokens -= NOT_OURS
+    # Every component's switch, including the ones only built by token
+    # pasting (pcm.c's CONFIG_ ## id ## _ENCODER), as configure lists them.
+    avcodec, avformat = src / "libavcodec", src / "libavformat"
+    everything = (externs(avcodec / "allcodecs.c", "FFCodec", "encoder")
+                  + externs(avcodec / "allcodecs.c", "FFCodec", "decoder")
+                  + externs(avcodec / "parsers.c", "AVCodecParser", "parser")
+                  + externs(avcodec / "bitstream_filters.c", "FFBitStreamFilter", "bsf")
+                  + externs(avcodec / "hwaccels.h", "FFHWAccel", "hwaccel")
+                  + externs(avformat / "allformats.c", "FFInputFormat", "demuxer")
+                  + externs(avformat / "allformats.c", "FFOutputFormat", "muxer")
+                  + externs(avformat / "protocols.c", "URLProtocol", "protocol"))
+    tokens |= {f"CONFIG_{c.upper()}" for c in everything}
 
     on = {f"CONFIG_{c.upper()}" for c in enabled | set(CONFIG_ON)} | {f"HAVE_{h.upper()}" for h in HAVE_ON}
     tokens |= on
@@ -166,7 +178,6 @@ def main() -> int:
 #endif /* AVUTIL_FFVERSION_H */
 """)
 
-    avcodec, avformat = src / "libavcodec", src / "libavformat"
     codecs = externs(avcodec / "allcodecs.c", "FFCodec", "encoder") + externs(avcodec / "allcodecs.c", "FFCodec", "decoder")
     component_list(gen / "libavcodec" / "codec_list.c", "FFCodec", "codec_list", codecs, enabled)
     component_list(gen / "libavcodec" / "parser_list.c", "AVCodecParser", "parser_list",

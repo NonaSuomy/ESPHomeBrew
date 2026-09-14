@@ -37,7 +37,7 @@
   },
   "paths": [
     "configure",
-    "compat/atomics/dummy"
+    "compat"
   ],
   "prebuild": [
     [
@@ -78,7 +78,10 @@
     "-Wno-discarded-qualifiers",
     "-Wno-switch",
     "-Wno-array-bounds",
-    "-Wno-stringop-overflow"
+    "-Wno-stringop-overflow",
+    "-Wno-error=incompatible-pointer-types",
+    "-Wno-incompatible-pointer-types",
+    "-Wno-error=int-conversion"
   ],
   "groups": [
     {
@@ -330,6 +333,9 @@
         "vpx_rac.c",
         "xiph.c",
         "xvididct.c"
+      ],
+      "includes": [
+        "libavcodec"
       ]
     },
     {
@@ -389,6 +395,9 @@
         "version.c",
         "vorbiscomment.c",
         "wavdec.c"
+      ],
+      "includes": [
+        "libavformat"
       ]
     },
     {

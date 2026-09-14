@@ -380,6 +380,10 @@ class PappLoader : public Component {
   int32_t mouse_dy_accum_{0};
   // Text reports are converted to press/release pairs. Keep enough room for
   // a short console command while Quake drains the queue on its worker task.
+  // Until when (esp_timer us) an arrow that arrived only as text holds its
+  // D-pad direction: up, right, down, left (the PAPP_INPUT_UP.. order).
+  static constexpr int64_t ARROW_TAP_US = 150000;
+  volatile int64_t arrow_tap_until_us_[4]{0, 0, 0, 0};
   static constexpr size_t KEYBOARD_QUEUE_SIZE = 128;
   papp_keyboard_event_t keyboard_queue_[KEYBOARD_QUEUE_SIZE]{};
   size_t keyboard_head_{0};

@@ -3728,10 +3728,10 @@ std::string PappLoader::app_file_path_(const char *path, std::string *root) {
 
 // A storage root is a mount point, which FAT cannot stat: it counts as a
 // folder when it can be listed.
-static bool stat_app_path(const std::string &local, const std::string &root, struct stat *st) {
-  if (local != root)
-    return stat(local.c_str(), st) == 0;
-  DIR *dir = opendir(local.c_str());
+static bool stat_app_path(const std::string &fs_path, const std::string &root, struct stat *st) {
+  if (fs_path != root)
+    return stat(fs_path.c_str(), st) == 0;
+  DIR *dir = opendir(fs_path.c_str());
   if (dir == nullptr)
     return false;
   closedir(dir);
@@ -3742,15 +3742,15 @@ static bool stat_app_path(const std::string &local, const std::string &root, str
 
 int PappLoader::svc_file_mkdir(const char *path) {
   std::string root;
-  const std::string local = app_file_path_(path, &root);
+  const std::string fs_path = app_file_path_(path, &root);
   struct stat st{};
-  if (local.empty())
+  if (fs_path.empty())
     return -1;
-  if (local == root)
-    return stat_app_path(local, root, &st) ? 0 : -1;
+  if (fs_path == root)
+    return stat_app_path(fs_path, root, &st) ? 0 : -1;
   // Each folder below the root, from the top down.
-  for (size_t slash = local.find('/', root.size() + 1);; slash = local.find('/', slash + 1)) {
-    const std::string part = slash == std::string::npos ? local : local.substr(0, slash);
+  for (size_t slash = fs_path.find('/', root.size() + 1);; slash = fs_path.find('/', slash + 1)) {
+    const std::string part = slash == std::string::npos ? fs_path : fs_path.substr(0, slash);
     if (stat(part.c_str(), &st) == 0) {
       if (!S_ISDIR(st.st_mode))
         return -1;  // a file is in the way
@@ -3765,13 +3765,13 @@ int PappLoader::svc_file_mkdir(const char *path) {
 
 int PappLoader::svc_file_remove(const char *path) {
   std::string root;
-  const std::string local = app_file_path_(path, &root);
+  const std::string fs_path = app_file_path_(path, &root);
   struct stat st{};
-  if (local.empty() || local == root || stat(local.c_str(), &st) != 0)
+  if (fs_path.empty() || fs_path == root || stat(fs_path.c_str(), &st) != 0)
     return -1;
-  const int result = S_ISDIR(st.st_mode) ? rmdir(local.c_str()) : unlink(local.c_str());
+  const int result = S_ISDIR(st.st_mode) ? rmdir(fs_path.c_str()) : unlink(fs_path.c_str());
   if (result != 0)
-    ESP_LOGW(TAG, "App remove %s failed (errno %d)", local.c_str(), errno);
+    ESP_LOGW(TAG, "App remove %s failed (errno %d)", fs_path.c_str(), errno);
   return result == 0 ? 0 : -1;
 }
 
@@ -3797,9 +3797,9 @@ int PappLoader::svc_file_stat(const char *path, papp_file_stat_t *out) {
     return -1;
   std::memset(out, 0, sizeof(*out));
   std::string root;
-  const std::string local = app_file_path_(path, &root);
+  const std::string fs_path = app_file_path_(path, &root);
   struct stat st{};
-  if (local.empty() || !stat_app_path(local, root, &st))
+  if (fs_path.empty() || !stat_app_path(fs_path, root, &st))
     return -1;
   out->is_dir = S_ISDIR(st.st_mode) ? 1 : 0;
   out->size = out->is_dir ? 0 : static_cast<uint64_t>(st.st_size);

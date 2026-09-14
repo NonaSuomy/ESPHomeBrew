@@ -474,14 +474,14 @@ std::string PappLoader::listing_recommended_canvas_(const std::string &source) c
     if (info.has_info && (this->catalog_entries_[i].second == source || (!info.name.empty() && info.name == key)))
       found = &info;
   }
-  AppInfo local;
+  AppInfo sidecar_info;
   if (found == nullptr && !is_network_url(source.c_str())) {
     // The listing next to the .papp (an installed copy's, say).
     std::string text;
     const std::string sidecar = sidecar_for(source);
     if (!sidecar.empty() && read_small_file(sidecar, &text, INFO_MAX_BYTES) == ESP_OK &&
-        parse_app_info(text, &local, false))
-      found = &local;
+        parse_app_info(text, &sidecar_info, false))
+      found = &sidecar_info;
   }
   if (found == nullptr || !found->supports_canvas())
     return {};

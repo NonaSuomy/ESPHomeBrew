@@ -74,6 +74,14 @@ typedef struct {
     int down;
 } papp_keyboard_event_t;
 
+/* One finger on the touch panel (touch_read_points), in canvas coordinates
+ * like touch_read. id stays the same while that finger stays down. */
+typedef struct {
+    int16_t x;
+    int16_t y;
+    uint8_t id;
+} papp_touch_point_t;
+
 /* ── Memory Capability Flags (matches ESP-IDF MALLOC_CAP_*) ─────────── */
 
 #define PAPP_MEM_CAP_SPIRAM   (1 << 10)  /* MALLOC_CAP_SPIRAM */
@@ -318,6 +326,29 @@ typedef struct {
      * launcher leaves them NULL and the canvas is always 800x480). */
     void (*display_get_size)(int *width, int *height);
     int  (*display_set_canvas)(int width, int height);
+
+    /* ── MIDI (a USB-MIDI cable or keyboard, usb_midi) ─────────────────
+     *   midi_read   Copies up to len received MIDI bytes into buf and
+     *               returns how many (0: nothing new). Plain MIDI, whole
+     *               messages, status byte first: 90 3C 64 is note on,
+     *               middle C. Bytes that came before the app started are
+     *               dropped.
+     *   midi_write  Sends whole MIDI messages (status byte first; SysEx
+     *               F0 ... F7 included; no running status). Returns 0 when
+     *               queued, -1 when no device is plugged in, the loader has
+     *               no usb_midi or the queue is full.
+     * Appended after display_set_canvas: NULL on older loaders. */
+    int  (*midi_read)(uint8_t *buf, int len);
+    int  (*midi_write)(const uint8_t *data, int len);
+
+    /* ── Multi-touch ────────────────────────────────────────────────────
+     *   touch_read_points  Fills up to max points with the fingers on the
+     *                      panel now (the first finger first) and returns
+     *                      how many; 0: none. Same canvas coordinates as
+     *                      touch_read; fingers outside the canvas are left
+     *                      out. The GT911 reports up to 5.
+     * Appended after midi_write: NULL on older loaders. */
+    int  (*touch_read_points)(papp_touch_point_t *points, int max);
 
 } app_services_t;
 

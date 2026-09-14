@@ -28,6 +28,7 @@ CONF_SPEAKER_ID = "speaker_id"
 CONF_TOGGLE_BUTTON = "toggle_button"
 CONF_LAUNCH_BUTTON = "launch_button"
 CONF_USB_HIDX_ID = "usb_hidx_id"
+CONF_USB_MIDI_ID = "usb_midi_id"
 CONF_LVGL_ID = "lvgl_id"
 CONF_FIRE_BUTTON = "fire_button"
 CONF_TOUCH_BUTTON = "touch_button"
@@ -53,6 +54,7 @@ PappLoader = papp_loader_ns.class_("PappLoader", cg.Component)
 LaunchUrlAction = papp_loader_ns.class_("LaunchUrlAction", automation.Action)
 CatalogActionTrigger = papp_loader_ns.class_("CatalogActionTrigger", automation.Trigger.template())
 USBHIDXComponent = cg.esphome_ns.namespace("usb_hidx").class_("USBHIDXComponent")
+UsbMidi = cg.esphome_ns.namespace("usb_midi").class_("UsbMidi")
 LvglComponent = cg.esphome_ns.namespace("lvgl").class_("LvglComponent")
 
 BUTTON_FIELDS = {
@@ -199,6 +201,8 @@ CONFIG_SCHEMA = cv.Schema(
         # Optional because network loading and the PAPP runtime can be used
         # without USB HIDX. When present, bind to the existing USBHIDX ID.
         cv.Optional(CONF_USB_HIDX_ID): cv.use_id(USBHIDXComponent),
+        # A usb_midi device for apps (midi_read / midi_write).
+        cv.Optional(CONF_USB_MIDI_ID): cv.use_id(UsbMidi),
         **BUTTON_SCHEMAS,
     }
 ).extend(cv.COMPONENT_SCHEMA)
@@ -298,6 +302,10 @@ async def to_code(config):
         cg.add_define("PAPP_LOADER_USE_USB_HIDX")
         usb_hidx_var = await cg.get_variable(usb_hidx_id)
         cg.add(var.set_usb_hidx(usb_hidx_var))
+
+    if usb_midi_id := config.get(CONF_USB_MIDI_ID):
+        cg.add_define("PAPP_LOADER_USE_USB_MIDI")
+        cg.add(var.set_usb_midi(await cg.get_variable(usb_midi_id)))
 
     for name, index in BUTTON_FIELDS.items():
         key = f"button_{name}"

@@ -72,6 +72,23 @@ uint16_t *fb = svc->display_get_framebuffer();   // w x h RGB565, stride w
 - On a canvas as wide as the panel the loader's close button is not drawn: taps in the canvas's top-right 58×58 pixels (plus a small margin) reach the app, and only a touch held there for 2 s closes it. Offer your own way out too.
 - Apps in this repository's `ports/` include `esphome/components/papp_loader/psram_app.h` and get the services from it. An app built against an older SDK header (such as RetroESP32-P4's) needs the two fields added after `net_resolve`, in the same order, or a newer header.
 
+### MIDI and multi-touch (for app authors)
+
+Three more services follow the canvas ones (NULL on older loaders, so null-check them):
+
+```c
+uint8_t buf[64];
+int n = svc->midi_read ? svc->midi_read(buf, sizeof buf) : 0;  // plain MIDI bytes: 90 3C 64 = note on, middle C
+static const uint8_t note_off[] = {0x80, 0x3C, 0x00};
+if (svc->midi_write) svc->midi_write(note_off, sizeof note_off); // whole messages, SysEx included
+
+papp_touch_point_t fingers[5];
+int count = svc->touch_read_points ? svc->touch_read_points(fingers, 5) : 0;
+```
+
+- MIDI comes from a class-compliant USB-MIDI cable or keyboard through the `usb_midi` component, when the loader has `usb_midi_id:` set. Bytes that arrived before the app started are dropped. `midi_write` returns -1 when no device is plugged in.
+- `touch_read_points` gives every finger on the panel (the GT911 reports up to 5), first finger first, in the same canvas coordinates as `touch_read`, each with an `id` that stays the same while that finger stays down.
+
 ### Custom recipes
 
 `custom` mirrors the upstream `tools/build_<game>_papp.ps1` scripts. Every path is relative to the source checkout, and none may leave it. Example (trimmed from `apps/psram_quake/papp.json`):

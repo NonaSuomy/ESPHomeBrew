@@ -693,8 +693,10 @@ void PappLoader::loop() {
   // Poll this independently of the app. Some small PAPPs do not call the
   // optional touch service themselves, but the shared close control must
   // still work for them.
-  if (this->launched_)
+  if (this->launched_) {
     this->poll_close_button_();
+    this->snapshot_touches_();
+  }
 
   if (this->launched_) {
     if (this->papp_loading_) {
@@ -943,6 +945,14 @@ bool PappLoader::start_loaded_app_(psram_app_handle_t app, const std::string &so
   ESP_LOGI(TAG, "Starting PAPP in worker task: %s", source.c_str());
   this->begin_report_(source);
   this->prepare_canvas_for_app_(source);
+#ifdef PAPP_LOADER_USE_USB_MIDI
+  // The app gets the notes played from now on, not what piled up before.
+  if (this->usb_midi_ != nullptr) {
+    uint8_t stale[64];
+    while (this->usb_midi_->read(stale, sizeof(stale)) > 0) {
+    }
+  }
+#endif
 
 #ifdef PAPP_LOADER_USE_LVGL
   // LVGL must not draw over the PAPP framebuffer. Pause it from the ESPHome
@@ -1602,6 +1612,24 @@ bool PappLoader::close_touch_(int x, int y) {
     ESP_LOGI(TAG, "PAPP on-screen close requested");
   }
   return true;
+}
+
+// Copies the fingers on the panel for touch_read_points: the touchscreen
+// component updates its list on this (the main loop's) task.
+void PappLoader::snapshot_touches_() {
+  if (this->touchscreen_ == nullptr)
+    return;
+  const touchscreen::TouchPoints_t touches = this->touchscreen_->get_touches();
+  portENTER_CRITICAL(&this->touch_points_lock_);
+  int count = 0;
+  for (const auto &touch : touches) {
+    if (count == MAX_TOUCH_POINTS)
+      break;
+    if ((touch.state & touchscreen::STATE_RELEASING) == 0)
+      this->touch_points_[count++] = touch;
+  }
+  this->touch_point_count_ = count;
+  portEXIT_CRITICAL(&this->touch_points_lock_);
 }
 
 void PappLoader::flush_framebuffer_() {
@@ -2642,6 +2670,42 @@ void PappLoader::svc_display_get_size(int *width, int *height) {
 int PappLoader::svc_display_set_canvas(int width, int height) {
   return active_ != nullptr ? active_->set_canvas_(width, height) : -1;
 }
+int PappLoader::svc_touch_read_points(papp_touch_point_t *points, int max) {
+  if (active_ == nullptr || points == nullptr || max <= 0)
+    return 0;
+  touchscreen::TouchPoint touches[MAX_TOUCH_POINTS];
+  portENTER_CRITICAL(&active_->touch_points_lock_);
+  const int count = active_->touch_point_count_;
+  for (int i = 0; i < count; i++)
+    touches[i] = active_->touch_points_[i];
+  portEXIT_CRITICAL(&active_->touch_points_lock_);
+  const canvas::Geometry geometry = active_->geometry_;
+  int out = 0;
+  for (int i = 0; i < count && out < max; i++) {
+    int x = 0, y = 0;
+    if (!geometry.to_canvas(touches[i].x, touches[i].y, &x, &y))
+      continue;
+    points[out].x = static_cast<int16_t>(x);
+    points[out].y = static_cast<int16_t>(y);
+    points[out].id = touches[i].id;
+    out++;
+  }
+  return out;
+}
+int PappLoader::svc_midi_read(uint8_t *buf, int len) {
+#ifdef PAPP_LOADER_USE_USB_MIDI
+  if (active_ != nullptr && active_->usb_midi_ != nullptr && buf != nullptr && len > 0)
+    return static_cast<int>(active_->usb_midi_->read(buf, static_cast<size_t>(len)));
+#endif
+  return 0;
+}
+int PappLoader::svc_midi_write(const uint8_t *data, int len) {
+#ifdef PAPP_LOADER_USE_USB_MIDI
+  if (active_ != nullptr && active_->usb_midi_ != nullptr && data != nullptr && len > 0)
+    return active_->usb_midi_->write(data, static_cast<size_t>(len)) ? 0 : -1;
+#endif
+  return -1;
+}
 void PappLoader::svc_display_write_frame_custom(const uint16_t *buffer, uint16_t in_w, uint16_t in_h,
                                                 float scale, bool byte_swap) {
   if (active_ != nullptr)
@@ -3237,6 +3301,9 @@ void PappLoader::populate_services(app_services_t *services) {
   services->net_resolve = &PappLoader::svc_net_resolve;
   services->display_get_size = &PappLoader::svc_display_get_size;
   services->display_set_canvas = &PappLoader::svc_display_set_canvas;
+  services->midi_read = &PappLoader::svc_midi_read;
+  services->midi_write = &PappLoader::svc_midi_write;
+  services->touch_read_points = &PappLoader::svc_touch_read_points;
 }
 
 esp_err_t psram_app_load(const char *path, psram_app_handle_t *out_handle) {

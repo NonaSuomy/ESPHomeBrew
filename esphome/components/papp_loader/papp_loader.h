@@ -526,6 +526,8 @@ class PappLoader : public Component {
   psram_app_handle_t papp_load_handle_{nullptr};
   std::string papp_load_source_;
   volatile bool papp_loading_{false};
+  // Warned once that LVGL woke on input while an app ran (loop()).
+  bool lvgl_resume_warned_{false};
   volatile bool papp_load_done_{false};
   volatile int papp_load_result_{-1};
   volatile bool papp_task_done_{false};

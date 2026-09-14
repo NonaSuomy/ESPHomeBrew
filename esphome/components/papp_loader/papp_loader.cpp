@@ -698,6 +698,23 @@ void PappLoader::loop() {
   if (this->launched_) {
     this->poll_close_button_();
     this->snapshot_touches_();
+#ifdef PAPP_LOADER_USE_LVGL
+    // ESPHome's LVGL resumes itself on any touch or key while paused when
+    // `resume_on_input` is on (its default), and then repaints the launcher
+    // (the black shield) over the running app. Apps that redraw every frame
+    // hide it; NetSurf, which only pushes changed frames, went black on the
+    // first tap. Pause it again at once; `lvgl: resume_on_input: false` in
+    // the YAML avoids even the one repainted frame.
+    if (this->papp_task_handle_ != nullptr && !this->papp_loading_ && this->lvgl_ != nullptr &&
+        this->lvgl_->is_loop_started() && !this->lvgl_->is_paused()) {
+      this->lvgl_->set_paused(true, false);
+      if (!this->lvgl_resume_warned_) {
+        this->lvgl_resume_warned_ = true;
+        ESP_LOGW(TAG, "LVGL resumed by touch/key input during a PAPP and was paused again; "
+                      "set 'resume_on_input: false' under lvgl: to stop it repainting over apps");
+      }
+    }
+#endif
   }
 
   if (this->launched_) {

@@ -1159,51 +1159,25 @@ void PappLoader::set_catalog_selection_(uint16_t index) {
 }
 
 void PappLoader::handle_launcher_controls_() {
-  // The launcher uses the same controls as the PAPP runtime.  Detect edges
+  // The launcher sees exactly what an app would: gamepad buttons, the ADC
+  // ladder, sticks, the fire/touch buttons (as A), held keyboard keys
+  // (arrows/WASD, Space/Enter/Z, X, Backspace...) and arrow taps. Detect edges
   // here instead of treating a held HID report or ADC value as repeated
   // presses every ESPHome loop iteration.
+  papp_gamepad_state_t input;
+  this->read_input_(&input);
   uint8_t direction = 0;
-  auto pressed = [this](uint8_t index) {
-    return this->buttons_[index] != nullptr && this->buttons_[index]->get_state();
-  };
-  if (pressed(PAPP_INPUT_UP))
-    direction |= 1U << 0;
-  if (pressed(PAPP_INPUT_RIGHT))
-    direction |= 1U << 1;
-  if (pressed(PAPP_INPUT_DOWN))
-    direction |= 1U << 2;
-  if (pressed(PAPP_INPUT_LEFT))
-    direction |= 1U << 3;
-
-  // GPIO16 is the Elecrow resistor ladder. Keep the same thresholds used by
-  // the original Elecrow ESPHome PAPP configuration, including diagonals.
-  if (this->adc_button_sensor_ != nullptr) {
-    const float voltage = this->adc_button_sensor_->get_state();
-    if (voltage < 1.48f) {
-      direction |= (1U << 2) | (1U << 3);  // down + left
-    } else if (voltage < 1.60f) {
-      direction |= (1U << 0) | (1U << 3);  // up + left
-    } else if (voltage < 1.75f) {
-      direction |= 1U << 3;  // left
-    } else if (voltage < 1.95f) {
-      direction |= (1U << 2) | (1U << 1);  // down + right
-    } else if (voltage < 2.10f) {
-      direction |= (1U << 0) | (1U << 1);  // up + right
-    } else if (voltage < 2.40f) {
-      direction |= 1U << 1;  // right
-    } else if (voltage < 2.75f) {
-      direction |= 1U << 2;  // down
-    } else if (voltage < 3.10f) {
-      direction |= 1U << 0;  // up
-    }
+  for (uint8_t i = 0; i < 4; i++) {  // PAPP_INPUT_UP, RIGHT, DOWN, LEFT
+    if (input.values[PAPP_INPUT_UP + i])
+      direction |= 1U << i;
   }
-
-  const bool a = pressed(PAPP_INPUT_A);
-  const bool b = pressed(PAPP_INPUT_B);
-  const bool l = pressed(PAPP_INPUT_L);
-  const bool r = pressed(PAPP_INPUT_R);
-  const bool select = pressed(PAPP_INPUT_SELECT);
-  const bool touch = this->touch_button_ != nullptr && this->touch_button_->get_state();
+  const bool a = input.values[PAPP_INPUT_A] != 0;
+  // Menu (the keyboard's Escape) also goes back.
+  const bool b = input.values[PAPP_INPUT_B] != 0 || input.values[PAPP_INPUT_MENU] != 0;
+  const bool l = input.values[PAPP_INPUT_L] != 0;
+  const bool r = input.values[PAPP_INPUT_R] != 0;
+  const bool select = input.values[PAPP_INPUT_SELECT] != 0;
+  const bool touch = false;  // read_input_ already counts the touch button as A
   const bool active = direction != 0 || a || b || l || r || select || touch;
   auto remember = [&]() {
     this->launcher_direction_state_ = direction;

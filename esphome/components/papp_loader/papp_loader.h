@@ -364,6 +364,7 @@ class PappLoader : public Component {
   void enqueue_keyboard_event_(int key, bool down);
   void enqueue_keyboard_tap_(int key);
   void poll_close_button_();
+  bool close_touch_(int x, int y);
   int read_touch_(int *x, int *y);
   void audio_init_(int sample_rate);
   void audio_submit_(short *stereo_buf, int frame_count);
@@ -469,6 +470,9 @@ class PappLoader : public Component {
   // the normal PAPP X/action input so every loader-backed app gets the same
   // exit request, including apps that do not draw their own controls.
   volatile bool global_close_requested_{false};
+  // When a touch on a close control drawn over the canvas started (us, 0 =
+  // none): that one closes only when held (close_touch_).
+  int64_t close_hold_since_us_{0};
   // When it was requested (esp_timer us): the buttons a close shows the app
   // follow a short sequence from then on (close_buttons_()).
   volatile int64_t close_requested_us_{0};

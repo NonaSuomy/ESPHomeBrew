@@ -175,7 +175,7 @@ typedef struct {
      * transform, inside the app's canvas: x in [0, width-1], y in
      * [0, height-1] — [0,799] x [0,479] unless the app chose another canvas
      * with display_set_canvas. Touches outside the canvas (and on the
-     * loader's close control) are not reported.
+     * loader's close control beside it) are not reported.
      * Returns 1 if currently touched (and fills *x,*y), 0 if not. Either
      * pointer may be NULL. */
     int (*touch_read)(int *x, int *y);
@@ -290,7 +290,11 @@ typedef struct {
      *                       framebuffer and the whole panel to black; asking
      *                       for the current size changes nothing. Call it
      *                       before drawing, from the task that draws, and
-     *                       read display_get_framebuffer afterwards.
+     *                       read display_get_framebuffer afterwards. On a
+     *                       canvas too wide for the close control beside it,
+     *                       the control is not drawn: taps in the canvas's
+     *                       top-right corner reach the app and only a 2 s
+     *                       hold there closes it, so offer your own exit.
      *
      * Typical use:
      *     int w = 800, h = 480;

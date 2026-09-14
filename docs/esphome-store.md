@@ -107,7 +107,7 @@ papp_loader:
 - `panel_width`/`panel_height` are only needed if the display reports its size wrongly. Both pairs go together (both or neither).
 - The three frame buffers are allocated once for the whole panel: about 3.7 MB of PSRAM for 1024×600 instead of 2.3 MB. If that much is not free at boot, the log says so and every app stays at 800×480.
 - A smaller canvas is centred with black around it and moves less data each frame.
-- The close button stays right of the canvas when there is room (as with 800×480). A canvas too wide for that gets it over its top-right corner, where a touch closes the app instead of reaching it.
+- The close button stays right of the canvas when there is room (as with 800×480). A canvas too wide for that has no close button drawn: taps in its top-right corner reach the app, and holding that corner for 2 s closes the app.
 - Screenshots and the remote view capture the canvas at its size. When an app switches size, and when one that switched closes, the whole panel is cleared.
 
 **Per-app Screen setting.** An app whose listing has `"canvas"` ([building.md](building.md#store-listing-optional)) gets a **Screen** button on its detail page. Each press moves to the next choice and saves it: **Default** (`canvas_width`/`canvas_height`), then the panel size, 1024×600, 800×480 and 640×480 (those that fit the panel), or the sizes the listing names. The app gets it the next time it starts.

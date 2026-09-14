@@ -1571,14 +1571,37 @@ void PappLoader::poll_close_button_() {
     return;
 
   auto touch = this->touchscreen_->get_touch();
-  if (!touch.has_value() || (touch->state & touchscreen::STATE_RELEASING) != 0)
-    return;
-
-  if (this->geometry_.in_close(touch->x, touch->y)) {
-    this->begin_close_();
-    ESP_LOGI(TAG, "PAPP on-screen close requested");
+  if (!touch.has_value() || (touch->state & touchscreen::STATE_RELEASING) != 0) {
+    this->close_hold_since_us_ = 0;
     return;
   }
+  this->close_touch_(touch->x, touch->y);
+}
+
+// A touch on the close control; true when it asked the app to close. Beside
+// the canvas the control is drawn and a touch closes at once. A canvas too
+// wide for that margin (a full-panel one) has app controls in that corner
+// (Tulip's power and shuffle buttons), so the control is not drawn there:
+// taps reach the app and only a touch held CLOSE_HOLD_US closes.
+bool PappLoader::close_touch_(int x, int y) {
+  static constexpr int64_t CLOSE_HOLD_US = 2000000;
+  const canvas::Geometry geometry = this->geometry_;
+  if (!geometry.in_close(x, y)) {
+    this->close_hold_since_us_ = 0;
+    return false;
+  }
+  if (!geometry.close_beside()) {
+    const int64_t now = esp_timer_get_time();
+    if (this->close_hold_since_us_ == 0)
+      this->close_hold_since_us_ = now;
+    if (now - this->close_hold_since_us_ < CLOSE_HOLD_US)
+      return false;
+  }
+  if (!this->global_close_requested_) {
+    this->begin_close_();
+    ESP_LOGI(TAG, "PAPP on-screen close requested");
+  }
+  return true;
 }
 
 void PappLoader::flush_framebuffer_() {
@@ -1669,10 +1692,14 @@ void PappLoader::send_display_buffer_(const uint16_t *display_buffer, int64_t fl
       geometry.raw_x(), geometry.raw_y(), geometry.canvas_w, geometry.canvas_h,
       reinterpret_cast<const uint8_t *>(display_buffer), display::COLOR_ORDER_RGB,
       display::COLOR_BITNESS_565, false);
-  if (this->launched_)
-    this->draw_close_overlay_();
-  else
-    this->clear_close_overlay_();
+  // Over the canvas (close_touch_) the control is neither drawn nor cleared:
+  // either would cover the app's own corner.
+  if (geometry.close_beside()) {
+    if (this->launched_)
+      this->draw_close_overlay_();
+    else
+      this->clear_close_overlay_();
+  }
 
   const int64_t flush_us = esp_timer_get_time() - flush_start_us;
   static uint32_t flush_frames = 0;
@@ -2452,17 +2479,14 @@ int PappLoader::read_touch_(int *x, int *y) {
       ESP_LOGI(TAG, "PAPP touch RELEASED");
       this->touch_active_ = false;
     }
+    this->close_hold_since_us_ = 0;
     return 0;
   }
 
   const int physical_x = touch->x;
   const int physical_y = touch->y;
   const canvas::Geometry geometry = this->geometry_;
-  if (geometry.in_close(physical_x, physical_y)) {
-    if (!this->global_close_requested_) {
-      this->begin_close_();
-      ESP_LOGI(TAG, "PAPP on-screen close requested");
-    }
+  if (this->close_touch_(physical_x, physical_y)) {
     this->touch_active_ = true;
     return 0;
   }

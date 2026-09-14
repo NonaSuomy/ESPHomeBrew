@@ -69,7 +69,7 @@ uint16_t *fb = svc->display_get_framebuffer();   // w x h RGB565, stride w
 - Call `display_set_canvas` once, before drawing, from the task that draws. Sizes are even, at least 320×240 and at most the panel; `display_get_size`'s answer always qualifies. A switch clears the framebuffer and the panel to black.
 - Everything on the display side then uses the new size: the framebuffer and `display_flush`, `display_clear`, `display_write_frame_rgb565` (one full canvas), `display_write_rect`, `display_write_frame_custom` and `display_emu_flush` (the scaled frame centred in the canvas), `touch_read` (canvas coordinates) and screenshots.
 - An app with fixed sizes (a build-time resolution, say) picks the largest of its own sizes that fits in what `display_get_size` returns, or simply asks for the one size it has, and lists them under `canvas` in `papp.json`. An app built only for 1024×600 can call `display_set_canvas(1024, 600)` directly and draw scaled down (for example with `display_write_frame_custom`) if that fails.
-- On a canvas as wide as the panel the loader's close button covers the canvas's top-right 58×58 pixels (plus a small margin); touches there close the app.
+- On a canvas as wide as the panel the loader's close button is not drawn: taps in the canvas's top-right 58×58 pixels (plus a small margin) reach the app, and only a touch held there for 2 s closes it. Offer your own way out too.
 - Apps in this repository's `ports/` include `esphome/components/papp_loader/psram_app.h` and get the services from it. An app built against an older SDK header (such as RetroESP32-P4's) needs the two fields added after `net_resolve`, in the same order, or a newer header.
 
 ### Custom recipes

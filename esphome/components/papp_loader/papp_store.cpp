@@ -1003,7 +1003,29 @@ void PappLoader::build_drawer_() {
   one_line(title, inner);
   char count[32];
   std::snprintf(count, sizeof(count), "%u app(s)", static_cast<unsigned>(this->catalog_entries_.size()));
-  lv_obj_t *where = text_label(panel, (source != nullptr ? source->url : this->catalog_url_) + "\n" + count, COLOR_MUTED);
+  std::string about_source = (source != nullptr ? source->url : this->catalog_url_) + "\n" + count;
+  // A folder source reads the storage roots: say what each holds (or that it
+  // is missing), e.g. "Root files: sd 29 | usb0 -". Rebuilt on every refresh.
+  const std::string &url = source != nullptr ? source->url : this->catalog_url_;
+  if (!url.empty() && url[0] == '/') {
+    std::string roots;
+    for (const auto &root : this->data_search_) {
+      int entries = -1;
+      if (DIR *dir = opendir(runtime_path(root.c_str()).c_str())) {
+        entries = 0;
+        while (dirent *entry = readdir(dir)) {
+          if (std::strcmp(entry->d_name, ".") != 0 && std::strcmp(entry->d_name, "..") != 0)
+            entries++;
+        }
+        closedir(dir);
+      }
+      roots += (roots.empty() ? "" : "  |  ") + root.substr(1) + " " +
+               (entries < 0 ? std::string("-") : std::to_string(entries));
+    }
+    if (!roots.empty())
+      about_source += "\nRoot files: " + roots;
+  }
+  lv_obj_t *where = text_label(panel, about_source, COLOR_MUTED);
   set_font(where, small_font());
   lv_obj_set_width(where, inner);
   lv_label_set_long_mode(where, LV_LABEL_LONG_WRAP);

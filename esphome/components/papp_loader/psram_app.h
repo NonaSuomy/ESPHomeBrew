@@ -393,7 +393,50 @@ typedef struct {
     int  (*net_tls_recv)(int handle, void *buf, int len);
     void (*net_tls_close)(int handle);
 
+    /* ── App hand-off (one app opening another) ─────────────────────────
+     * An app can hand the device to another app and, if it likes, get it
+     * back afterwards: NetSurf opens a video link in psram_video, which
+     * returns to the page when it quits.
+     *   app_open            Open `target` with the argument `arg` (NULL or ""
+     *                       for none; at most PAPP_APP_ARG_MAX - 1 bytes).
+     *                       `target` is an app's name such as "psram_video",
+     *                       found the way the store and library find it (the
+     *                       installed copy in the install folder, then each
+     *                       library source in order: its folder, or its HTTP
+     *                       catalog page), the http(s):// URL of a .papp, or
+     *                       the /sd/... path of one. Returns 0 when accepted,
+     *                       -1 when the app is unknown, the argument is too
+     *                       long, a close or another hand-off is under way,
+     *                       or return_after would make more than two apps
+     *                       wait. May block for a few seconds while an HTTP
+     *                       catalog is searched. Once accepted, the loader
+     *                       asks the calling app to quit exactly as its close
+     *                       control does (the app may also just return from
+     *                       app_entry at once), then starts the target. With
+     *                       return_after non-zero, the loader starts the
+     *                       caller again after the target quits (or fails to
+     *                       load), with the caller's resume argument.
+     *   app_get_arg         The argument this app was launched with: copied
+     *                       into buf (NUL-terminated, cut to len - 1 bytes).
+     *                       Returns its full length, 0 when there is none
+     *                       (launches from the store, the library, a button
+     *                       or remotely). buf may be NULL when len is 0.
+     *   app_set_resume_arg  The argument this app gets when the loader starts
+     *                       it again after an app it opened with return_after
+     *                       (the page to show again, say). It starts out as
+     *                       the app's own launch argument. Returns 0, or -1
+     *                       when longer than PAPP_APP_ARG_MAX - 1 bytes.
+     * An app opened this way runs like one started from the store. At most two
+     * apps wait to be returned to, and a launch from the menu forgets them.
+     * Appended after net_tls_close: NULL on older loaders. */
+    int  (*app_open)(const char *target, const char *arg, int return_after);
+    int  (*app_get_arg)(char *buf, int len);
+    int  (*app_set_resume_arg)(const char *arg);
+
 } app_services_t;
+
+/* Size of the largest app_open / app_set_resume_arg argument, NUL included. */
+#define PAPP_APP_ARG_MAX 2048
 
 /* ── Entry Point Signature ───────────────────────────────────────────── */
 /*

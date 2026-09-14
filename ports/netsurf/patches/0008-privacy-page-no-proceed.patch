@@ -1,0 +1,43 @@
+--- a/content/fetchers/about/query_privacy.c
++++ b/content/fetchers/about/query_privacy.c
+@@ -114,6 +114,32 @@
+ 		}
+ 	}
+ 
++#ifdef PAPP_NETSURF
++	/* The PAPP loader makes the TLS connection and always checks the
++	 * certificate; there is no way to go on without that check. */
++	(void)reason;
++	(void)chainurl;
++	res = fetch_about_ssenddataf(ctx,
++			 "<div><p>The device could not make a secure connection "
++			 "to this site. Either the site's certificate could not "
++			 "be verified against the device's certificate bundle "
++			 "(it is self-signed, expired, for another name, or from "
++			 "an authority the bundle does not know), or the "
++			 "connection or TLS handshake failed. The device log "
++			 "says which.</p></div>"
++			 "<div><p>This browser cannot skip the certificate "
++			 "check. If the site also works without encryption, "
++			 "try its http:// address.</p></div>");
++	if (res != NSERROR_OK) {
++		goto fetch_about_query_ssl_handler_aborted;
++	}
++	res = fetch_about_ssenddataf(ctx,
++			 "<div id=\"buttons\">"
++			 "<input type=\"submit\" id=\"back\" name=\"back\" "
++			 "value=\"%s\" class=\"default-action\">"
++			 "</div>",
++			 messages_get("Backtosafety"));
++#else
+ 	if (chainurl == NULL) {
+ 		res = fetch_about_ssenddataf(ctx,
+ 				 "<div><p>%s</p></div>"
+@@ -140,6 +166,7 @@
+ 			 "</div>",
+ 			 messages_get("Backtosafety"),
+ 			 messages_get("Proceed"));
++#endif
+ 	if (res != NSERROR_OK) {
+ 		goto fetch_about_query_ssl_handler_aborted;
+ 	}

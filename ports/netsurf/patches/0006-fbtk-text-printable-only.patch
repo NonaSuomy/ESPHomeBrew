@@ -1,0 +1,17 @@
+--- a/frontends/framebuffer/fbtk/text.c
++++ b/frontends/framebuffer/fbtk/text.c
+@@ -442,6 +442,14 @@
+ 			break;
+ 		}
+ 
++#ifdef PAPP_NETSURF
++		/* printable ASCII only: other keys (F-keys, Delete) are
++		 * not text */
++		if ((fbtk_keycode_to_ucs4(value, modifier) < 32) ||
++		    (fbtk_keycode_to_ucs4(value, modifier) > 126))
++			break;
++#endif
++
+ 		/* allow for new character and null */
+ 		temp = realloc(widget->u.text.text, widget->u.text.len + 2);
+ 		if (temp == NULL) {

@@ -1,0 +1,35 @@
+--- a/utils/config.h
++++ b/utils/config.h
+@@ -208,4 +208,31 @@
+ 	#define NO_IPV6
+ #endif
+ 
+-#endif
++/* ESP32-P4 PAPP loader: newlib without sockets, directory listing, mmap,
++ * regex or signals. The port (ports/netsurf) supplies the headers and
++ * the functions NetSurf's own fallbacks (utils/utils.c) do not cover. */
++#if defined(PAPP_NETSURF)
++#undef HAVE_MMAP
++#undef WITH_MMAP
++#undef HAVE_SCANDIR
++#undef HAVE_DIRFD
++#undef HAVE_UNLINKAT
++#undef HAVE_FSTATAT
++#undef HAVE_REGEX
++#undef HAVE_SIGPIPE
++#undef HAVE_REALPATH
++char *realpath(const char *path, char *resolved_path);
++#undef HAVE_INETATON
++#undef HAVE_INETPTON
++#undef HAVE_EXECINFO
++#ifndef NO_IPV6
++#define NO_IPV6 1
++#endif
++#include <errno.h>
++#include <limits.h>
++#ifndef PATH_MAX
++#define PATH_MAX 1024
++#endif
++#endif
++
++#endif

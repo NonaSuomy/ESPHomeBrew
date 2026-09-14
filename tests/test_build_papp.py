@@ -4,6 +4,7 @@ Run: python3 -m unittest discover -s tests
 """
 
 import json
+import os
 import struct
 import sys
 import tempfile
@@ -33,6 +34,7 @@ class ManifestTests(unittest.TestCase):
                 if m["build"] == "custom":
                     self.assertTrue(m["groups"])
                 bp.check_data(m["name"], m.get("data"))
+                bp.check_submodules(m["name"], m)
                 bp.store_info(m["name"], m, path.parent)
 
     def test_store_listing_is_checked(self):
@@ -188,6 +190,15 @@ class PortRecipeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             bp.group_files(self.root, {"dir": "common", "files": ["*.cpp"], "exclude": ["missing.cpp"]})
 
+    def test_recursive_globs_keep_subfolders_in_object_names(self):
+        for rel in ["lib/core/obj.c", "lib/draw/obj.c", "lib/top.c", "lib/notes.txt"]:
+            (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / rel).write_text("")
+        group = {"dir": "lib", "files": ["**/*.c"], "exclude": ["top.c"], "prefix": "lv_"}
+        self.assertEqual(bp.group_files(self.root, group), ["core/obj.c", "draw/obj.c"])
+        units, _ = bp.custom_units({"groups": [group]}, self.root, Path(self.tmp.name) / "build")
+        self.assertEqual(sorted(u.obj.name for u in units), ["lv_core_obj.o", "lv_draw_obj.o"])
+
     def test_local_paths_resolve_inside_this_repository(self):
         self.assertEqual(bp.source_file(self.root, "local:tools/build_papp.py"), (bp.ROOT / "tools/build_papp.py").resolve())
         with self.assertRaises(ValueError):
@@ -228,6 +239,103 @@ class PortRecipeTests(unittest.TestCase):
                 bp.apply_patches(repo, ["local:ports/demo/patches/none-*.patch"])
         finally:
             bp.ROOT = saved
+
+
+def git(cwd, *args):
+    import subprocess
+    return subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "protocol.file.allow=always",
+                           *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+class SubmoduleAndPrebuildTests(unittest.TestCase):
+    """Extra pinned repositories inside the source tree, and code generators run before compiling."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def make_repo(self, name, files):
+        repo = self.base / name
+        repo.mkdir()
+        git(repo, "init", "-q")
+        git(repo, "config", "uploadpack.allowFilter", "true")
+        git(repo, "config", "uploadpack.allowAnySHA1InWant", "true")
+        for rel, text in files.items():
+            (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (repo / rel).write_text(text)
+        git(repo, "add", ".")
+        git(repo, "commit", "-q", "-m", "files")
+        return repo, git(repo, "rev-parse", "HEAD")
+
+    def test_submodules_are_validated(self):
+        good = {"path": "lib/mp", "repo": "https://github.com/o/r", "ref": "a" * 40}
+        self.assertEqual(bp.check_submodules("x", {"submodules": [good]}), [good])
+        self.assertEqual(bp.check_submodules("x", {}), [])
+        for bad in ({**good, "ref": "main"}, {**good, "path": "../up"}, {**good, "path": "/abs"},
+                    {**good, "repo": "git@github.com:o/r"}, {**good, "path": "a/./b"}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                bp.check_submodules("x", {"submodules": [bad]})
+        with self.assertRaises(ValueError):
+            bp.check_submodules("x", {"submodules": [good, {**good, "path": "lib/mp/inner"}]})
+
+    def test_paths_are_shared_out_between_the_checkout_and_its_submodules(self):
+        subs = [{"path": "micropython"}, {"path": "amy"}, {"path": "lib/whole"}]
+        main, per_sub = bp.split_sparse(["tulip/shared", "micropython", "micropython/py", "micropython/extmod",
+                                         "amy/src", "lib/whole"], subs)
+        self.assertEqual(main, ["tulip/shared"])
+        self.assertEqual(per_sub, {"micropython": ["/py", "/extmod"], "amy": ["/src"], "lib/whole": None})
+        paths = bp.manifest_paths({"paths": ["tulip/fs"], "includes": ["local:x", ".", "a/inc"],
+                                   "groups": [{"dir": "a", "files": [], "includes": ["b"]}]})
+        self.assertEqual(paths, ["tulip/fs", "a/inc", "a", "b"])
+
+    def test_submodules_are_fetched_at_the_pinned_commit(self):
+        sub, sub_ref = self.make_repo("sub", {"py/a.c": "int a;\n", "docs/big.txt": "x\n"})
+        top, top_ref = self.make_repo("top", {"main.c": "int m;\n"})
+        # Record the submodule in the upstream tree, as `git submodule add` would.
+        git(top, "update-index", "--add", "--cacheinfo", f"160000,{sub_ref},mp")
+        git(top, "commit", "-q", "-m", "gitlink")
+        top_ref = git(top, "rev-parse", "HEAD")
+        src = bp.fetch(top.as_uri(), top_ref, self.base / "src", None)
+        entry = {"path": "mp", "repo": sub.as_uri(), "ref": sub_ref}
+        bp.fetch_submodules(src, [entry], {"mp": ["/py"]})
+        self.assertEqual((src / "mp/py/a.c").read_text(), "int a;\n")
+        self.assertFalse((src / "mp/docs/big.txt").exists())  # sparse: only what the recipe uses
+        with self.assertRaises(ValueError):  # upstream pins a different commit
+            bp.fetch_submodules(src, [{**entry, "ref": "b" * 40}], {"mp": None})
+        # Patches may touch submodule files; the next build starts from the pinned files again.
+        (src / "mp/py/a.c").write_text("changed\n")
+        (src / bp.GEN_DIR).mkdir()
+        self.assertEqual(bp.apply_patches(src, [], ["mp"]), [])
+        self.assertEqual((src / "mp/py/a.c").read_text(), "int a;\n")
+        self.assertTrue((src / ".papp-ref").exists())  # cache stamp survives the reset
+        self.assertFalse((src / bp.GEN_DIR).exists())
+
+    def test_prebuild_runs_generators_with_the_compile_units(self):
+        src = self.base / "src"
+        (src / "app").mkdir(parents=True)
+        (src / "app/main.c").write_text("")
+        script = self.base / "gen.py"
+        script.write_text(
+            "import json, sys, pathlib\n"
+            "units = json.load(open(sys.argv[2]))\n"
+            "gen = pathlib.Path(sys.argv[1])\n"
+            "(gen / 'made.c').write_text('/* ' + ' '.join(u['obj'] for u in units) + ' */\\n')\n")
+        manifest = {"cflags": ["-DX=1"], "groups": [{"dir": "app", "files": ["main.c"]},
+                                                     {"dir": bp.GEN_DIR, "files": ["made.c"], "prefix": "gen_"}],
+                    "prebuild": [["{python}", str(script), "{gen}", "{units}"]]}
+        (src / bp.GEN_DIR).mkdir()
+        (src / bp.GEN_DIR / "stale.c").write_text("")
+        bp.run_prebuild(manifest, src, self.base / "build", self.base, dict(os.environ))
+        self.assertEqual((src / bp.GEN_DIR / "made.c").read_text(), "/* main.o gen_made.o */\n")
+        self.assertFalse((src / bp.GEN_DIR / "stale.c").exists())
+        units = json.loads((src / bp.GEN_DIR / "units.json").read_text())
+        self.assertIn("-DX=1", units[0]["flags"])
+        self.assertEqual(bp.prebuild_args(["-o{gen}/x", "{jobs}"], {"gen": "/g", "jobs": "4"}), ["-o/g/x", "4"])
+        with self.assertRaises(ValueError):
+            bp.run_prebuild({**manifest, "prebuild": ["echo hi"]}, src, self.base / "build", self.base, {})
 
 
 class HeaderTests(unittest.TestCase):

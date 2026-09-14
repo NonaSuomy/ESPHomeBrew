@@ -1,0 +1,38 @@
+diff --git a/components/openlara/src/core.h b/components/openlara/src/core.h
+index 8cb6a97..a8ecdc7 100644
+--- a/components/openlara/src/core.h
++++ b/components/openlara/src/core.h
+@@ -77,6 +77,12 @@
+     #define _GAPI_SW   1
+     #define INV_QUALITY
+     #define INV_STEREO
++    #ifdef __PAPP__
++        // ESP32-P4 PSRAM app: the engine runs on a single task and the
++        // port provides osMutex* itself (no pthreads in a PAPP).
++        #define _OS_PAPP   1
++        #undef OS_PTHREAD_MT
++    #endif
+ #elif __HAIKU__
+     #define _GAPI_GL    1
+     #define INV_QUALITY
+@@ -1029,6 +1035,20 @@ namespace Core {
+         settings.controls[0].keys[ cAction    ].key = ikS;
+     #endif
+ 
++    // PAPP gamepad (the port feeds its buttons as the same-named JoyKeys):
++    // A action, B jump, X walk, Y look, L draw weapon, R roll,
++    // START inventory, SELECT start. The inventory itself uses A/B as
++    // select/back.
++    #ifdef _OS_PAPP
++        settings.controls[0].keys[ cJump      ].joy = jkB;
++        settings.controls[0].keys[ cWalk      ].joy = jkX;
++        settings.controls[0].keys[ cLook      ].joy = jkY;
++        settings.controls[0].keys[ cWeapon    ].joy = jkLB;
++        settings.controls[0].keys[ cRoll      ].joy = jkRB;
++        settings.controls[0].keys[ cInventory ].joy = jkStart;
++        settings.controls[0].keys[ cStart     ].joy = jkSelect;
++    #endif
++
+     // use D key for jump in browsers
+     #ifdef _OS_WEB
+         settings.controls[0].keys[ cJump      ].key = ikD;

@@ -1,0 +1,21 @@
+--- a/amy/src/amy.c
++++ b/amy/src/amy.c
+@@ -117,6 +117,18 @@
+ }
+ void amy_init_lock() {
+     InitializeCriticalSection(&amy_queue_lock);
++}
++#elif defined TULIP_PAPP
++// Tulip on the ESP32-P4 PAPP loader: the MicroPython and audio tasks share
++// the queue through the port's spinlock (ports/tulip/papp_syscalls.c).
++extern void papp_amy_lock(int grab);
++void amy_grab_lock() {
++    papp_amy_lock(1);
++}
++void amy_release_lock() {
++    papp_amy_lock(0);
++}
++void amy_init_lock() {
+ }
+ #elif defined _POSIX_THREADS
+ pthread_mutex_t amy_queue_lock;

@@ -2,7 +2,9 @@
 //
 // A bare-metal style port: no OS underneath, only the loader's service table
 // (papp_svc). Modelled on Tulip's esp32s3 port (tulip/esp32s3/mpconfigport.h)
-// minus the hardware drivers, networking, threads and native code.
+// minus the hardware drivers, threads and native code. Networking is not
+// MicroPython's own (no lwIP or mbedTLS in the app): socket, tls/ssl and
+// network are frozen Python in py/ over the loader's services (papp_net.c).
 #pragma once
 
 #include <stdint.h>

@@ -14,8 +14,10 @@ are fetched at pinned commits (`apps/psram_tulip/papp.json`: tulipcc, and its
 | `papp_display.c` | Tulip's compositor into a 1024x600 loader canvas, or scaled to 800x480 on older loaders (30 fps target), keyboard, gamepad and touch input |
 | `papp_audio.c` | AMY rendered into the loader's speaker (44.1 kHz), AMY's platform hooks |
 | `papp_vfs.c` | `_papp`: `/sd` (files by name), the block device for Tulip's filesystem image, `/sys` tar, `quit()` |
+| `papp_net.c` | `_pappnet`: the loader's network services (UDP, TCP, DNS, TLS, the device's address) for the Python modules below |
 | `papp_syscalls.c` | newlib: heap (PSRAM, freed on quit), files, time, spinlocks |
 | `py/_boot.py` | Replaces Tulip's `_boot.py`: filesystems, `/sys`, then Tulip's own start-up |
+| `py/socket.py`, `py/tls.py`, `py/ssl.py`, `py/network.py` | Networking through the loader (below) |
 | `patches/` | `tulip.board()` = `"PAPP"`, AMY's queue lock |
 
 ## Tasks and memory
@@ -55,11 +57,40 @@ are fetched at pinned commits (`apps/psram_tulip/papp.json`: tulipcc, and its
 - Quit: Menu (or Escape) held 3 s, the loader's close control, `_papp.quit()`,
   or Ctrl-D on an empty REPL line (a Tulip soft reboot restarts the chip).
 
+## Network
+
+Tulip uses the device's own network (Ethernet or Wi-Fi, set up by the
+firmware's ESPHome configuration) through the loader's `net_*` services; the
+app has no network stack or TLS library of its own.
+
+- `socket`: TCP and UDP, IPv4. `getaddrinfo`, `connect`, `send`/`sendall`/
+  `write`, `recv`/`read`/`readinto`/`readline`, `bind`/`sendto`/`recvfrom`,
+  `listen`/`accept`, `settimeout`/`setblocking`. Sockets block by default:
+  waits poll the loader with short sleeps (Ctrl-C works). A socket is an
+  `io.IOBase` stream, so `select.poll` and `asyncio` can wait on it.
+- `tls` and `ssl`: `SSLContext(...).wrap_socket(sock, server_hostname=...)`
+  and `ssl.wrap_socket`. The loader makes the TLS connection (esp-tls): it
+  connects again to the socket's server, checks the certificate against the
+  firmware's CA bundle and the name against `server_hostname` (also sent as
+  SNI), and the plain TCP connection is dropped. Certificates are always
+  checked; `verify_mode = CERT_NONE` (tuliprequests sets it) changes nothing,
+  and custom CAs or client certificates are refused. Needs a loader with the
+  `net_tls_*` services; at most 4 TLS connections at once.
+- `network`: `WLAN(STA_IF)` reports the device's network: `isconnected()`,
+  `ifconfig()` (address and netmask; gateway and DNS read 0.0.0.0),
+  `status()`, `active()`. `connect()` changes nothing and says so.
+- So `tuliprequests`, `tulip.url_get()`/`url_save()`, Tulip World
+  (`world.ls()`, `world.download()`, `world.upload()`), `tulip.ip()` (the
+  device's address) and `tulip.wifi()` (prints that the device's network is
+  used, returns the address) work without patches to Tulip.
+- On an older loader the missing services raise `OSError` saying which one is
+  missing, and `network` reports no connection.
+- Certificate checks do not need Tulip's clock (which starts at 1970): with
+  ESP-IDF's default mbedTLS settings the loader does not check certificate
+  dates.
+
 ## Not in this first version
 
-- Network: no `socket`/`network`/TLS, so Tulip World, `tulip.wifi()`,
-  `upgrade()` and `tuliprequests` do not work. The loader has UDP/TCP
-  services a socket module could use; TLS would need mbedTLS in the app.
 - MIDI: no MIDI in or out (the loader has no MIDI service); AMY runs with
   `AMY_HOST_MIDI` and empty `run_midi`/`stop_midi`/`midi_out`.
 - Native code: no `@micropython.native`/`viper` and no tinycc (C compiled

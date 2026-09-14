@@ -553,6 +553,16 @@ int _isatty_r(struct _reent *r, int fd) { (void)r; return _isatty(fd); }
 int _kill_r(struct _reent *r, int pid, int sig) { (void)r; return _kill(pid, sig); }
 int _getpid_r(struct _reent *r) { (void)r; return 1; }
 
+// Sockets are the loader's (net_* services, papp_http.c), not POSIX ones.
+int socket(int domain, int type, int protocol)
+{
+    (void)domain;
+    (void)type;
+    (void)protocol;
+    errno = ENOSYS;
+    return -1;
+}
+
 int uname(struct utsname *buf)
 {
     memset(buf, 0, sizeof(*buf));

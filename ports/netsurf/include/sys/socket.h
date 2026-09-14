@@ -25,4 +25,7 @@ struct sockaddr {
 #define SOCK_STREAM 1
 #define SOCK_DGRAM 2
 
+// NetSurf's default socket_open hook (unused: no libcurl); always fails.
+int socket(int domain, int type, int protocol);
+
 #endif

@@ -1,11 +1,13 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
+#include "esp_timer.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
@@ -27,6 +29,9 @@
 namespace esphome {
 namespace papp_loader {
 
+// A button in a library source's side menu (YAML catalogs: actions:).
+class CatalogActionTrigger : public Trigger<> {};
+
 class PappLoader : public Component {
  public:
   static constexpr uint8_t BUTTON_COUNT = PAPP_INPUT_MAX;
@@ -44,6 +49,21 @@ class PappLoader : public Component {
   void select_catalog_index(size_t index);
   // Step through the catalogs: +1 next, -1 previous (wraps around).
   void next_catalog(int step = 1);
+  // ESPHOMEBREW store view (YAML `library_style: grid`): the library shows
+  // icon tiles instead of a list, and tapping an app opens its detail page
+  // (about, controls, sizes, Stream / Install / Launch / Update). App info
+  // comes from the <app>.json next to each .papp (see docs/building.md).
+  void set_store_ui(bool enabled) { this->store_ui_ = enabled; }
+  // Where Install puts apps (as <name>.papp plus its <name>.json).
+  void set_install_dir(const std::string &dir) { this->install_dir_ = dir; }
+  // The store view's side menu, which slides out from the right edge: Refresh
+  // plus these buttons for the source on screen (YAML `actions:` of a catalog).
+  void add_catalog_action(size_t catalog, const std::string &label, Trigger<> *trigger) {
+    if (catalog < this->catalogs_.size())
+      this->catalogs_[catalog].actions.emplace_back(label, trigger);
+  }
+  void set_side_menu(bool open);
+  void toggle_side_menu() { this->set_side_menu(!this->side_menu_open_); }
   // The catalog shown first (YAML `default_catalog`); set before setup().
   void set_initial_catalog(size_t index) {
     if (index < this->catalogs_.size()) {
@@ -245,6 +265,8 @@ class PappLoader : public Component {
   static void papp_task_entry_(void *arg);
   static void papp_load_task_entry_(void *arg);
   static void papp_catalog_task_entry_(void *arg);
+  static void papp_info_task_entry_(void *arg);
+  static void papp_install_task_entry_(void *arg);
   esp_err_t sync_app_data_(const std::string &papp_url);
   std::string find_data_file_(const std::string &target) const;
   esp_err_t download_data_file_(const data::DataFile &file, const std::string &path, uint32_t done_before,
@@ -306,6 +328,26 @@ class PappLoader : public Component {
   binary_sensor::BinarySensor *launch_button_{nullptr};
   binary_sensor::BinarySensor *fire_button_{nullptr};
   binary_sensor::BinarySensor *touch_button_{nullptr};
+  // A capacitive pad can read ON for good (toggle mode latched, calibrated
+  // while touched): after 10 s ON without a change it is ignored as A until it
+  // turns OFF, so it cannot hold A down in apps or keep the launcher unarmed.
+  int64_t touch_on_since_us_{0};
+  bool touch_stuck_logged_{false};
+  bool touch_button_stuck_() {
+    const int64_t now = esp_timer_get_time();
+    if (this->touch_on_since_us_ == 0)
+      this->touch_on_since_us_ = now;
+    const bool stuck = now - this->touch_on_since_us_ > 10000000;
+    if (stuck && !this->touch_stuck_logged_) {
+      ESP_LOGW("papp_loader", "Touch button ON for over 10 s: ignored as A until it is released");
+      this->touch_stuck_logged_ = true;
+    }
+    return stuck;
+  }
+  void touch_button_released_() {
+    this->touch_on_since_us_ = 0;
+    this->touch_stuck_logged_ = false;
+  }
   sensor::Sensor *adc_button_sensor_{nullptr};
   sensor::Sensor *left_stick_x_sensor_{nullptr};
   sensor::Sensor *left_stick_y_sensor_{nullptr};
@@ -427,11 +469,59 @@ class PappLoader : public Component {
   struct CatalogSource {
     std::string name;
     std::string url;
+    std::vector<std::pair<std::string, Trigger<> *>> actions;
   };
+  bool side_menu_open_{false};
   std::vector<CatalogSource> catalogs_;
   size_t catalog_index_{0};
   // The URL the running fetch is for: a switch mid-fetch refetches afterwards.
   std::string catalog_fetch_url_;
+
+  // ── Store view (papp_store.cpp) ──
+ public:
+  // One app's listing, from its <app>.json (all fields optional).
+  struct AppInfo {
+    bool has_info{false};
+    std::string name, title, version, author, category, license, about, changelog, upstream, source;
+    std::vector<std::string> controls;
+    uint32_t size{0}, data_size{0};
+    std::string sha256;
+    std::string sidecar;            // the raw JSON, saved next to an installed copy
+    std::vector<uint8_t> icon_png;  // decoded from the listing's base64 icon
+    std::shared_ptr<uint16_t> tile_icon;  // 112x112 RGB565 in PSRAM, decoded by the info task
+  };
+
+ protected:
+  bool store_ui_{false};
+  std::string install_dir_{"/sd/roms/papp"};
+  // Info for catalog_entries_ (same order), fetched by a task after each listing.
+  std::vector<AppInfo> app_info_;
+  std::vector<AppInfo> info_result_;
+  std::vector<std::string> info_urls_;
+  uint32_t catalog_generation_{0};
+  uint32_t info_generation_{0};
+  TaskHandle_t info_task_handle_{nullptr};
+  volatile bool info_loading_{false};
+  volatile bool info_done_{false};
+  void start_info_fetch_();
+  void poll_info_fetch_();
+  // name -> installed version, from <install_dir>/*.json.
+  std::vector<std::pair<std::string, std::string>> installed_;
+  // The same, as found by the info and install tasks; the loop takes it over.
+  std::vector<std::pair<std::string, std::string>> info_installed_;
+  std::vector<std::pair<std::string, std::string>> install_installed_;
+  static std::vector<std::pair<std::string, std::string>> scan_installed_(const std::string &install_dir);
+  std::string installed_version_(const std::string &name) const;
+  // Install/Update of one app: the .papp (checked against its size and
+  // sha256), its data, then its listing, in a task.
+  int install_index_{-1};
+  AppInfo install_info_;  // copies for the task: app_info_ can be replaced meanwhile
+  std::string install_url_;
+  TaskHandle_t install_task_handle_{nullptr};
+  volatile bool install_done_{false};
+  volatile esp_err_t install_result_{ESP_OK};
+  void start_install_(int index);
+  void poll_install_();
   void list_catalog_folder_();
   TaskHandle_t papp_catalog_task_handle_{nullptr};
   volatile bool catalog_loading_{false};
@@ -460,6 +550,46 @@ class PappLoader : public Component {
   bool launcher_a_state_{false};
   bool launcher_touch_state_{false};
   bool launcher_input_armed_{false};
+  bool launcher_b_state_{false};
+  bool launcher_l_state_{false};
+  bool launcher_r_state_{false};
+  // Store view widgets.
+  struct AppIcon {
+    std::shared_ptr<uint16_t> pixels;
+    lv_image_dsc_t dsc{};
+  };
+  std::vector<AppIcon> tile_icons_;  // per app, 112x112
+  std::vector<lv_obj_t *> catalog_tiles_;
+  uint16_t grid_columns_{1};
+  lv_obj_t *detail_panel_{nullptr};
+  AppIcon detail_icon_{};
+  std::vector<lv_obj_t *> detail_buttons_;
+  std::vector<uint8_t> detail_actions_;
+  uint8_t detail_focus_{0};
+  int detail_index_{-1};
+  std::string detail_url_;  // reopened after the grid is rebuilt, if still listed
+  // Side menu: a panel on the library page, parked off the right edge with its tab showing.
+  lv_obj_t *drawer_{nullptr};
+  std::vector<lv_obj_t *> drawer_buttons_;
+  std::vector<int> drawer_actions_;  // -1 = Refresh, else an index into the source's actions
+  uint8_t drawer_focus_{0};
+  bool launcher_select_state_{false};
+  void build_drawer_();
+  void focus_drawer_button_(uint8_t index);
+  void run_drawer_action_(int action);
+  static void store_drawer_event_cb_(lv_event_t *event);
+  static void store_tile_event_cb_(lv_event_t *event);
+  static void store_button_event_cb_(lv_event_t *event);
+  static void release_icon_(AppIcon *icon);
+  static void set_icon_(AppIcon *icon, std::shared_ptr<uint16_t> pixels, uint16_t side);
+  void free_icons_();
+  void build_store_grid_();
+  void open_detail_(int index);
+  void close_detail_();
+  void focus_detail_button_(uint8_t index);
+  void run_detail_action_(uint8_t action);
+  bool handle_store_controls_(uint8_t newly_pressed, bool a_pressed, bool b_pressed, bool l_pressed, bool r_pressed,
+                              bool select_pressed);
 #endif
 };
 

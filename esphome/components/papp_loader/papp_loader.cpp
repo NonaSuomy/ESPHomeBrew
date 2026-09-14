@@ -1,4 +1,5 @@
 #include "papp_loader.h"
+#include "papp_internal.h"
 
 #include <algorithm>
 #include <cctype>
@@ -73,7 +74,6 @@ static constexpr size_t MAX_NETWORK_PAPP_SIZE = 16 * 1024 * 1024;
 static constexpr size_t HTTP_READ_BUFFER_SIZE = 16 * 1024;
 static constexpr uint32_t HTTP_TIMEOUT_MS = 15000;
 static constexpr uint8_t HTTP_MAX_REDIRECTIONS = 5;
-static constexpr size_t MAX_CATALOG_SIZE = 64 * 1024;
 // Not 3232: that is ESPHome's OTA port on ESP32, taken as soon as the YAML has `ota:`.
 static constexpr uint16_t SCREEN_STREAM_PORT = 3233;
 // This is a diagnostic transport, not the panel's render target.  Keeping it
@@ -173,7 +173,7 @@ static bool forget_papp_cap_task(TaskHandle_t handle) {
 
 PappLoader *PappLoader::active_ = nullptr;
 
-static std::string runtime_path(const char *path) {
+std::string runtime_path(const char *path) {
   if (path == nullptr)
     return {};
   std::string result(path);
@@ -190,13 +190,12 @@ static size_t align_up(size_t value, size_t alignment) {
   return (value + alignment - 1) & ~(alignment - 1);
 }
 
-static bool is_network_url(const char *value) {
+bool is_network_url(const char *value) {
   if (value == nullptr)
     return false;
   return std::strncmp(value, "http://", 7) == 0 || std::strncmp(value, "https://", 8) == 0;
 }
 
-static esp_err_t fetch_http_text(const char *url, std::string *out);
 static std::vector<std::pair<std::string, std::string>> parse_papp_catalog(const std::string &html,
                                                                              const std::string &base_url);
 
@@ -437,6 +436,41 @@ void PappLoader::take_menu_shot_() {
       std::memcpy(pixels + y * w, shot->data + y * stride, w * sizeof(uint16_t));
   }
   lv_draw_buf_destroy(shot);
+  // What the top layer shows (a store detail page, the progress panel) is not
+  // part of the screen: blend each visible child on top.
+  lv_obj_t *top = lv_layer_top();
+  for (uint32_t i = 0; pixels != nullptr && top != nullptr && i < lv_obj_get_child_count(top); i++) {
+    lv_obj_t *child = lv_obj_get_child(top, static_cast<int32_t>(i));
+    if (child == nullptr || lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN))
+      continue;
+    lv_draw_buf_t *layer = lv_snapshot_take(child, LV_COLOR_FORMAT_ARGB8888);
+    if (layer == nullptr)
+      continue;
+    lv_area_t area;
+    lv_obj_get_coords(child, &area);
+    // The snapshot is the object plus its extra draw area on every side.
+    const int32_t x0 = area.x1 - (static_cast<int32_t>(layer->header.w) - lv_area_get_width(&area)) / 2;
+    const int32_t y0 = area.y1 - (static_cast<int32_t>(layer->header.h) - lv_area_get_height(&area)) / 2;
+    for (int32_t y = 0; y < static_cast<int32_t>(layer->header.h); y++) {
+      const int32_t sy = y0 + y;
+      if (sy < 0 || sy >= static_cast<int32_t>(h))
+        continue;
+      const uint8_t *src = layer->data + y * layer->header.stride;
+      for (int32_t x = 0; x < static_cast<int32_t>(layer->header.w); x++) {
+        const int32_t sx = x0 + x;
+        const uint8_t *p = src + x * 4;  // B, G, R, A
+        const uint32_t a = p[3];
+        if (sx < 0 || sx >= static_cast<int32_t>(w) || a == 0)
+          continue;
+        uint16_t &d = pixels[sy * w + sx];
+        const uint32_t dr = (d >> 8) & 0xF8, dg = (d >> 3) & 0xFC, db = (d << 3) & 0xF8;
+        const uint32_t r = (p[2] * a + dr * (255 - a)) / 255, g = (p[1] * a + dg * (255 - a)) / 255,
+                       b = (p[0] * a + db * (255 - a)) / 255;
+        d = static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+      }
+    }
+    lv_draw_buf_destroy(layer);
+  }
   this->menu_shot_ = pixels;
   this->menu_shot_w_ = pixels != nullptr ? static_cast<uint16_t>(w) : 0;
   this->menu_shot_h_ = pixels != nullptr ? static_cast<uint16_t>(h) : 0;
@@ -451,6 +485,8 @@ void PappLoader::loop() {
       this->take_menu_shot_();
   }
   this->update_progress_ui_();
+  this->poll_info_fetch_();
+  this->poll_install_();
   if (this->catalog_loading_ && this->catalog_done_) {
     if (this->papp_catalog_task_handle_ != nullptr) {
       vTaskDelete(this->papp_catalog_task_handle_);
@@ -466,6 +502,7 @@ void PappLoader::loop() {
                static_cast<unsigned>(this->catalog_entries_.size()));
       for (const auto &entry : this->catalog_entries_)
         ESP_LOGI(TAG, "  PAPP: %s -> %s", entry.first.c_str(), entry.second.c_str());
+      this->start_info_fetch_();
 #ifdef PAPP_LOADER_USE_LVGL
       this->catalog_ui_pending_ = true;
 #endif
@@ -478,8 +515,9 @@ void PappLoader::loop() {
     }
   }
 #ifdef PAPP_LOADER_USE_LVGL
-  if (this->catalog_ui_pending_ && this->catalog_container_ != nullptr && this->lvgl_ != nullptr &&
-      this->lvgl_->is_loop_started()) {
+  // While a PAPP runs, the rebuild waits: LVGL is paused under the app.
+  if (this->catalog_ui_pending_ && !this->launched_ && this->catalog_container_ != nullptr &&
+      this->lvgl_ != nullptr && this->lvgl_->is_loop_started()) {
     this->update_catalog_ui_();
     this->catalog_ui_pending_ = false;
   }
@@ -594,6 +632,7 @@ void PappLoader::select_catalog_index(size_t index) {
   this->catalog_url_ = this->catalogs_[index].url;
   ESP_LOGI(TAG, "PAPP library: %s (%s)", this->catalogs_[index].name.c_str(), this->catalog_url_.c_str());
   this->catalog_entries_.clear();
+  this->start_info_fetch_();
 #ifdef PAPP_LOADER_USE_LVGL
   this->catalog_ui_pending_ = true;
 #endif
@@ -665,6 +704,7 @@ void PappLoader::list_catalog_folder_() {
   this->catalog_entries_ = std::move(entries);
   ESP_LOGI(TAG, "PAPP folder catalog %s: %u application(s)", folder.c_str(),
            static_cast<unsigned>(this->catalog_entries_.size()));
+  this->start_info_fetch_();
 #ifdef PAPP_LOADER_USE_LVGL
   this->catalog_ui_pending_ = true;
 #endif
@@ -768,16 +808,20 @@ bool PappLoader::start_loaded_app_(psram_app_handle_t app, const std::string &so
   // loop task; the PAPP worker never calls LVGL directly.
   if (this->lvgl_ != nullptr && this->lvgl_->is_loop_started()) {
     // Direct-rendered PAPPs share the launcher LVGL display but have no LVGL
-    // object of their own. Put an invisible clickable object on top of the
-    // launcher so a release cannot activate or invalidate a button underneath
-    // the PAPP between its frame updates.
+    // object of their own. Put a black clickable object over the whole
+    // launcher, top layer included (store detail page, side menu): a release
+    // cannot reach a button underneath, and the panel around the canvas is
+    // black instead of a frozen store or launcher page.
     if (this->touch_modal_shield_ == nullptr) {
-      lv_obj_t *screen = this->lvgl_->get_screen_active();
-      if (screen != nullptr) {
-        this->touch_modal_shield_ = lv_obj_create(screen);
+      lv_obj_t *top = lv_layer_top();
+      if (top != nullptr) {
+        this->touch_modal_shield_ = lv_obj_create(top);
         lv_obj_remove_style_all(this->touch_modal_shield_);
         lv_obj_set_size(this->touch_modal_shield_, LV_PCT(100), LV_PCT(100));
         lv_obj_center(this->touch_modal_shield_);
+        lv_obj_set_style_bg_color(this->touch_modal_shield_, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(this->touch_modal_shield_, LV_OPA_COVER, 0);
+        lv_obj_move_foreground(this->touch_modal_shield_);
         lv_obj_add_flag(this->touch_modal_shield_, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(
             this->touch_modal_shield_,
@@ -797,7 +841,7 @@ bool PappLoader::start_loaded_app_(psram_app_handle_t app, const std::string &so
     }
     // The PAPP canvas does not cover the whole panel: whatever LVGL last drew
     // around it stays visible while the app runs. Hide the finished download
-    // bar and redraw once, or it stays on screen at 100% under the app.
+    // bar and redraw once, so the panel shows only the black shield.
     this->set_progress_(false, 0, 0, "%s", "");
     this->update_progress_ui_();
     lv_refr_now(nullptr);
@@ -1080,6 +1124,20 @@ void PappLoader::papp_catalog_task_entry_(void *arg) {
 void PappLoader::set_catalog_selection_(uint16_t index) {
   if (this->catalog_container_ == nullptr)
     return;
+  if (this->store_ui_) {
+    // Store view: the tiles sit in one grid object under the switcher row.
+    if (this->catalog_tiles_.empty()) {
+      this->catalog_selection_ = 0;
+      return;
+    }
+    index = std::min<uint16_t>(index, static_cast<uint16_t>(this->catalog_tiles_.size() - 1));
+    this->catalog_selection_ = index;
+    for (lv_obj_t *tile : this->catalog_tiles_)
+      lv_obj_remove_state(tile, LV_STATE_FOCUSED);
+    lv_obj_add_state(this->catalog_tiles_[index], LV_STATE_FOCUSED);
+    lv_obj_scroll_to_view_recursive(this->catalog_tiles_[index], LV_ANIM_ON);
+    return;
+  }
 
   // `index` counts apps; the switcher row, when present, comes first.
   const uint32_t children = lv_obj_get_child_count(this->catalog_container_);
@@ -1106,68 +1164,57 @@ void PappLoader::set_catalog_selection_(uint16_t index) {
 }
 
 void PappLoader::handle_launcher_controls_() {
-  // The launcher uses the same controls as the PAPP runtime.  Detect edges
+  // The launcher sees exactly what an app would: gamepad buttons, the ADC
+  // ladder, sticks, the fire/touch buttons (as A), held keyboard keys
+  // (arrows/WASD, Space/Enter/Z, X, Backspace...) and arrow taps. Detect edges
   // here instead of treating a held HID report or ADC value as repeated
   // presses every ESPHome loop iteration.
+  papp_gamepad_state_t input;
+  this->read_input_(&input);
   uint8_t direction = 0;
-  auto pressed = [this](uint8_t index) {
-    return this->buttons_[index] != nullptr && this->buttons_[index]->get_state();
-  };
-  if (pressed(PAPP_INPUT_UP))
-    direction |= 1U << 0;
-  if (pressed(PAPP_INPUT_RIGHT))
-    direction |= 1U << 1;
-  if (pressed(PAPP_INPUT_DOWN))
-    direction |= 1U << 2;
-  if (pressed(PAPP_INPUT_LEFT))
-    direction |= 1U << 3;
-
-  // GPIO16 is the Elecrow resistor ladder. Keep the same thresholds used by
-  // the original Elecrow ESPHome PAPP configuration, including diagonals.
-  if (this->adc_button_sensor_ != nullptr) {
-    const float voltage = this->adc_button_sensor_->get_state();
-    if (voltage < 1.48f) {
-      direction |= (1U << 2) | (1U << 3);  // down + left
-    } else if (voltage < 1.60f) {
-      direction |= (1U << 0) | (1U << 3);  // up + left
-    } else if (voltage < 1.75f) {
-      direction |= 1U << 3;  // left
-    } else if (voltage < 1.95f) {
-      direction |= (1U << 2) | (1U << 1);  // down + right
-    } else if (voltage < 2.10f) {
-      direction |= (1U << 0) | (1U << 1);  // up + right
-    } else if (voltage < 2.40f) {
-      direction |= 1U << 1;  // right
-    } else if (voltage < 2.75f) {
-      direction |= 1U << 2;  // down
-    } else if (voltage < 3.10f) {
-      direction |= 1U << 0;  // up
-    }
+  for (uint8_t i = 0; i < 4; i++) {  // PAPP_INPUT_UP, RIGHT, DOWN, LEFT
+    if (input.values[PAPP_INPUT_UP + i])
+      direction |= 1U << i;
   }
-
-  const bool a = pressed(PAPP_INPUT_A);
-  const bool touch = this->touch_button_ != nullptr && this->touch_button_->get_state();
-  const bool active = direction != 0 || a || touch;
+  const bool a = input.values[PAPP_INPUT_A] != 0;
+  // Menu (the keyboard's Escape) also goes back.
+  const bool b = input.values[PAPP_INPUT_B] != 0 || input.values[PAPP_INPUT_MENU] != 0;
+  const bool l = input.values[PAPP_INPUT_L] != 0;
+  const bool r = input.values[PAPP_INPUT_R] != 0;
+  const bool select = input.values[PAPP_INPUT_SELECT] != 0;
+  const bool touch = false;  // read_input_ already counts the touch button as A
+  const bool active = direction != 0 || a || b || l || r || select || touch;
+  auto remember = [&]() {
+    this->launcher_direction_state_ = direction;
+    this->launcher_a_state_ = a;
+    this->launcher_b_state_ = b;
+    this->launcher_l_state_ = l;
+    this->launcher_r_state_ = r;
+    this->launcher_select_state_ = select;
+    this->launcher_touch_state_ = touch;
+  };
 
   // Do not let a controller that is held during cold boot select or scroll a
   // PAPP before the user has released it once. This is the same protection
   // used for the normal launch button and avoids the old phantom-input loop.
   if (!this->launcher_input_armed_) {
-    if (!active) {
-      this->launcher_input_armed_ = true;
-      this->launcher_direction_state_ = 0;
-      this->launcher_a_state_ = false;
-      this->launcher_touch_state_ = false;
+    if (!active)
       ESP_LOGD(TAG, "Launcher controls armed after input release");
-    } else {
-      this->launcher_direction_state_ = direction;
-      this->launcher_a_state_ = a;
-      this->launcher_touch_state_ = touch;
-    }
+    this->launcher_input_armed_ = !active;
+    remember();
     return;
   }
 
   const uint8_t newly_pressed = direction & static_cast<uint8_t>(~this->launcher_direction_state_);
+  if (this->store_ui_) {
+    // Grid and detail page: d-pad moves, A opens / presses, B goes back, L/R switch
+    // sources, Select opens the side menu.
+    this->handle_store_controls_(newly_pressed, (a && !this->launcher_a_state_) || (touch && !this->launcher_touch_state_),
+                                 b && !this->launcher_b_state_, l && !this->launcher_l_state_,
+                                 r && !this->launcher_r_state_, select && !this->launcher_select_state_);
+    remember();
+    return;
+  }
   // Left/right switch catalogs (up/down still move through the list).
   if (this->catalogs_.size() > 1 && (newly_pressed & ((1U << 1) | (1U << 3))) != 0 &&
       (newly_pressed & ((1U << 0) | (1U << 2))) == 0) {
@@ -1199,16 +1246,22 @@ void PappLoader::handle_launcher_controls_() {
     }
   }
 
-  this->launcher_direction_state_ = direction;
-  this->launcher_a_state_ = a;
-  this->launcher_touch_state_ = touch;
+  remember();
 }
 
 void PappLoader::update_catalog_ui_() {
   if (this->catalog_container_ == nullptr)
     return;
 
+  // The store view keeps the selection and an open detail page across rebuilds
+  // (listings arriving, an install finishing).
+  const uint16_t keep_selection = this->catalog_selection_;
+  const std::string reopen_url = this->detail_url_;
+  if (this->store_ui_)
+    this->close_detail_();
   lv_obj_clean(this->catalog_container_);
+  this->catalog_tiles_.clear();
+  this->free_icons_();
   this->catalog_selection_ = 0;
   this->catalog_header_rows_ = 0;
   if (this->catalogs_.size() > 1) {
@@ -1220,8 +1273,32 @@ void PappLoader::update_catalog_ui_() {
       this->catalog_header_rows_ = 1;
     }
   }
+  if (this->store_ui_) {
+    // The list's light theme does not suit the store: dark, switcher row included.
+    lv_obj_set_style_bg_color(this->catalog_container_, lv_color_hex(0x08111F), 0);
+    lv_obj_set_style_text_color(this->catalog_container_, lv_color_hex(0xE2E8F0), 0);
+    if (this->catalog_header_rows_ > 0) {
+      lv_obj_t *header = lv_obj_get_child(this->catalog_container_, 0);
+      lv_obj_set_style_bg_color(header, lv_color_hex(0x111C33), 0);
+      lv_obj_set_style_text_color(header, lv_color_hex(0xE2E8F0), 0);
+      lv_obj_set_style_border_color(header, lv_color_hex(0x1E2A44), 0);
+    }
+    this->build_drawer_();  // this source's side menu, even when it lists nothing
+  }
   if (this->catalog_entries_.empty()) {
     lv_list_add_text(this->catalog_container_, this->catalog_loading_ ? "Loading..." : "No .papp files found");
+    return;
+  }
+  if (this->store_ui_) {
+    this->build_store_grid_();
+    this->set_catalog_selection_(keep_selection);
+    for (size_t i = 0; i < this->catalog_entries_.size() && !reopen_url.empty(); i++) {
+      if (this->catalog_entries_[i].second == reopen_url) {
+        this->set_catalog_selection_(static_cast<uint16_t>(i));
+        this->open_detail_(static_cast<int>(i));
+        break;
+      }
+    }
     return;
   }
 
@@ -2057,8 +2134,12 @@ void PappLoader::read_input_(papp_gamepad_state_t *state) {
   // normal A/fire input, and the touch button is an additional A/fire input.
   if (this->fire_button_ != nullptr && this->fire_button_->get_state())
     state->values[PAPP_INPUT_A] = 1;
-  if (this->touch_button_ != nullptr && this->touch_button_->get_state())
-    state->values[PAPP_INPUT_A] = 1;
+  if (this->touch_button_ != nullptr) {
+    if (!this->touch_button_->get_state())
+      this->touch_button_released_();
+    else if (!this->touch_button_stuck_())
+      state->values[PAPP_INPUT_A] = 1;
+  }
 
   // Elecrow GPIO16 is a resistor ladder. Preserve the calibrated mapping used
   // by the ESPHome UI, while exposing its diagonal/axis directions to PAPPs.
@@ -3192,7 +3273,7 @@ void PappLoader::report_task_entry_(void *arg) {
   vTaskDelete(nullptr);
 }
 
-static esp_err_t fetch_http_text(const char *url, std::string *out) {
+esp_err_t fetch_http_text(const char *url, std::string *out, size_t max_bytes) {
   if (url == nullptr || out == nullptr || !is_network_url(url))
     return ESP_ERR_INVALID_ARG;
   out->clear();
@@ -3239,7 +3320,7 @@ static esp_err_t fetch_http_text(const char *url, std::string *out) {
     ESP_LOGE(TAG, "HTTP status %d: %s", status_code, url);
     return http_finish(client, ESP_ERR_INVALID_RESPONSE);
   }
-  if (content_length > static_cast<int64_t>(MAX_CATALOG_SIZE)) {
+  if (content_length > static_cast<int64_t>(max_bytes)) {
     ESP_LOGE(TAG, "%s is too large: %lld bytes", url, static_cast<long long>(content_length));
     return http_finish(client, ESP_ERR_INVALID_SIZE);
   }
@@ -3249,7 +3330,7 @@ static esp_err_t fetch_http_text(const char *url, std::string *out) {
   while (true) {
     const int result = esp_http_client_read(client, buffer, sizeof(buffer));
     if (result > 0) {
-      if (out->size() + static_cast<size_t>(result) > MAX_CATALOG_SIZE)
+      if (out->size() + static_cast<size_t>(result) > max_bytes)
         return http_finish(client, ESP_ERR_INVALID_SIZE);
       out->append(buffer, static_cast<size_t>(result));
       idle_reads = 0;
@@ -3449,9 +3530,11 @@ void PappLoader::update_progress_ui_() {
   portEXIT_CRITICAL(&this->progress_lock_);
   status[sizeof(status) - 1] = '\0';
 
-  // The page's widgets when they are on screen, otherwise the loader's panel.
+  // The page's widgets when they are on screen (and no store detail page covers
+  // them), otherwise the loader's panel.
   lv_obj_t *page_widget = this->progress_fill_ != nullptr ? this->progress_fill_ : this->progress_label_;
-  const bool page_shows = page_widget != nullptr && lv_obj_get_screen(page_widget) == screen;
+  const bool page_shows =
+      page_widget != nullptr && lv_obj_get_screen(page_widget) == screen && this->detail_panel_ == nullptr;
   if (!page_shows) {
     const bool show = active || status[0] != '\0';
     if (!show && this->overlay_panel_ == nullptr)
@@ -3467,6 +3550,7 @@ void PappLoader::update_progress_ui_() {
     lv_obj_set_style_bg_opa(lv_obj_get_parent(this->overlay_fill_), active ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     lv_label_set_text(this->overlay_label_, status[0] != '\0' ? status : "Loading...");
     lv_obj_remove_flag(this->overlay_panel_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(this->overlay_panel_);  // above a store detail page
     if (active) {
       this->cancel_timeout("papp_progress_overlay");
     } else {
@@ -3505,7 +3589,7 @@ void PappLoader::update_progress_ui_() {
 
 // Creates the folders between `root` and the file `target` (root itself must
 // already exist: it is the card's mount point or a folder on it).
-static bool make_parent_dirs(const std::string &root, const std::string &target) {
+bool make_parent_dirs(const std::string &root, const std::string &target) {
   size_t slash = target.find('/');
   while (slash != std::string::npos) {
     const std::string dir = root + "/" + target.substr(0, slash);

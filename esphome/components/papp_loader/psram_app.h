@@ -24,6 +24,9 @@ extern "C" {
 #define PAPP_MAGIC       0x50415050   /* "PAPP" in little-endian */
 #define PAPP_ABI_VERSION 1
 #define PAPP_HEADER_SIZE 32
+/* Zeroed pointer slots a loader leaves after app_services_t (see the
+ * APPEND-ONLY ZONE), so services appended later read NULL. */
+#define PAPP_SERVICES_SPARE_SLOTS 64
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;        /* Must be PAPP_MAGIC                        */
@@ -70,6 +73,14 @@ typedef struct {
     int key;
     int down;
 } papp_keyboard_event_t;
+
+/* One finger on the touch panel (touch_read_points), in canvas coordinates
+ * like touch_read. id stays the same while that finger stays down. */
+typedef struct {
+    int16_t x;
+    int16_t y;
+    uint8_t id;
+} papp_touch_point_t;
 
 /* ── Memory Capability Flags (matches ESP-IDF MALLOC_CAP_*) ─────────── */
 
@@ -167,12 +178,21 @@ typedef struct {
      * a version bump. A new field may be NULL if an OLDER launcher loads
      * a newer app, so touch-aware apps MUST null-check before calling:
      *     if (svc->touch_read && svc->touch_read(&x, &y)) { ... }
+     * Loaders since display_get_size/display_set_canvas leave
+     * PAPP_SERVICES_SPARE_SLOTS zeroed pointers after the table, so a field
+     * appended later reads NULL on them. Loaders built before those two
+     * fields end the table at net_resolve and whatever follows it is NOT
+     * zero: an app that calls a field added after net_resolve needs a
+     * loader that has it.
      * ──────────────────────────────────────────────────────────────── */
 
     /* ── Touch (GT911) ───────────────────────────────────────────────── */
     /* Read the capacitive touch panel. Coordinates are reported in the
      * LANDSCAPE native-framebuffer space after the panel's 180-degree display
-     * transform — x in [0,799], y in [0,479], matching a full PAPP canvas.
+     * transform, inside the app's canvas: x in [0, width-1], y in
+     * [0, height-1] — [0,799] x [0,479] unless the app chose another canvas
+     * with display_set_canvas. Touches outside the canvas (and on the
+     * loader's close control beside it) are not reported.
      * Returns 1 if currently touched (and fills *x,*y), 0 if not. Either
      * pointer may be NULL. */
     int (*touch_read)(int *x, int *y);
@@ -260,6 +280,118 @@ typedef struct {
     int  (*net_tcp_recv)(int handle, void *buf, int len);
     int  (*net_poll)(int handle);
     int  (*net_resolve)(const char *host, uint32_t *ip);
+
+    /* ── Display canvas size ─────────────────────────────────────────── */
+    /* The canvas is the part of the panel an app draws. Every app starts
+     * with the ABI v1 canvas of 800x480, centred on the panel, so apps that
+     * never call these two services behave exactly as before. The canvas
+     * size applies to everything on the display side: display_get_framebuffer
+     * (width x height RGB565, stride = width), display_flush, display_clear,
+     * display_write_frame_rgb565 (one full canvas), display_write_rect
+     * (clipped to the canvas), display_write_frame_custom / display_emu_flush
+     * (the scaled frame is centred in the canvas and at most its size),
+     * touch_read (canvas coordinates) and the loader's screenshots.
+     *
+     *   display_get_size    The canvas this app should use: the user's
+     *                       per-app Screen setting from the store, else the
+     *                       device's default canvas (YAML canvas_width /
+     *                       canvas_height, normally the whole panel, e.g.
+     *                       1024x600). Once the app has switched with
+     *                       display_set_canvas it reports the canvas in use.
+     *                       Either pointer may be NULL.
+     *   display_set_canvas  Switch to a width x height canvas. Both must be
+     *                       even, at least 320x240 and at most the panel
+     *                       (display_get_size's answer always qualifies).
+     *                       Returns 0 on success; -1 refuses the size and
+     *                       leaves the canvas as it was. A change clears the
+     *                       framebuffer and the whole panel to black; asking
+     *                       for the current size changes nothing. Call it
+     *                       before drawing, from the task that draws, and
+     *                       read display_get_framebuffer afterwards. On a
+     *                       canvas too wide for the close control beside it,
+     *                       the control is not drawn: taps in the canvas's
+     *                       top-right corner reach the app and only a 2 s
+     *                       hold there closes it, so offer your own exit.
+     *
+     * Typical use:
+     *     int w = 800, h = 480;
+     *     if (svc->display_get_size && svc->display_set_canvas) {
+     *         svc->display_get_size(&w, &h);
+     *         if (svc->display_set_canvas(w, h) != 0) { w = 800; h = 480; }
+     *     }
+     *     uint16_t *fb = svc->display_get_framebuffer();   // w x h
+     * An app with fixed sizes picks the largest of its own that fits in
+     * display_get_size's answer and passes that to display_set_canvas.
+     * Appended after net_resolve — null-check before calling (an older
+     * launcher leaves them NULL and the canvas is always 800x480). */
+    void (*display_get_size)(int *width, int *height);
+    int  (*display_set_canvas)(int width, int height);
+
+    /* ── MIDI (a USB-MIDI cable or keyboard, usb_midi) ─────────────────
+     *   midi_read   Copies up to len received MIDI bytes into buf and
+     *               returns how many (0: nothing new). Plain MIDI, whole
+     *               messages, status byte first: 90 3C 64 is note on,
+     *               middle C. Bytes that came before the app started are
+     *               dropped.
+     *   midi_write  Sends whole MIDI messages (status byte first; SysEx
+     *               F0 ... F7 included; no running status). Returns 0 when
+     *               queued, -1 when no device is plugged in, the loader has
+     *               no usb_midi or the queue is full.
+     * Appended after display_set_canvas: NULL on older loaders. */
+    int  (*midi_read)(uint8_t *buf, int len);
+    int  (*midi_write)(const uint8_t *data, int len);
+
+    /* ── Multi-touch ────────────────────────────────────────────────────
+     *   touch_read_points  Fills up to max points with the fingers on the
+     *                      panel now (the first finger first) and returns
+     *                      how many; 0: none. Same canvas coordinates as
+     *                      touch_read; fingers outside the canvas are left
+     *                      out. The GT911 reports up to 5.
+     * Appended after midi_write: NULL on older loaders. */
+    int  (*touch_read_points)(papp_touch_point_t *points, int max);
+
+    /* ── TLS (HTTPS) connections (ESP-IDF esp-tls, mbedTLS) ─────────────
+     * A TLS client connection made and verified by the loader, so an app
+     * speaks HTTPS without its own mbedTLS. The server's certificate is
+     * checked against the firmware's CA bundle and must name `host`, which
+     * is also sent as SNI; a connection that fails either check fails.
+     * Nothing here blocks the calling task.
+     *   net_tls_connect  Start a connection to host:port (a name or a dotted
+     *                    quad). Name lookup, the TCP connect and the TLS
+     *                    handshake run on a loader task in the background
+     *                    (up to 15 s each). Returns a handle >= 0 (a TLS
+     *                    handle, not a UDP/TCP one), or -1 when the loader
+     *                    has no CA bundle or all sessions are in use.
+     *   net_tls_status   1 ready, 0 still connecting, -1 failed (name lookup,
+     *                    network, certificate or handshake; the loader logs
+     *                    which). After net_tls_recv returns -1 it tells a
+     *                    close (1) from an error (-1). -1 for a bad handle.
+     *   net_tls_send     Send up to `len` bytes. Returns the bytes taken, 0
+     *                    when the socket would block (and while connecting),
+     *                    -1 on error or a closed connection. After 0, call
+     *                    again with the same bytes: mbedTLS may already hold
+     *                    them in its output record.
+     *   net_tls_recv     Read up to `len` decrypted bytes. Returns the bytes
+     *                    read, 0 when nothing is waiting (and while
+     *                    connecting), -1 when the peer closed the connection
+     *                    or it failed (see net_tls_status).
+     *   net_tls_close    Close a handle, including one still connecting. The
+     *                    loader closes any the app leaves open when it exits.
+     * net_poll also takes a TLS handle: bit 0 when decrypted bytes wait or
+     * the socket has input (possibly part of a record, so net_tls_recv may
+     * still return 0), bit 1 when the session is ready and the socket can
+     * take data, bit 2 when it failed; 0 while connecting.
+     * At most 4 sessions are open at once (connecting ones included). Each
+     * takes about 25 KB of the loader's internal RAM while open (mbedTLS's
+     * 16 KB input and 4 KB output record buffers plus its context), plus up
+     * to about 20 KB more and an 8 KB task stack during the handshake. Use a
+     * handle from one task at a time.
+     * Appended after touch_read_points: NULL on older loaders. */
+    int  (*net_tls_connect)(const char *host, uint16_t port);
+    int  (*net_tls_status)(int handle);
+    int  (*net_tls_send)(int handle, const void *buf, int len);
+    int  (*net_tls_recv)(int handle, void *buf, int len);
+    void (*net_tls_close)(int handle);
 
 } app_services_t;
 

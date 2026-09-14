@@ -1,0 +1,78 @@
+# Device bridge configuration. Copy to ~/.config/device-bridge/bridge.toml
+# (keep it out of git) and edit. The bridge refuses anything not listed here.
+# The hub token is NOT in this file: it goes in the env file named by token_env.
+
+[hub]
+url = "https://ehgi.ai/api/mcp"
+project_id = "3IDv1Ayo2F2gAuIzMSGL"          # the project the bridge's agent seat is in (this is PAPP Conversions)
+token_env = "EHGI_DEVICE_BRIDGE_TOKEN"       # env var holding the bridge agent's ac_... token
+handle = "deviceuse-bridge"                  # the bridge agent's handle in the project
+owner = "nona"                               # your own hub handle
+# Who may send requests. Default when left out: the owner and "claude".
+allowed_requesters = ["nona", "claude"]
+# default_workspace = "esphomebrew"          # used when a request has no ws= (automatic with one workspace)
+
+# Folders the bridge may work in, by name. Nothing outside them is reachable:
+# paths are resolved (symlinks too) and must stay inside their workspace.
+[workspaces.esphomebrew]
+path = "~/code/esphomebrew"
+# Files requests may read but never change (on top of [files].readonly).
+# Protect whatever `run` executes, or a writefile could change what it runs.
+readonly = ["Makefile", "tools/*"]
+# `run`: argv prefixes (anything may follow, but not absolute paths, `..`,
+# URLs or secret files) ...
+commands = [["python3", "tools/make_listing.py"]]
+# ... and commands that must match exactly (safer for tools like make, whose
+# flags such as --eval can run anything).
+commands_exact = [["make"], ["make", "listing"]]
+# push_branches = ["claude/*", "main"]      # per-workspace override of [push].branches
+# push_remotes = ["origin"]                  # per-workspace override of [push].remotes
+
+# A second workspace, short form (no run commands, global push rules):
+# [workspaces]
+# notes = "~/notes"
+
+[actions]
+# Start with the read-only ones; add "writefile", "edit", "push", "run" when you're happy.
+enabled = ["status", "readfile", "listdir", "writefile", "edit", "git", "push", "run"]
+
+[git]
+# Allowed: status, diff, log, show, add, commit, pull, switch, checkout, fetch.
+# The bridge builds every git command itself; free flags are refused.
+subcommands = ["status", "diff", "log", "show", "add", "commit", "pull", "switch", "checkout", "fetch"]
+remotes = ["origin"]                         # remotes pull/fetch may name
+max_log = 100                                # most commits `git log` shows
+timeout = 300                                # seconds, per git command
+
+[push]
+# `push` only to these remotes and branch patterns; never --force, never a delete.
+remotes = ["origin"]
+branches = ["claude/*"]                      # add "main" only if the bridge may push main
+
+[files]
+max_read_bytes = 1000000                     # readfile/edit
+max_write_bytes = 262144                     # writefile content, edit find/replace
+max_list_entries = 500                       # listdir
+# Never read, written, staged or shown. Setting this REPLACES the default list:
+# secret_patterns = ["secrets.yaml", "secrets.yml", "secrets.json", "secrets.toml", ".env", ".env.*", "*.env",
+#                    "*token*", "*secret*", "*password*", "*credential*", "id_*", "*.pem", "*.key", "*.p12",
+#                    "*.pfx", "*.keystore", "*.jks", ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".ssh", ".gnupg"]
+# Never changed in any workspace (setting this replaces the default list):
+# readonly = [".github/workflows/*", ".githooks/*", ".husky/*", ".gitmodules"]
+
+[run]
+timeout = 600                                # seconds, then the command and its children are stopped
+max_output_bytes = 1000000
+# `run` gets this machine's environment minus the hub token and every
+# secret-looking variable (…_TOKEN, …_KEY, …PASSWORD…). List any it needs anyway:
+pass_env = []
+
+[masking]
+# Values in these files are replaced by *** in everything the bridge posts.
+# Each workspace's top-level secrets.yaml/secrets.yml/.env are always included,
+# as are the hub token and the values of secret-looking environment variables.
+secrets_files = []                           # e.g. ["~/code/esphome006/config/secrets.yaml"]
+env = []                                     # more env variable names whose values are masked
+
+[console]
+show_requests = true                         # print every request and result in the terminal / journal

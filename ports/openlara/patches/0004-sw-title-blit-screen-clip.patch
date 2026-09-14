@@ -1,0 +1,22 @@
+diff --git a/components/openlara/src/gapi/sw.h b/components/openlara/src/gapi/sw.h
+index a9376d1..ae915e1 100644
+--- a/components/openlara/src/gapi/sw.h
++++ b/components/openlara/src/gapi/sw.h
+@@ -983,10 +983,13 @@ namespace GAPI {
+ 
+         if (drawW <= 0 || drawH <= 0) return;
+ 
+-        if (x0 < swClipRect.x) x0 = swClipRect.x;
+-        if (y0 < swClipRect.y) y0 = swClipRect.y;
+-        int x1 = x0 + drawW; if (x1 > swClipRect.z) x1 = swClipRect.z;
+-        int y1 = y0 + drawH; if (y1 > swClipRect.w) y1 = swClipRect.w;
++        // Clip to the screen, not swClipRect: that is whatever the last face
++        // flushed left behind, and {0,0,0,0} before anything has been drawn,
++        // which kept the logo video (the first thing shown) black.
++        if (x0 < 0) x0 = 0;
++        if (y0 < 0) y0 = 0;
++        int x1 = x0 + drawW; if (x1 > Core::width)  x1 = Core::width;
++        int y1 = y0 + drawH; if (y1 > Core::height) y1 = Core::height;
+ 
+         for (int y = y0; y < y1; y++) {
+             int syi = int(((y - (Core::height - drawH) / 2) * origH) / drawH);

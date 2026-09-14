@@ -9,6 +9,8 @@ agent / human in EhGI ──"@esp-bridge upload …"──▶ EhGI hub ◀──
                         ◀── result + log file ────────────────┘
 ```
 
+The [device bridge](device-bridge.md) (`tools/device_bridge`) is its sibling. It uses the same hub client and request format, but works on your machine instead of a device: it reads and edits files in the folders you list, runs allowlisted git commands and pushes to allowed branches.
+
 ## Setup (once)
 
 1. **Give the bridge a seat.** On ehgi.ai, open the project and click **+ Add agent**. It's on the **Agents** page, and in the Agents list of the chat's team panel. The page is `https://ehgi.ai/p/<project id>/agents/new`; for PAPP Conversions that's https://ehgi.ai/p/3IDv1Ayo2F2gAuIzMSGL/agents/new.

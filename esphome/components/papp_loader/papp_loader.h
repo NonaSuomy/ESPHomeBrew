@@ -1,11 +1,13 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
+#include "esp_timer.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
@@ -20,12 +22,19 @@
 #ifdef PAPP_LOADER_USE_USB_HIDX
 #include "esphome/components/usb_hidx/usb_hidx.h"
 #endif
+#ifdef PAPP_LOADER_USE_USB_MIDI
+#include "esphome/components/usb_midi/usb_midi.h"
+#endif
 
+#include "papp_canvas.h"
 #include "papp_data.h"
 #include "psram_app.h"
 
 namespace esphome {
 namespace papp_loader {
+
+// A button in a library source's side menu (YAML catalogs: actions:).
+class CatalogActionTrigger : public Trigger<> {};
 
 class PappLoader : public Component {
  public:
@@ -44,6 +53,21 @@ class PappLoader : public Component {
   void select_catalog_index(size_t index);
   // Step through the catalogs: +1 next, -1 previous (wraps around).
   void next_catalog(int step = 1);
+  // ESPHOMEBREW store view (YAML `library_style: grid`): the library shows
+  // icon tiles instead of a list, and tapping an app opens its detail page
+  // (about, controls, sizes, Stream / Install / Launch / Update). App info
+  // comes from the <app>.json next to each .papp (see docs/building.md).
+  void set_store_ui(bool enabled) { this->store_ui_ = enabled; }
+  // Where Install puts apps (as <name>.papp plus its <name>.json).
+  void set_install_dir(const std::string &dir) { this->install_dir_ = dir; }
+  // The store view's side menu, which slides out from the right edge: Refresh
+  // plus these buttons for the source on screen (YAML `actions:` of a catalog).
+  void add_catalog_action(size_t catalog, const std::string &label, Trigger<> *trigger) {
+    if (catalog < this->catalogs_.size())
+      this->catalogs_[catalog].actions.emplace_back(label, trigger);
+  }
+  void set_side_menu(bool open);
+  void toggle_side_menu() { this->set_side_menu(!this->side_menu_open_); }
   // The catalog shown first (YAML `default_catalog`); set before setup().
   void set_initial_catalog(size_t index) {
     if (index < this->catalogs_.size()) {
@@ -103,9 +127,10 @@ class PappLoader : public Component {
     this->stream_enabled_ = true;
     ESP_LOGI("papp_loader", "Screen stream enabled remotely");
   }
-  // One full 800x480 capture of the running PAPP's canvas, sent to the next
-  // (or current) client of the diagnostic stream on TCP port 3233 as a
-  // PAPPSS01 packet. With no app running the packet is empty (0x0).
+  // One full capture of the running PAPP's canvas (800x480 unless the app
+  // chose another size), sent to the next (or current) client of the
+  // diagnostic stream on TCP port 3233 as a PAPPSS01 packet. With no app
+  // running it is the menu (or an empty 0x0 packet).
   void request_screenshot() {
     this->screenshot_requested_ = true;
     this->stream_enabled_ = true;
@@ -122,6 +147,35 @@ class PappLoader : public Component {
   // `deletefile`). Never game data or apps; refused while an app runs.
   void delete_file(const std::string &path);
   void set_autostart(bool autostart) { this->autostart_ = autostart; }
+  // ── Canvas size (papp_canvas.h) ──
+  // The panel's size (YAML panel_width/panel_height); by default the
+  // display's own. Frame buffers are allocated for a canvas this large.
+  void set_panel_size(int width, int height) {
+    this->panel_config_w_ = width;
+    this->panel_config_h_ = height;
+  }
+  // The canvas offered to apps that ask for one (display_get_size) and have no
+  // per-app setting (YAML canvas_width/canvas_height); by default the panel.
+  // Apps that never ask keep 800x480.
+  void set_default_canvas(int width, int height) {
+    this->default_canvas_w_ = width;
+    this->default_canvas_h_ = height;
+  }
+  int get_panel_width() const { return this->geometry_.panel_w; }
+  int get_panel_height() const { return this->geometry_.panel_h; }
+  int get_default_canvas_width() const { return this->default_canvas_w_; }
+  int get_default_canvas_height() const { return this->default_canvas_h_; }
+  // The per-app Screen setting ("1024x600", or "" for the device default), kept
+  // in <install_dir>/settings.json by app name (canvas::app_key: the .papp's
+  // file name without folders, ".papp" and a "-<version>" suffix). set returns
+  // false for a size this device cannot show, or when the file can't be written.
+  std::string get_app_canvas(const std::string &app);
+  bool set_app_canvas(const std::string &app, const std::string &size);
+  // The sizes the Screen setting offers after "Default" (canvas::choices): the
+  // app's listed sizes that fit, or the panel, 1024x600, 800x480 and 640x480.
+  std::vector<std::string> canvas_choices(const std::vector<std::string> &listed = {}) const {
+    return canvas::choices(this->max_canvas_w_, this->max_canvas_h_, listed);
+  }
   void set_display(display::Display *display) { this->display_ = display; }
   void set_touchscreen(touchscreen::Touchscreen *touchscreen) { this->touchscreen_ = touchscreen; }
   void set_speaker(speaker::Speaker *speaker) { this->speaker_ = speaker; }
@@ -162,6 +216,9 @@ class PappLoader : public Component {
 #ifdef PAPP_LOADER_USE_USB_HIDX
   void set_usb_hidx(usb_hidx::USBHIDXComponent *usb_hidx) { this->usb_hidx_ = usb_hidx; }
 #endif
+#ifdef PAPP_LOADER_USE_USB_MIDI
+  void set_usb_midi(usb_midi::UsbMidi *usb_midi) { this->usb_midi_ = usb_midi; }
+#endif
   void set_button(uint8_t index, binary_sensor::BinarySensor *sensor) {
     if (index < BUTTON_COUNT)
       this->buttons_[index] = sensor;
@@ -185,6 +242,12 @@ class PappLoader : public Component {
   static void svc_display_write_frame_custom(const uint16_t *buffer, uint16_t in_w, uint16_t in_h,
                                              float scale, bool byte_swap);
   static void svc_display_write_rect(int x, int y, int w, int h, const uint16_t *data);
+  static void svc_display_get_size(int *width, int *height);
+  static int svc_display_set_canvas(int width, int height);
+  static int svc_midi_read(uint8_t *buf, int len);
+  static int svc_midi_write(const uint8_t *data, int len);
+  static int svc_touch_read_points(papp_touch_point_t *points, int max);
+  void snapshot_touches_();
   static int svc_sprite_blit(uint16_t *framebuf, uint32_t fb_w, uint32_t fb_h,
                              uint32_t x, uint32_t y, const uint16_t *sprite,
                              uint32_t sp_w, uint32_t sp_h, uint16_t colorkey);
@@ -213,6 +276,12 @@ class PappLoader : public Component {
   static int svc_net_poll(int handle);
   static int svc_net_resolve(const char *host, uint32_t *ip);
   static void close_app_sockets_();
+  static int svc_net_tls_connect(const char *host, uint16_t port);
+  static int svc_net_tls_status(int handle);
+  static int svc_net_tls_send(int handle, const void *buf, int len);
+  static int svc_net_tls_recv(int handle, void *buf, int len);
+  static void svc_net_tls_close(int handle);
+  static void close_app_tls_();
   static void *svc_file_open(const char *path, const char *mode);
   static int svc_file_close(void *stream);
   static size_t svc_file_read(void *ptr, size_t size, size_t nmemb, void *stream);
@@ -245,6 +314,8 @@ class PappLoader : public Component {
   static void papp_task_entry_(void *arg);
   static void papp_load_task_entry_(void *arg);
   static void papp_catalog_task_entry_(void *arg);
+  static void papp_info_task_entry_(void *arg);
+  static void papp_install_task_entry_(void *arg);
   esp_err_t sync_app_data_(const std::string &papp_url);
   std::string find_data_file_(const std::string &target) const;
   esp_err_t download_data_file_(const data::DataFile &file, const std::string &path, uint32_t done_before,
@@ -253,9 +324,37 @@ class PappLoader : public Component {
   void update_catalog_ui_();
   void update_progress_ui_();
   void flush_framebuffer_();
-  // Sends a panel-oriented 800x480 frame to the display (plus the remote-view
-  // sample and the close button). The caller holds display_mutex_.
+  // Sends a panel-oriented (turned 180 degrees) canvas-sized frame to the
+  // display (plus the remote-view sample and the close button). The caller
+  // holds display_mutex_.
   void send_display_buffer_(const uint16_t *display_buffer, int64_t start_us);
+  // Canvas size. geometry_ is the panel and the running app's canvas; it only
+  // changes under display_mutex_ (tasks that just hit-test touches read it
+  // without the lock). The frame buffers hold max_canvas_w_ x max_canvas_h_
+  // (the panel, unless that much PSRAM was not available).
+  canvas::Geometry geometry_{};
+  int max_canvas_w_{canvas::LEGACY_WIDTH};
+  int max_canvas_h_{canvas::LEGACY_HEIGHT};
+  size_t frame_alloc_bytes_{0};  // each of framebuffer_, rotated_framebuffer_, ppa_framebuffer_
+  int panel_config_w_{0};  // YAML panel size; 0 = the display's
+  int panel_config_h_{0};
+  int default_canvas_w_{0};  // YAML default canvas; 0 = the panel
+  int default_canvas_h_{0};
+  // For the running app: the size display_get_size offers, and whether the
+  // app has chosen a canvas (then display_get_size reports that one).
+  int offered_canvas_w_{canvas::LEGACY_WIDTH};
+  int offered_canvas_h_{canvas::LEGACY_HEIGHT};
+  volatile bool canvas_chosen_{false};
+  bool allocate_frame_buffers_(int width, int height);
+  void free_frame_buffers_();
+  int set_canvas_(int width, int height);
+  // Switches the canvas to width x height and blanks the frame buffers (and,
+  // with blank_panel, the whole panel). The caller holds display_mutex_.
+  void apply_canvas_(int width, int height, bool blank_panel);
+  // Back to 800x480 for the next app, and what display_get_size offers it.
+  void prepare_canvas_for_app_(const std::string &source);
+  void restore_legacy_canvas_();
+  std::string settings_path_() const;
   void render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t in_h, float scale, bool byte_swap);
   void log_render_time_(int64_t render_start_us, uint16_t in_w, uint16_t in_h, float scale);
   // Where render_custom_ last put a frame in rotated_framebuffer_ (x, y, w, h):
@@ -281,6 +380,7 @@ class PappLoader : public Component {
   void enqueue_keyboard_event_(int key, bool down);
   void enqueue_keyboard_tap_(int key);
   void poll_close_button_();
+  bool close_touch_(int x, int y);
   int read_touch_(int *x, int *y);
   void audio_init_(int sample_rate);
   void audio_submit_(short *stereo_buf, int frame_count);
@@ -301,11 +401,34 @@ class PappLoader : public Component {
 #ifdef PAPP_LOADER_USE_USB_HIDX
   usb_hidx::USBHIDXComponent *usb_hidx_{nullptr};
 #endif
+#ifdef PAPP_LOADER_USE_USB_MIDI
+  usb_midi::UsbMidi *usb_midi_{nullptr};
+#endif
   binary_sensor::BinarySensor *buttons_[BUTTON_COUNT]{};
   binary_sensor::BinarySensor *toggle_button_{nullptr};
   binary_sensor::BinarySensor *launch_button_{nullptr};
   binary_sensor::BinarySensor *fire_button_{nullptr};
   binary_sensor::BinarySensor *touch_button_{nullptr};
+  // A capacitive pad can read ON for good (toggle mode latched, calibrated
+  // while touched): after 10 s ON without a change it is ignored as A until it
+  // turns OFF, so it cannot hold A down in apps or keep the launcher unarmed.
+  int64_t touch_on_since_us_{0};
+  bool touch_stuck_logged_{false};
+  bool touch_button_stuck_() {
+    const int64_t now = esp_timer_get_time();
+    if (this->touch_on_since_us_ == 0)
+      this->touch_on_since_us_ = now;
+    const bool stuck = now - this->touch_on_since_us_ > 10000000;
+    if (stuck && !this->touch_stuck_logged_) {
+      ESP_LOGW("papp_loader", "Touch button ON for over 10 s: ignored as A until it is released");
+      this->touch_stuck_logged_ = true;
+    }
+    return stuck;
+  }
+  void touch_button_released_() {
+    this->touch_on_since_us_ = 0;
+    this->touch_stuck_logged_ = false;
+  }
   sensor::Sensor *adc_button_sensor_{nullptr};
   sensor::Sensor *left_stick_x_sensor_{nullptr};
   sensor::Sensor *left_stick_y_sensor_{nullptr};
@@ -362,10 +485,19 @@ class PappLoader : public Component {
   bool launch_button_state_{false};
   bool launch_wait_release_{false};
   bool touch_active_{false};
+  // The fingers on the panel, copied in loop() (the touchscreen's own list is
+  // not safe to read from the app task); guarded by touch_points_lock_.
+  static constexpr int MAX_TOUCH_POINTS = 5;
+  touchscreen::TouchPoint touch_points_[MAX_TOUCH_POINTS]{};
+  int touch_point_count_{0};
+  portMUX_TYPE touch_points_lock_ = portMUX_INITIALIZER_UNLOCKED;
   // Set by the on-screen close control.  It is deliberately independent of
   // the normal PAPP X/action input so every loader-backed app gets the same
   // exit request, including apps that do not draw their own controls.
   volatile bool global_close_requested_{false};
+  // When a touch on a close control drawn over the canvas started (us, 0 =
+  // none): that one closes only when held (close_touch_).
+  int64_t close_hold_since_us_{0};
   // When it was requested (esp_timer us): the buttons a close shows the app
   // follow a short sequence from then on (close_buttons_()).
   volatile int64_t close_requested_us_{0};
@@ -427,11 +559,64 @@ class PappLoader : public Component {
   struct CatalogSource {
     std::string name;
     std::string url;
+    std::vector<std::pair<std::string, Trigger<> *>> actions;
   };
+  bool side_menu_open_{false};
   std::vector<CatalogSource> catalogs_;
   size_t catalog_index_{0};
   // The URL the running fetch is for: a switch mid-fetch refetches afterwards.
   std::string catalog_fetch_url_;
+
+  // ── Store view (papp_store.cpp) ──
+ public:
+  // One app's listing, from its <app>.json (all fields optional).
+  struct AppInfo {
+    bool has_info{false};
+    std::string name, title, version, author, category, license, about, changelog, upstream, source;
+    std::vector<std::string> controls;
+    // The listing's "canvas": true (any size) or the sizes the app can draw
+    // ("1024x600", ...). Either one adds the Screen setting to its detail page.
+    bool canvas_any{false};
+    std::vector<std::string> canvas_sizes;
+    bool supports_canvas() const { return this->canvas_any || !this->canvas_sizes.empty(); }
+    uint32_t size{0}, data_size{0};
+    std::string sha256;
+    std::string sidecar;            // the raw JSON, saved next to an installed copy
+    std::vector<uint8_t> icon_png;  // decoded from the listing's base64 icon
+    std::shared_ptr<uint16_t> tile_icon;  // 112x112 RGB565 in PSRAM, decoded by the info task
+  };
+
+ protected:
+  bool store_ui_{false};
+  std::string install_dir_{"/sd/roms/papp"};
+  // Info for catalog_entries_ (same order), fetched by a task after each listing.
+  std::vector<AppInfo> app_info_;
+  std::vector<AppInfo> info_result_;
+  std::vector<std::string> info_urls_;
+  uint32_t catalog_generation_{0};
+  uint32_t info_generation_{0};
+  TaskHandle_t info_task_handle_{nullptr};
+  volatile bool info_loading_{false};
+  volatile bool info_done_{false};
+  void start_info_fetch_();
+  void poll_info_fetch_();
+  // name -> installed version, from <install_dir>/*.json.
+  std::vector<std::pair<std::string, std::string>> installed_;
+  // The same, as found by the info and install tasks; the loop takes it over.
+  std::vector<std::pair<std::string, std::string>> info_installed_;
+  std::vector<std::pair<std::string, std::string>> install_installed_;
+  static std::vector<std::pair<std::string, std::string>> scan_installed_(const std::string &install_dir);
+  std::string installed_version_(const std::string &name) const;
+  // Install/Update of one app: the .papp (checked against its size and
+  // sha256), its data, then its listing, in a task.
+  int install_index_{-1};
+  AppInfo install_info_;  // copies for the task: app_info_ can be replaced meanwhile
+  std::string install_url_;
+  TaskHandle_t install_task_handle_{nullptr};
+  volatile bool install_done_{false};
+  volatile esp_err_t install_result_{ESP_OK};
+  void start_install_(int index);
+  void poll_install_();
   void list_catalog_folder_();
   TaskHandle_t papp_catalog_task_handle_{nullptr};
   volatile bool catalog_loading_{false};
@@ -460,6 +645,51 @@ class PappLoader : public Component {
   bool launcher_a_state_{false};
   bool launcher_touch_state_{false};
   bool launcher_input_armed_{false};
+  bool launcher_b_state_{false};
+  bool launcher_l_state_{false};
+  bool launcher_r_state_{false};
+  // Store view widgets.
+  struct AppIcon {
+    std::shared_ptr<uint16_t> pixels;
+    lv_image_dsc_t dsc{};
+  };
+  std::vector<AppIcon> tile_icons_;  // per app, 112x112
+  std::vector<lv_obj_t *> catalog_tiles_;
+  uint16_t grid_columns_{1};
+  lv_obj_t *detail_panel_{nullptr};
+  AppIcon detail_icon_{};
+  std::vector<lv_obj_t *> detail_buttons_;
+  std::vector<uint8_t> detail_actions_;
+  uint8_t detail_focus_{0};
+  int detail_index_{-1};
+  std::string detail_url_;  // reopened after the grid is rebuilt, if still listed
+  // Side menu: a panel on the library page, parked off the right edge with its tab showing.
+  lv_obj_t *drawer_{nullptr};
+  std::vector<lv_obj_t *> drawer_buttons_;
+  std::vector<int> drawer_actions_;  // -1 = Refresh, else an index into the source's actions
+  uint8_t drawer_focus_{0};
+  bool launcher_select_state_{false};
+  void build_drawer_();
+  void focus_drawer_button_(uint8_t index);
+  void run_drawer_action_(int action);
+  static void store_drawer_event_cb_(lv_event_t *event);
+  static void store_tile_event_cb_(lv_event_t *event);
+  static void store_button_event_cb_(lv_event_t *event);
+  static void release_icon_(AppIcon *icon);
+  static void set_icon_(AppIcon *icon, std::shared_ptr<uint16_t> pixels, uint16_t side);
+  void free_icons_();
+  void build_store_grid_();
+  void open_detail_(int index);
+  void close_detail_();
+  void focus_detail_button_(uint8_t index);
+  void run_detail_action_(uint8_t action);
+  // The detail page's Screen button: the app's settings key and label, and
+  // one press (the next choice, saved).
+  std::string detail_app_key_(int index) const;
+  std::string screen_label_(const std::string &app);
+  void cycle_screen_setting_(int index);
+  bool handle_store_controls_(uint8_t newly_pressed, bool a_pressed, bool b_pressed, bool l_pressed, bool r_pressed,
+                              bool select_pressed);
 #endif
 };
 

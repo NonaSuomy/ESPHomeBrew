@@ -1,18 +1,22 @@
 from esphome import automation
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import binary_sensor, display, esp32, lvgl, sensor, speaker, touchscreen
+from esphome.components import binary_sensor, display, esp32, lvgl, sensor, socket, speaker, touchscreen
 
-from esphome.const import CONF_ID, CONF_NAME, CONF_PATH, CONF_URL
+from esphome.const import CONF_AUTOMATION_ID, CONF_ID, CONF_NAME, CONF_PATH, CONF_THEN, CONF_TRIGGER_ID, CONF_URL
 
 DEPENDENCIES = ["network"]
-AUTO_LOAD = ["binary_sensor", "sensor", "speaker", "touchscreen"]
+AUTO_LOAD = ["binary_sensor", "json", "sensor", "speaker", "touchscreen"]
 
 
 CONF_AUTOSTART = "autostart"
 CONF_CATALOG_URL = "catalog_url"
 CONF_CATALOGS = "catalogs"
 CONF_DEFAULT_CATALOG = "default_catalog"
+CONF_LIBRARY_STYLE = "library_style"
+CONF_INSTALL_DIR = "install_dir"
+CONF_ACTIONS = "actions"
+CONF_LABEL = "label"
 CONF_REPORT_URL = "report_url"
 CONF_REPORT_LOG_BYTES = "report_log_bytes"
 CONF_DATA_ROOT = "data_root"
@@ -24,6 +28,7 @@ CONF_SPEAKER_ID = "speaker_id"
 CONF_TOGGLE_BUTTON = "toggle_button"
 CONF_LAUNCH_BUTTON = "launch_button"
 CONF_USB_HIDX_ID = "usb_hidx_id"
+CONF_USB_MIDI_ID = "usb_midi_id"
 CONF_LVGL_ID = "lvgl_id"
 CONF_FIRE_BUTTON = "fire_button"
 CONF_TOUCH_BUTTON = "touch_button"
@@ -32,11 +37,24 @@ CONF_LEFT_STICK_X_SENSOR = "left_stick_x_sensor"
 CONF_LEFT_STICK_Y_SENSOR = "left_stick_y_sensor"
 CONF_RIGHT_STICK_X_SENSOR = "right_stick_x_sensor"
 CONF_RIGHT_STICK_Y_SENSOR = "right_stick_y_sensor"
+CONF_CANVAS_WIDTH = "canvas_width"
+CONF_CANVAS_HEIGHT = "canvas_height"
+CONF_PANEL_WIDTH = "panel_width"
+CONF_PANEL_HEIGHT = "panel_height"
+
+# The canvas apps draw on (psram_app.h display_get_size / display_set_canvas):
+# apps that never ask stay at 800x480; these limits match papp_canvas.h.
+CANVAS_MIN_WIDTH = 320
+CANVAS_MIN_HEIGHT = 240
+LEGACY_CANVAS = (800, 480)
+MAX_SIDE = 4096
 
 papp_loader_ns = cg.esphome_ns.namespace("papp_loader")
 PappLoader = papp_loader_ns.class_("PappLoader", cg.Component)
 LaunchUrlAction = papp_loader_ns.class_("LaunchUrlAction", automation.Action)
+CatalogActionTrigger = papp_loader_ns.class_("CatalogActionTrigger", automation.Trigger.template())
 USBHIDXComponent = cg.esphome_ns.namespace("usb_hidx").class_("USBHIDXComponent")
+UsbMidi = cg.esphome_ns.namespace("usb_midi").class_("UsbMidi")
 LvglComponent = cg.esphome_ns.namespace("lvgl").class_("LvglComponent")
 
 BUTTON_FIELDS = {
@@ -79,12 +97,47 @@ def validate_catalog_url(value):
     raise cv.Invalid("a catalog url is an http(s):// catalog page or a folder such as /sd/roms/papp/")
 
 
+# A button in the store view's side menu for this source, e.g. Mount / Eject
+# for a storage folder.
+CATALOG_ACTION_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(CatalogActionTrigger),
+        cv.GenerateID(CONF_AUTOMATION_ID): cv.declare_id(automation.Automation),
+        cv.Required(CONF_LABEL): cv.All(cv.string_strict, cv.Length(min=1, max=32)),
+        cv.Required(CONF_THEN): automation.validate_action_list,
+    }
+)
+
 CATALOG_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_NAME): cv.All(cv.string_strict, cv.Length(min=1, max=24)),
         cv.Required(CONF_URL): validate_catalog_url,
+        cv.Optional(CONF_ACTIONS, default=[]): cv.All(cv.ensure_list(CATALOG_ACTION_SCHEMA), cv.Length(max=6)),
     }
 )
+
+
+def even_pixels(minimum):
+    """A canvas side: an even number of pixels from `minimum` to 4096."""
+
+    def validator(value):
+        value = cv.int_range(min=minimum, max=MAX_SIDE)(value)
+        if value % 2:
+            raise cv.Invalid(f"{value} is odd; canvas sizes are even numbers of pixels")
+        return value
+
+    return validator
+
+
+def validate_canvas(config):
+    """canvas_width/height and panel_width/height come in pairs; the canvas fits the panel."""
+    for width, height in ((CONF_CANVAS_WIDTH, CONF_CANVAS_HEIGHT), (CONF_PANEL_WIDTH, CONF_PANEL_HEIGHT)):
+        if (width in config) != (height in config):
+            raise cv.Invalid(f"set both {width} and {height}, or neither")
+    if CONF_CANVAS_WIDTH in config and CONF_PANEL_WIDTH in config:
+        if config[CONF_CANVAS_WIDTH] > config[CONF_PANEL_WIDTH] or config[CONF_CANVAS_HEIGHT] > config[CONF_PANEL_HEIGHT]:
+            raise cv.Invalid("the canvas must fit on the panel (canvas_width/height at most panel_width/height)")
+    return config
 
 
 def validate_catalogs(config):
@@ -108,6 +161,11 @@ CONFIG_SCHEMA = cv.Schema(
         # the library list; see README "Library sources".
         cv.Optional(CONF_CATALOGS): cv.All(cv.ensure_list(CATALOG_SCHEMA), cv.Length(min=1, max=8)),
         cv.Optional(CONF_DEFAULT_CATALOG): cv.string_strict,
+        # "grid": the ESPHOMEBREW store view (icons, badges, a detail page with
+        # Stream / Install) instead of a plain list; see README "Store view".
+        cv.Optional(CONF_LIBRARY_STYLE, default="list"): cv.one_of("list", "grid", lower=True),
+        # Where Install puts store apps (and their listings, which mark them installed).
+        cv.Optional(CONF_INSTALL_DIR, default="/sd/roms/papp"): validate_data_root,
         # POST a JSON test report here after every app run (see docs/feedback.md).
         cv.Optional(CONF_REPORT_URL): cv.url,
         cv.Optional(CONF_REPORT_LOG_BYTES, default=4096): cv.int_range(min=256, max=32768),
@@ -119,6 +177,15 @@ CONFIG_SCHEMA = cv.Schema(
         # found files are not downloaded, and app reads of /sd/... fall back here.
         cv.Optional(CONF_DATA_SEARCH, default=["/sd", "/usb0"]): cv.ensure_list(validate_data_root),
         cv.Required(CONF_DISPLAY_ID): cv.use_id(display.Display),
+        # The panel's size; by default the display's own (1024x600 on the Elecrow).
+        # The frame buffers are sized for a canvas this large.
+        cv.Optional(CONF_PANEL_WIDTH): cv.int_range(min=LEGACY_CANVAS[0], max=MAX_SIDE),
+        cv.Optional(CONF_PANEL_HEIGHT): cv.int_range(min=LEGACY_CANVAS[1], max=MAX_SIDE),
+        # The canvas offered to apps that choose their size (and have no per-app
+        # Screen setting); by default the whole panel. Apps that never ask keep
+        # 800x480. See docs/esphome-store.md "Canvas size".
+        cv.Optional(CONF_CANVAS_WIDTH): even_pixels(CANVAS_MIN_WIDTH),
+        cv.Optional(CONF_CANVAS_HEIGHT): even_pixels(CANVAS_MIN_HEIGHT),
         cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
         cv.Optional(CONF_SPEAKER_ID): cv.use_id(speaker.Speaker),
         cv.Optional(CONF_LVGL_ID): cv.use_id(LvglComponent),
@@ -134,10 +201,35 @@ CONFIG_SCHEMA = cv.Schema(
         # Optional because network loading and the PAPP runtime can be used
         # without USB HIDX. When present, bind to the existing USBHIDX ID.
         cv.Optional(CONF_USB_HIDX_ID): cv.use_id(USBHIDXComponent),
+        # A usb_midi device for apps (midi_read / midi_write).
+        cv.Optional(CONF_USB_MIDI_ID): cv.use_id(UsbMidi),
         **BUTTON_SCHEMAS,
     }
 ).extend(cv.COMPONENT_SCHEMA)
-CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, cv.has_at_most_one_key(CONF_CATALOG_URL, CONF_CATALOGS), validate_catalogs)
+CONFIG_SCHEMA = cv.All(
+    CONFIG_SCHEMA, cv.has_at_most_one_key(CONF_CATALOG_URL, CONF_CATALOGS), validate_catalogs, validate_canvas
+)
+
+
+def _require_tls_hashes(config):
+    # ESPHome turns SHA-384/512 off on ESP-IDF 6 in the esp32 component's own
+    # to_code, which runs before ours: asking from our to_code is too late.
+    # Ask while validating. Let's Encrypt's current ECDSA chains (YE1, Root YE,
+    # ISRG Root X2) are all signed ecdsa-with-SHA384.
+    if hasattr(esp32, "require_mbedtls_sha512"):
+        try:
+            esp32.require_mbedtls_sha512()
+        except KeyError:
+            pass  # esp32 data not set up yet; to_code sets the options itself
+    return config
+
+
+CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, _require_tls_hashes)
+# Room in lwIP's socket pool for the apps' TLS sessions (net_tls_*, at most
+# APP_TLS_MAX in papp_loader.cpp).
+APP_TLS_SESSIONS = 4
+if hasattr(socket, "consume_sockets"):
+    CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, socket.consume_sockets(APP_TLS_SESSIONS, "papp_loader TLS"))
 
 
 async def to_code(config):
@@ -152,6 +244,14 @@ async def to_code(config):
         esp32.require_certificate_bundle()
     elif hasattr(esp32, "require_full_certificate_bundle"):
         esp32.require_full_certificate_bundle()
+    # Apps' TLS connections (net_tls_*) verify servers against the same bundle.
+    esp32.add_idf_sdkconfig_option("CONFIG_MBEDTLS_CERTIFICATE_BUNDLE", True)
+    # And set them here as well: this runs after the esp32 component's to_code,
+    # so it wins over its "off" even on ESPHome versions whose require helper
+    # is missing or read too early (_require_tls_hashes). Without SHA-384 the
+    # handshake fails with X509 verify errors (-0x2700) on those chains.
+    esp32.add_idf_sdkconfig_option("CONFIG_MBEDTLS_SHA384_C", True)
+    esp32.add_idf_sdkconfig_option("CONFIG_MBEDTLS_SHA512_C", True)
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
@@ -160,12 +260,18 @@ async def to_code(config):
     if catalog_url := config.get(CONF_CATALOG_URL):
         cg.add(var.set_catalog_url(catalog_url))
     catalogs = config.get(CONF_CATALOGS, [])
-    for catalog in catalogs:
+    for index, catalog in enumerate(catalogs):
         cg.add(var.add_catalog(catalog[CONF_NAME], catalog[CONF_URL]))
+        for action in catalog[CONF_ACTIONS]:
+            trigger = cg.new_Pvariable(action[CONF_TRIGGER_ID])
+            await automation.build_automation(trigger, [], action)
+            cg.add(var.add_catalog_action(index, action[CONF_LABEL], trigger))
     if catalogs:
         default = config.get(CONF_DEFAULT_CATALOG, catalogs[0][CONF_NAME]).lower()
         index = next(i for i, catalog in enumerate(catalogs) if catalog[CONF_NAME].lower() == default)
         cg.add(var.set_initial_catalog(index))
+    cg.add(var.set_store_ui(config[CONF_LIBRARY_STYLE] == "grid"))
+    cg.add(var.set_install_dir(config[CONF_INSTALL_DIR]))
     if report_url := config.get(CONF_REPORT_URL):
         cg.add(var.set_report_url(report_url))
         cg.add(var.set_report_log_bytes(config[CONF_REPORT_LOG_BYTES]))
@@ -176,6 +282,10 @@ async def to_code(config):
 
     display_var = await cg.get_variable(config[CONF_DISPLAY_ID])
     cg.add(var.set_display(display_var))
+    if CONF_PANEL_WIDTH in config:
+        cg.add(var.set_panel_size(config[CONF_PANEL_WIDTH], config[CONF_PANEL_HEIGHT]))
+    if CONF_CANVAS_WIDTH in config:
+        cg.add(var.set_default_canvas(config[CONF_CANVAS_WIDTH], config[CONF_CANVAS_HEIGHT]))
 
     if touchscreen_id := config.get(CONF_TOUCHSCREEN_ID):
         touchscreen_var = await cg.get_variable(touchscreen_id)
@@ -221,6 +331,10 @@ async def to_code(config):
         cg.add_define("PAPP_LOADER_USE_USB_HIDX")
         usb_hidx_var = await cg.get_variable(usb_hidx_id)
         cg.add(var.set_usb_hidx(usb_hidx_var))
+
+    if usb_midi_id := config.get(CONF_USB_MIDI_ID):
+        cg.add_define("PAPP_LOADER_USE_USB_MIDI")
+        cg.add(var.set_usb_midi(await cg.get_variable(usb_midi_id)))
 
     for name, index in BUTTON_FIELDS.items():
         key = f"button_{name}"

@@ -80,13 +80,24 @@ display:
 
 external_components:
   - source: {type: local, path: ../components}
-    components: [papp_loader]
+    components: [papp_loader, usb_msc, usb_midi]
+
+# USB sticks and USB-MIDI devices next to the other usb_host clients.
+usb_host:
+  enable_hubs: true
+
+usb_msc:
+  id: usb_storage
+
+usb_midi:
+  id: usb_midi_port
 
 papp_loader:
   id: papp_runtime
   path: /sd/roms/papp/app.papp
   display_id: main_display
   touchscreen_id: touch_panel
+  usb_midi_id: usb_midi_port
   # Several library sources; store_page_config.yaml keeps the single catalog_url form.
   catalogs:
     - name: SD / USB
@@ -96,3 +107,6 @@ papp_loader:
   default_catalog: Store
   report_url: https://example.invalid/papp-report
   report_log_bytes: 4096
+  # The canvas offered to apps that choose their size (the panel's by default).
+  canvas_width: 1024
+  canvas_height: 600

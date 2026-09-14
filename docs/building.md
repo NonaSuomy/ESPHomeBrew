@@ -37,16 +37,91 @@ What a store screen shows before an app is downloaded:
   "changelog": "0.1.1: sound fixes\n0.1.0: first release",
   "controls": ["D-pad: move", "A: fire", "Start: menu"],
   "upstream": {"project": "PrBoom", "version": "2.5.0", "url": "https://github.com/..."},
+  "canvas": true,
   "icon": "icon.png",
   "screenshots": ["screen1.png", "screen2.png"]
 }
 ```
 
 - `author` (up to 60 characters), `category` (30), `license` (60), `about` (2000) and `changelog` (4000) are text; `controls` is 1–20 lines of up to 60 characters; `upstream` names the original project the port comes from (`project` up to 60 characters, optional `version` up to 30 and an `https://` `url`), shown next to the `source` repo and commit the app is built from. The fields follow the Homebrew App Store (hb-app.store) listing.
+- `canvas` says the app chooses its canvas size ([below](#canvas-size-for-app-authors)), which gives it a **Screen** setting on its store page: `true` when it draws at whatever size `display_get_size` offers, or a list of the sizes it can draw, such as `["1024x600", "800x480"]` (up to 8, each even and at least 320x240; only those that fit the panel are offered). Leave it out for apps that keep 800×480; the setting would do nothing for them.
 - `icon` is a PNG in the app's folder, at most 256×256 and 64 KB; `screenshots` lists up to three PNGs of at most 1024×600 and 300 KB. Use your own or freely licensed art, not official game logos.
 - Publish store puts all of it, with the icon as base64, the `.papp` size and the data size, into `store.json` and into a sidecar next to each app (`psram_doom-0.1.1.json`, found by swapping `.papp` for `.json`). The icon is also published as `psram_doom-0.1.1.png`, which the web page shows, and screenshots as `psram_doom-0.1.1-screen1.png`, … (listed by URL only, to keep the JSON small). A LAN server or SD folder can carry the same sidecar next to its `.papp` files.
 
 Sources come from the `source` repository at a pinned commit, and so does the PAPP SDK (`psram_app.h`, `psram_app.ld`, `pack_papp.py`), so an app always builds against the loader ABI of its own tree. They are fetched at build time rather than copied here, because upstream has no license file. Today the apps come from [NonaSuomy/RetroESP32-P4](https://github.com/NonaSuomy/RetroESP32-P4) (`papp-serial-upload`) and [giltal/RetroESP32-P4](https://github.com/giltal/RetroESP32-P4).
+
+### Canvas size (for app authors)
+
+An app draws on a canvas centred on the panel. It starts with 800×480, the size every existing app assumes. Two services at the end of the service table (`psram_app.h`) let it use another size, up to the whole panel (1024×600 on the Elecrow board):
+
+```c
+int w = 800, h = 480;
+if (svc->display_get_size && svc->display_set_canvas) {   // NULL on older loaders
+    svc->display_get_size(&w, &h);          // the user's Screen setting, else the device default
+    if (svc->display_set_canvas(w, h) != 0) {
+        w = 800;                            // refused: still 800x480
+        h = 480;
+    }
+}
+uint16_t *fb = svc->display_get_framebuffer();   // w x h RGB565, stride w
+```
+
+- Call `display_set_canvas` once, before drawing, from the task that draws. Sizes are even, at least 320×240 and at most the panel; `display_get_size`'s answer always qualifies. A switch clears the framebuffer and the panel to black.
+- Everything on the display side then uses the new size: the framebuffer and `display_flush`, `display_clear`, `display_write_frame_rgb565` (one full canvas), `display_write_rect`, `display_write_frame_custom` and `display_emu_flush` (the scaled frame centred in the canvas), `touch_read` (canvas coordinates) and screenshots.
+- An app with fixed sizes (a build-time resolution, say) picks the largest of its own sizes that fits in what `display_get_size` returns, or simply asks for the one size it has, and lists them under `canvas` in `papp.json`. An app built only for 1024×600 can call `display_set_canvas(1024, 600)` directly and draw scaled down (for example with `display_write_frame_custom`) if that fails.
+- On a canvas as wide as the panel the loader's close button is not drawn: taps in the canvas's top-right 58×58 pixels (plus a small margin) reach the app, and only a touch held there for 2 s closes it. Offer your own way out too.
+- Apps in this repository's `ports/` include `esphome/components/papp_loader/psram_app.h` and get the services from it. An app built against an older SDK header (such as RetroESP32-P4's) needs the two fields added after `net_resolve`, in the same order, or a newer header.
+
+### MIDI and multi-touch (for app authors)
+
+Three more services follow the canvas ones (NULL on older loaders, so null-check them):
+
+```c
+uint8_t buf[64];
+int n = svc->midi_read ? svc->midi_read(buf, sizeof buf) : 0;  // plain MIDI bytes: 90 3C 64 = note on, middle C
+static const uint8_t note_off[] = {0x80, 0x3C, 0x00};
+if (svc->midi_write) svc->midi_write(note_off, sizeof note_off); // whole messages, SysEx included
+
+papp_touch_point_t fingers[5];
+int count = svc->touch_read_points ? svc->touch_read_points(fingers, 5) : 0;
+```
+
+- MIDI comes from a class-compliant USB-MIDI cable or keyboard through the `usb_midi` component, when the loader has `usb_midi_id:` set. Bytes that arrived before the app started are dropped. `midi_write` returns -1 when no device is plugged in.
+- `touch_read_points` gives every finger on the panel (the GT911 reports up to 5), first finger first, in the same canvas coordinates as `touch_read`, each with an `id` that stays the same while that finger stays down.
+
+### TLS / HTTPS connections (for app authors)
+
+The loader makes TLS client connections for apps, so an app can speak HTTPS without carrying its own mbedTLS. Five services follow `touch_read_points` (NULL on older loaders):
+
+```c
+if (!svc->net_tls_connect) { /* older loader: no TLS */ }
+int h = svc->net_tls_connect("example.com", 443);   // returns at once
+while (h >= 0 && svc->net_tls_status(h) == 0)       // 0: still connecting
+    svc->delay_ms(10);
+if (h < 0 || svc->net_tls_status(h) < 0) { /* failed: see the device log */ }
+
+static const char req[] = "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n";
+for (int off = 0; off < (int)sizeof req - 1; ) {
+    int n = svc->net_tls_send(h, req + off, sizeof req - 1 - off);
+    if (n < 0) break;                               // 0: would block, send the same bytes again
+    if (n == 0) svc->delay_ms(1); else off += n;
+}
+char buf[1024];
+for (;;) {
+    int n = svc->net_tls_recv(h, buf, sizeof buf);  // 0: nothing yet, -1: closed or failed
+    if (n < 0) break;
+    if (n == 0) { svc->delay_ms(5); continue; }
+    /* use n bytes */
+}
+svc->net_tls_close(h);
+```
+
+- The server's certificate is checked against the firmware's CA bundle and must carry the name you pass, which is also sent as SNI. A server the bundle cannot vouch for (a self-signed certificate, a LAN address) fails; there is no way to skip the check. The loader logs why a connection failed (name not found, the esp-tls error and the certificate flags).
+- Name lookup, the TCP connect and the handshake run on a loader task, so no call blocks the app (each step gives up after about 15 s). Once `net_tls_status` says 1, `net_tls_send` and `net_tls_recv` return at once, like `net_tcp_send` / `net_tcp_recv` but with 0 for "would block" / "nothing yet" and -1 for the end of the stream; afterwards `net_tls_status` tells a clean close (1) from an error (-1).
+- After `net_tls_send` returns 0, call it again with the same bytes (mbedTLS may already hold them).
+- `net_poll` also takes a TLS handle (readable, writable, failed), so an app can wait on TLS and plain sockets the same way.
+- At most 4 sessions at once, connecting ones included. Each holds about 25 KB of the loader's internal RAM while open (mbedTLS's 16 KB input and 4 KB output buffers and its context), a little more and an 8 KB task stack during the handshake. Close sessions you are done with; the loader closes the rest when the app exits.
+- Use a handle from one task at a time.
 
 ### Custom recipes
 

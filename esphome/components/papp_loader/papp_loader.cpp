@@ -1,4 +1,5 @@
 #include "papp_loader.h"
+#include "papp_internal.h"
 
 #include <algorithm>
 #include <cctype>
@@ -30,6 +31,7 @@
 #include "esp_netif.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
+#include "esp_tls.h"
 #include "esp_mmu_map.h"
 #include "esp_timer.h"
 #include "driver/ppa.h"
@@ -41,6 +43,7 @@
 #endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "hal/mmu_types.h"
 #include "pngAux.h"
@@ -60,20 +63,16 @@ namespace esphome {
 namespace papp_loader {
 
 static const char *const TAG = "papp_loader";
-static constexpr int VIRTUAL_WIDTH = 800;
-static constexpr int VIRTUAL_HEIGHT = 480;
+// The canvas (the app's framebuffer, centred on the panel) is runtime state:
+// see papp_canvas.h and geometry_. Apps start at canvas::LEGACY_WIDTH x
+// LEGACY_HEIGHT (800x480) and may switch with display_set_canvas.
 static constexpr int EMU_WIDTH = 320;
 static constexpr int EMU_HEIGHT = 240;
-static constexpr int LCD_WIDTH = 1024;
-static constexpr int LCD_HEIGHT = 600;
-static constexpr int LCD_X_OFFSET = (LCD_WIDTH - VIRTUAL_WIDTH) / 2;
-static constexpr int LCD_Y_OFFSET = (LCD_HEIGHT - VIRTUAL_HEIGHT) / 2;
 static constexpr size_t MMU_PAGE_SIZE = 0x10000;
 static constexpr size_t MAX_NETWORK_PAPP_SIZE = 16 * 1024 * 1024;
 static constexpr size_t HTTP_READ_BUFFER_SIZE = 16 * 1024;
 static constexpr uint32_t HTTP_TIMEOUT_MS = 15000;
 static constexpr uint8_t HTTP_MAX_REDIRECTIONS = 5;
-static constexpr size_t MAX_CATALOG_SIZE = 64 * 1024;
 // Not 3232: that is ESPHome's OTA port on ESP32, taken as soon as the YAML has `ota:`.
 static constexpr uint16_t SCREEN_STREAM_PORT = 3233;
 // This is a diagnostic transport, not the panel's render target.  Keeping it
@@ -127,16 +126,12 @@ static bool send_screen_stream_bytes(int socket_fd, const void *data, size_t len
   return true;
 }
 
-// The PAPP canvas occupies the centered 800x480 area. Put the shared close
-// control in the unused right-hand margin so it cannot cover gameplay. The
-// panel's raw draw path is hardware-flipped, so the raw destination is the
-// 180-degree counterpart of the desired physical screen position.
-static constexpr int CLOSE_BUTTON_SCREEN_X = LCD_X_OFFSET + VIRTUAL_WIDTH + 12;
-static constexpr int CLOSE_BUTTON_SCREEN_Y = LCD_Y_OFFSET + 10;
-static constexpr int CLOSE_BUTTON_SIZE = 58;
-static constexpr int CLOSE_BUTTON_HIT_PADDING = 10;
-static constexpr int CLOSE_BUTTON_RAW_X = LCD_WIDTH - CLOSE_BUTTON_SCREEN_X - CLOSE_BUTTON_SIZE;
-static constexpr int CLOSE_BUTTON_RAW_Y = LCD_HEIGHT - CLOSE_BUTTON_SCREEN_Y - CLOSE_BUTTON_SIZE;
+// The shared close control. With the 800x480 canvas it sits in the unused
+// right-hand margin so it cannot cover gameplay; a canvas too wide for that
+// gets it over its top-right corner (canvas::Geometry). The panel's raw draw
+// path is hardware-flipped, so the raw destination is the 180-degree
+// counterpart of the desired physical screen position.
+static constexpr int CLOSE_BUTTON_SIZE = canvas::CLOSE_SIZE;
 alignas(64) static uint16_t close_overlay_buffer[CLOSE_BUTTON_SIZE * CLOSE_BUTTON_SIZE] = {};
 
 // A PAPP may request a large game stack.  Those stacks must live in PSRAM and
@@ -173,7 +168,7 @@ static bool forget_papp_cap_task(TaskHandle_t handle) {
 
 PappLoader *PappLoader::active_ = nullptr;
 
-static std::string runtime_path(const char *path) {
+std::string runtime_path(const char *path) {
   if (path == nullptr)
     return {};
   std::string result(path);
@@ -190,13 +185,12 @@ static size_t align_up(size_t value, size_t alignment) {
   return (value + alignment - 1) & ~(alignment - 1);
 }
 
-static bool is_network_url(const char *value) {
+bool is_network_url(const char *value) {
   if (value == nullptr)
     return false;
   return std::strncmp(value, "http://", 7) == 0 || std::strncmp(value, "https://", 8) == 0;
 }
 
-static esp_err_t fetch_http_text(const char *url, std::string *out);
 static std::vector<std::pair<std::string, std::string>> parse_papp_catalog(const std::string &html,
                                                                              const std::string &base_url);
 
@@ -261,15 +255,50 @@ void PappLoader::setup() {
     return;
   }
 
-  this->framebuffer_ = static_cast<uint16_t *>(heap_caps_aligned_calloc(
-      64, 1, VIRTUAL_WIDTH * VIRTUAL_HEIGHT * sizeof(uint16_t),
-      MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
-  this->rotated_framebuffer_ = static_cast<uint16_t *>(heap_caps_aligned_calloc(
-      64, 1, VIRTUAL_WIDTH * VIRTUAL_HEIGHT * sizeof(uint16_t),
-      MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
-  this->ppa_framebuffer_ = static_cast<uint16_t *>(heap_caps_aligned_calloc(
-      64, 1, VIRTUAL_WIDTH * VIRTUAL_HEIGHT * sizeof(uint16_t),
-      MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
+  // The panel: the YAML size, else the display's own. A display that reports
+  // less than the 800x480 canvas (or no size at all) is taken to be the
+  // 1024x600 panel this loader was written for.
+  const bool panel_configured = this->panel_config_w_ > 0 && this->panel_config_h_ > 0;
+  int panel_w = panel_configured ? this->panel_config_w_ : this->display_->get_native_width();
+  int panel_h = panel_configured ? this->panel_config_h_ : this->display_->get_native_height();
+  const bool panel_known = panel_w >= canvas::LEGACY_WIDTH && panel_h >= canvas::LEGACY_HEIGHT;
+  if (!panel_known) {
+    ESP_LOGW(TAG, "Display reports %dx%d, less than the %dx%d canvas; assuming a %dx%d panel", panel_w, panel_h,
+             canvas::LEGACY_WIDTH, canvas::LEGACY_HEIGHT, canvas::FALLBACK_PANEL_WIDTH, canvas::FALLBACK_PANEL_HEIGHT);
+    panel_w = canvas::FALLBACK_PANEL_WIDTH;
+    panel_h = canvas::FALLBACK_PANEL_HEIGHT;
+  }
+  panel_w = std::min(panel_w, canvas::MAX_SIDE);
+  panel_h = std::min(panel_h, canvas::MAX_SIDE);
+  this->geometry_.panel_w = panel_w;
+  this->geometry_.panel_h = panel_h;
+  this->geometry_.canvas_w = canvas::LEGACY_WIDTH;
+  this->geometry_.canvas_h = canvas::LEGACY_HEIGHT;
+
+  // Frame buffers for the largest canvas, the whole panel (canvas sizes are
+  // even), allocated once. Short of PSRAM, every app stays at 800x480.
+  if (!this->allocate_frame_buffers_(panel_w - panel_w % 2, panel_h - panel_h % 2) &&
+      (panel_w - panel_w % 2 != canvas::LEGACY_WIDTH || panel_h - panel_h % 2 != canvas::LEGACY_HEIGHT)) {
+    ESP_LOGW(TAG, "No PSRAM for %dx%d frame buffers; apps are limited to %dx%d", panel_w, panel_h,
+             canvas::LEGACY_WIDTH, canvas::LEGACY_HEIGHT);
+    this->allocate_frame_buffers_(canvas::LEGACY_WIDTH, canvas::LEGACY_HEIGHT);
+  }
+  // The canvas offered to apps that ask (display_get_size): the YAML one, else
+  // the whole panel, or 800x480 when the panel's size is not known.
+  int offer_w = this->default_canvas_w_, offer_h = this->default_canvas_h_;
+  if (offer_w <= 0 || offer_h <= 0) {
+    offer_w = panel_known || panel_configured ? this->max_canvas_w_ : canvas::LEGACY_WIDTH;
+    offer_h = panel_known || panel_configured ? this->max_canvas_h_ : canvas::LEGACY_HEIGHT;
+  }
+  if (!canvas::size_ok(offer_w, offer_h, this->max_canvas_w_, this->max_canvas_h_)) {
+    ESP_LOGW(TAG, "Default canvas %dx%d does not fit (even sizes from %dx%d to %dx%d); using %dx%d", offer_w, offer_h,
+             canvas::MIN_WIDTH, canvas::MIN_HEIGHT, this->max_canvas_w_, this->max_canvas_h_, this->max_canvas_w_,
+             this->max_canvas_h_);
+    offer_w = this->max_canvas_w_;
+    offer_h = this->max_canvas_h_;
+  }
+  this->default_canvas_w_ = offer_w;
+  this->default_canvas_h_ = offer_h;
   this->emu_buffer_ = static_cast<uint16_t *>(heap_caps_aligned_calloc(
       64, 1, EMU_WIDTH * EMU_HEIGHT * sizeof(uint16_t),
       MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
@@ -392,8 +421,9 @@ void PappLoader::setup() {
   ESP_LOGCONFIG(TAG, "  Path: %s", this->path_.c_str());
   const std::string mapped = runtime_path(this->path_.c_str());
   ESP_LOGCONFIG(TAG, "  SD path: %s", mapped.c_str());
-  ESP_LOGCONFIG(TAG, "  Display: %dx%d virtual, centered on %dx%d LCD", VIRTUAL_WIDTH, VIRTUAL_HEIGHT,
-                LCD_WIDTH, LCD_HEIGHT);
+  ESP_LOGCONFIG(TAG, "  Display: %dx%d panel; apps draw %dx%d unless they pick a canvas (up to %dx%d, offered %dx%d)",
+                this->geometry_.panel_w, this->geometry_.panel_h, canvas::LEGACY_WIDTH, canvas::LEGACY_HEIGHT,
+                this->max_canvas_w_, this->max_canvas_h_, this->default_canvas_w_, this->default_canvas_h_);
 #ifdef PAPP_LOADER_USE_USB_HIDX
   const char *usb_status = this->usb_hidx_ ? "configured" : "disabled";
 #else
@@ -417,6 +447,117 @@ void PappLoader::setup() {
   }
 }
 
+// ── Canvas size ──────────────────────────────────────────────────────────────
+
+void PappLoader::free_frame_buffers_() {
+  heap_caps_free(this->framebuffer_);
+  heap_caps_free(this->rotated_framebuffer_);
+  heap_caps_free(this->ppa_framebuffer_);
+  this->framebuffer_ = nullptr;
+  this->rotated_framebuffer_ = nullptr;
+  this->ppa_framebuffer_ = nullptr;
+  this->frame_alloc_bytes_ = 0;
+}
+
+// The three canvas buffers, each big enough for a width x height canvas and
+// whole cache lines (PPA output and cache syncs work in those).
+bool PappLoader::allocate_frame_buffers_(int width, int height) {
+  this->free_frame_buffers_();
+  const size_t bytes = canvas::align_bytes(canvas::frame_bytes(width, height));
+  auto allocate = [bytes]() {
+    return static_cast<uint16_t *>(
+        heap_caps_aligned_calloc(canvas::CACHE_LINE, 1, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
+  };
+  this->framebuffer_ = allocate();
+  this->rotated_framebuffer_ = allocate();
+  this->ppa_framebuffer_ = allocate();
+  if (this->framebuffer_ == nullptr || this->rotated_framebuffer_ == nullptr || this->ppa_framebuffer_ == nullptr) {
+    this->free_frame_buffers_();
+    return false;
+  }
+  this->frame_alloc_bytes_ = bytes;
+  this->max_canvas_w_ = width;
+  this->max_canvas_h_ = height;
+  return true;
+}
+
+void PappLoader::apply_canvas_(int width, int height, bool blank_panel) {
+  this->geometry_.canvas_w = width;
+  this->geometry_.canvas_h = height;
+  // Nothing of the old canvas may show through: its rows have another stride.
+  std::memset(this->framebuffer_, 0, this->frame_alloc_bytes_);
+  std::memset(this->rotated_framebuffer_, 0, this->frame_alloc_bytes_);
+  // Written back now so no dirty line can later land on PPA output, and
+  // dropped from the cache so reads see what the PPA writes.
+  esp_cache_msync(this->rotated_framebuffer_, this->frame_alloc_bytes_,
+                  ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+  this->direct_frame_[2] = 0;  // the direct path clears its border again
+  this->last_frame_direct_ = false;
+  if (blank_panel && this->display_ != nullptr) {
+    // The old canvas, its border and the close control may be anywhere: clear
+    // the whole panel, in bands of the (now black) rotated buffer.
+    const int panel_w = this->geometry_.panel_w, panel_h = this->geometry_.panel_h;
+    const int rows = std::max(1, static_cast<int>(this->frame_alloc_bytes_ / sizeof(uint16_t) / panel_w));
+    for (int y = 0; y < panel_h; y += rows) {
+      this->display_->draw_pixels_at(0, y, panel_w, std::min(rows, panel_h - y),
+                                     reinterpret_cast<const uint8_t *>(this->rotated_framebuffer_),
+                                     display::COLOR_ORDER_RGB, display::COLOR_BITNESS_565, false);
+    }
+  }
+}
+
+// Called by the app (display_set_canvas), normally from its drawing task.
+int PappLoader::set_canvas_(int width, int height) {
+  if (this->framebuffer_ == nullptr || !canvas::size_ok(width, height, this->max_canvas_w_, this->max_canvas_h_)) {
+    ESP_LOGW(TAG, "PAPP canvas %dx%d refused: even sizes from %dx%d to %dx%d", width, height, canvas::MIN_WIDTH,
+             canvas::MIN_HEIGHT, this->max_canvas_w_, this->max_canvas_h_);
+    return -1;
+  }
+  if (this->display_mutex_ != nullptr)
+    xSemaphoreTakeRecursive(this->display_mutex_, portMAX_DELAY);
+  const bool change = width != this->geometry_.canvas_w || height != this->geometry_.canvas_h;
+  if (change)
+    this->apply_canvas_(width, height, true);
+  this->canvas_chosen_ = true;
+  if (this->display_mutex_ != nullptr)
+    xSemaphoreGiveRecursive(this->display_mutex_);
+  if (change) {
+    const canvas::Geometry &g = this->geometry_;
+    ESP_LOGI(TAG, "PAPP canvas: %dx%d at (%d,%d) on the %dx%d panel, close control %s", width, height, g.x(), g.y(),
+             g.panel_w, g.panel_h, g.close_beside() ? "beside it" : "over its top-right corner");
+  }
+  return 0;
+}
+
+// Before an app starts (and after one ends): the 800x480 canvas again, with
+// no app loop running. Waits only briefly for the display lock: an app task
+// that is gone may have died holding it.
+void PappLoader::restore_legacy_canvas_() {
+  this->canvas_chosen_ = false;
+  if (this->framebuffer_ == nullptr ||
+      (this->geometry_.canvas_w == canvas::LEGACY_WIDTH && this->geometry_.canvas_h == canvas::LEGACY_HEIGHT))
+    return;
+  const bool locked = this->display_mutex_ != nullptr &&
+                      xSemaphoreTakeRecursive(this->display_mutex_, pdMS_TO_TICKS(200)) == pdTRUE;
+  this->apply_canvas_(canvas::LEGACY_WIDTH, canvas::LEGACY_HEIGHT, true);
+  if (locked)
+    xSemaphoreGiveRecursive(this->display_mutex_);
+}
+
+void PappLoader::prepare_canvas_for_app_(const std::string &source) {
+  this->restore_legacy_canvas_();
+  const std::string app = canvas::app_key(source);
+  const std::string setting = this->get_app_canvas(app);
+  int w = 0, h = 0;
+  const bool from_setting = !setting.empty() && canvas::parse_size(setting, &w, &h) &&
+                            canvas::size_ok(w, h, this->max_canvas_w_, this->max_canvas_h_);
+  this->offered_canvas_w_ = from_setting ? w : this->default_canvas_w_;
+  this->offered_canvas_h_ = from_setting ? h : this->default_canvas_h_;
+  ESP_LOGI(TAG, "PAPP canvas for %s: %dx%d until the app picks one; it is offered %dx%d (%s)", app.c_str(),
+           canvas::LEGACY_WIDTH, canvas::LEGACY_HEIGHT, this->offered_canvas_w_, this->offered_canvas_h_,
+           from_setting ? "its Screen setting" : "device default");
+}
+
 // Runs on the LVGL thread (the main loop). Copies the snapshot into a plain
 // PSRAM buffer, dropping any row padding, and frees LVGL's buffer here so the
 // stream task never touches LVGL memory.
@@ -437,6 +578,41 @@ void PappLoader::take_menu_shot_() {
       std::memcpy(pixels + y * w, shot->data + y * stride, w * sizeof(uint16_t));
   }
   lv_draw_buf_destroy(shot);
+  // What the top layer shows (a store detail page, the progress panel) is not
+  // part of the screen: blend each visible child on top.
+  lv_obj_t *top = lv_layer_top();
+  for (uint32_t i = 0; pixels != nullptr && top != nullptr && i < lv_obj_get_child_count(top); i++) {
+    lv_obj_t *child = lv_obj_get_child(top, static_cast<int32_t>(i));
+    if (child == nullptr || lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN))
+      continue;
+    lv_draw_buf_t *layer = lv_snapshot_take(child, LV_COLOR_FORMAT_ARGB8888);
+    if (layer == nullptr)
+      continue;
+    lv_area_t area;
+    lv_obj_get_coords(child, &area);
+    // The snapshot is the object plus its extra draw area on every side.
+    const int32_t x0 = area.x1 - (static_cast<int32_t>(layer->header.w) - lv_area_get_width(&area)) / 2;
+    const int32_t y0 = area.y1 - (static_cast<int32_t>(layer->header.h) - lv_area_get_height(&area)) / 2;
+    for (int32_t y = 0; y < static_cast<int32_t>(layer->header.h); y++) {
+      const int32_t sy = y0 + y;
+      if (sy < 0 || sy >= static_cast<int32_t>(h))
+        continue;
+      const uint8_t *src = layer->data + y * layer->header.stride;
+      for (int32_t x = 0; x < static_cast<int32_t>(layer->header.w); x++) {
+        const int32_t sx = x0 + x;
+        const uint8_t *p = src + x * 4;  // B, G, R, A
+        const uint32_t a = p[3];
+        if (sx < 0 || sx >= static_cast<int32_t>(w) || a == 0)
+          continue;
+        uint16_t &d = pixels[sy * w + sx];
+        const uint32_t dr = (d >> 8) & 0xF8, dg = (d >> 3) & 0xFC, db = (d << 3) & 0xF8;
+        const uint32_t r = (p[2] * a + dr * (255 - a)) / 255, g = (p[1] * a + dg * (255 - a)) / 255,
+                       b = (p[0] * a + db * (255 - a)) / 255;
+        d = static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+      }
+    }
+    lv_draw_buf_destroy(layer);
+  }
   this->menu_shot_ = pixels;
   this->menu_shot_w_ = pixels != nullptr ? static_cast<uint16_t>(w) : 0;
   this->menu_shot_h_ = pixels != nullptr ? static_cast<uint16_t>(h) : 0;
@@ -451,6 +627,8 @@ void PappLoader::loop() {
       this->take_menu_shot_();
   }
   this->update_progress_ui_();
+  this->poll_info_fetch_();
+  this->poll_install_();
   if (this->catalog_loading_ && this->catalog_done_) {
     if (this->papp_catalog_task_handle_ != nullptr) {
       vTaskDelete(this->papp_catalog_task_handle_);
@@ -466,6 +644,7 @@ void PappLoader::loop() {
                static_cast<unsigned>(this->catalog_entries_.size()));
       for (const auto &entry : this->catalog_entries_)
         ESP_LOGI(TAG, "  PAPP: %s -> %s", entry.first.c_str(), entry.second.c_str());
+      this->start_info_fetch_();
 #ifdef PAPP_LOADER_USE_LVGL
       this->catalog_ui_pending_ = true;
 #endif
@@ -478,8 +657,9 @@ void PappLoader::loop() {
     }
   }
 #ifdef PAPP_LOADER_USE_LVGL
-  if (this->catalog_ui_pending_ && this->catalog_container_ != nullptr && this->lvgl_ != nullptr &&
-      this->lvgl_->is_loop_started()) {
+  // While a PAPP runs, the rebuild waits: LVGL is paused under the app.
+  if (this->catalog_ui_pending_ && !this->launched_ && this->catalog_container_ != nullptr &&
+      this->lvgl_ != nullptr && this->lvgl_->is_loop_started()) {
     this->update_catalog_ui_();
     this->catalog_ui_pending_ = false;
   }
@@ -515,8 +695,10 @@ void PappLoader::loop() {
   // Poll this independently of the app. Some small PAPPs do not call the
   // optional touch service themselves, but the shared close control must
   // still work for them.
-  if (this->launched_)
+  if (this->launched_) {
     this->poll_close_button_();
+    this->snapshot_touches_();
+  }
 
   if (this->launched_) {
     if (this->papp_loading_) {
@@ -594,6 +776,7 @@ void PappLoader::select_catalog_index(size_t index) {
   this->catalog_url_ = this->catalogs_[index].url;
   ESP_LOGI(TAG, "PAPP library: %s (%s)", this->catalogs_[index].name.c_str(), this->catalog_url_.c_str());
   this->catalog_entries_.clear();
+  this->start_info_fetch_();
 #ifdef PAPP_LOADER_USE_LVGL
   this->catalog_ui_pending_ = true;
 #endif
@@ -665,6 +848,7 @@ void PappLoader::list_catalog_folder_() {
   this->catalog_entries_ = std::move(entries);
   ESP_LOGI(TAG, "PAPP folder catalog %s: %u application(s)", folder.c_str(),
            static_cast<unsigned>(this->catalog_entries_.size()));
+  this->start_info_fetch_();
 #ifdef PAPP_LOADER_USE_LVGL
   this->catalog_ui_pending_ = true;
 #endif
@@ -762,22 +946,35 @@ bool PappLoader::start_loaded_app_(psram_app_handle_t app, const std::string &so
 
   ESP_LOGI(TAG, "Starting PAPP in worker task: %s", source.c_str());
   this->begin_report_(source);
+  this->prepare_canvas_for_app_(source);
+#ifdef PAPP_LOADER_USE_USB_MIDI
+  // The app gets the notes played from now on, not what piled up before.
+  if (this->usb_midi_ != nullptr) {
+    uint8_t stale[64];
+    while (this->usb_midi_->read(stale, sizeof(stale)) > 0) {
+    }
+  }
+#endif
 
 #ifdef PAPP_LOADER_USE_LVGL
   // LVGL must not draw over the PAPP framebuffer. Pause it from the ESPHome
   // loop task; the PAPP worker never calls LVGL directly.
   if (this->lvgl_ != nullptr && this->lvgl_->is_loop_started()) {
     // Direct-rendered PAPPs share the launcher LVGL display but have no LVGL
-    // object of their own. Put an invisible clickable object on top of the
-    // launcher so a release cannot activate or invalidate a button underneath
-    // the PAPP between its frame updates.
+    // object of their own. Put a black clickable object over the whole
+    // launcher, top layer included (store detail page, side menu): a release
+    // cannot reach a button underneath, and the panel around the canvas is
+    // black instead of a frozen store or launcher page.
     if (this->touch_modal_shield_ == nullptr) {
-      lv_obj_t *screen = this->lvgl_->get_screen_active();
-      if (screen != nullptr) {
-        this->touch_modal_shield_ = lv_obj_create(screen);
+      lv_obj_t *top = lv_layer_top();
+      if (top != nullptr) {
+        this->touch_modal_shield_ = lv_obj_create(top);
         lv_obj_remove_style_all(this->touch_modal_shield_);
         lv_obj_set_size(this->touch_modal_shield_, LV_PCT(100), LV_PCT(100));
         lv_obj_center(this->touch_modal_shield_);
+        lv_obj_set_style_bg_color(this->touch_modal_shield_, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(this->touch_modal_shield_, LV_OPA_COVER, 0);
+        lv_obj_move_foreground(this->touch_modal_shield_);
         lv_obj_add_flag(this->touch_modal_shield_, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(
             this->touch_modal_shield_,
@@ -797,7 +994,7 @@ bool PappLoader::start_loaded_app_(psram_app_handle_t app, const std::string &so
     }
     // The PAPP canvas does not cover the whole panel: whatever LVGL last drew
     // around it stays visible while the app runs. Hide the finished download
-    // bar and redraw once, or it stays on screen at 100% under the app.
+    // bar and redraw once, so the panel shows only the black shield.
     this->set_progress_(false, 0, 0, "%s", "");
     this->update_progress_ui_();
     lv_refr_now(nullptr);
@@ -1080,6 +1277,20 @@ void PappLoader::papp_catalog_task_entry_(void *arg) {
 void PappLoader::set_catalog_selection_(uint16_t index) {
   if (this->catalog_container_ == nullptr)
     return;
+  if (this->store_ui_) {
+    // Store view: the tiles sit in one grid object under the switcher row.
+    if (this->catalog_tiles_.empty()) {
+      this->catalog_selection_ = 0;
+      return;
+    }
+    index = std::min<uint16_t>(index, static_cast<uint16_t>(this->catalog_tiles_.size() - 1));
+    this->catalog_selection_ = index;
+    for (lv_obj_t *tile : this->catalog_tiles_)
+      lv_obj_remove_state(tile, LV_STATE_FOCUSED);
+    lv_obj_add_state(this->catalog_tiles_[index], LV_STATE_FOCUSED);
+    lv_obj_scroll_to_view_recursive(this->catalog_tiles_[index], LV_ANIM_ON);
+    return;
+  }
 
   // `index` counts apps; the switcher row, when present, comes first.
   const uint32_t children = lv_obj_get_child_count(this->catalog_container_);
@@ -1106,68 +1317,57 @@ void PappLoader::set_catalog_selection_(uint16_t index) {
 }
 
 void PappLoader::handle_launcher_controls_() {
-  // The launcher uses the same controls as the PAPP runtime.  Detect edges
+  // The launcher sees exactly what an app would: gamepad buttons, the ADC
+  // ladder, sticks, the fire/touch buttons (as A), held keyboard keys
+  // (arrows/WASD, Space/Enter/Z, X, Backspace...) and arrow taps. Detect edges
   // here instead of treating a held HID report or ADC value as repeated
   // presses every ESPHome loop iteration.
+  papp_gamepad_state_t input;
+  this->read_input_(&input);
   uint8_t direction = 0;
-  auto pressed = [this](uint8_t index) {
-    return this->buttons_[index] != nullptr && this->buttons_[index]->get_state();
-  };
-  if (pressed(PAPP_INPUT_UP))
-    direction |= 1U << 0;
-  if (pressed(PAPP_INPUT_RIGHT))
-    direction |= 1U << 1;
-  if (pressed(PAPP_INPUT_DOWN))
-    direction |= 1U << 2;
-  if (pressed(PAPP_INPUT_LEFT))
-    direction |= 1U << 3;
-
-  // GPIO16 is the Elecrow resistor ladder. Keep the same thresholds used by
-  // the original Elecrow ESPHome PAPP configuration, including diagonals.
-  if (this->adc_button_sensor_ != nullptr) {
-    const float voltage = this->adc_button_sensor_->get_state();
-    if (voltage < 1.48f) {
-      direction |= (1U << 2) | (1U << 3);  // down + left
-    } else if (voltage < 1.60f) {
-      direction |= (1U << 0) | (1U << 3);  // up + left
-    } else if (voltage < 1.75f) {
-      direction |= 1U << 3;  // left
-    } else if (voltage < 1.95f) {
-      direction |= (1U << 2) | (1U << 1);  // down + right
-    } else if (voltage < 2.10f) {
-      direction |= (1U << 0) | (1U << 1);  // up + right
-    } else if (voltage < 2.40f) {
-      direction |= 1U << 1;  // right
-    } else if (voltage < 2.75f) {
-      direction |= 1U << 2;  // down
-    } else if (voltage < 3.10f) {
-      direction |= 1U << 0;  // up
-    }
+  for (uint8_t i = 0; i < 4; i++) {  // PAPP_INPUT_UP, RIGHT, DOWN, LEFT
+    if (input.values[PAPP_INPUT_UP + i])
+      direction |= 1U << i;
   }
-
-  const bool a = pressed(PAPP_INPUT_A);
-  const bool touch = this->touch_button_ != nullptr && this->touch_button_->get_state();
-  const bool active = direction != 0 || a || touch;
+  const bool a = input.values[PAPP_INPUT_A] != 0;
+  // Menu (the keyboard's Escape) also goes back.
+  const bool b = input.values[PAPP_INPUT_B] != 0 || input.values[PAPP_INPUT_MENU] != 0;
+  const bool l = input.values[PAPP_INPUT_L] != 0;
+  const bool r = input.values[PAPP_INPUT_R] != 0;
+  const bool select = input.values[PAPP_INPUT_SELECT] != 0;
+  const bool touch = false;  // read_input_ already counts the touch button as A
+  const bool active = direction != 0 || a || b || l || r || select || touch;
+  auto remember = [&]() {
+    this->launcher_direction_state_ = direction;
+    this->launcher_a_state_ = a;
+    this->launcher_b_state_ = b;
+    this->launcher_l_state_ = l;
+    this->launcher_r_state_ = r;
+    this->launcher_select_state_ = select;
+    this->launcher_touch_state_ = touch;
+  };
 
   // Do not let a controller that is held during cold boot select or scroll a
   // PAPP before the user has released it once. This is the same protection
   // used for the normal launch button and avoids the old phantom-input loop.
   if (!this->launcher_input_armed_) {
-    if (!active) {
-      this->launcher_input_armed_ = true;
-      this->launcher_direction_state_ = 0;
-      this->launcher_a_state_ = false;
-      this->launcher_touch_state_ = false;
+    if (!active)
       ESP_LOGD(TAG, "Launcher controls armed after input release");
-    } else {
-      this->launcher_direction_state_ = direction;
-      this->launcher_a_state_ = a;
-      this->launcher_touch_state_ = touch;
-    }
+    this->launcher_input_armed_ = !active;
+    remember();
     return;
   }
 
   const uint8_t newly_pressed = direction & static_cast<uint8_t>(~this->launcher_direction_state_);
+  if (this->store_ui_) {
+    // Grid and detail page: d-pad moves, A opens / presses, B goes back, L/R switch
+    // sources, Select opens the side menu.
+    this->handle_store_controls_(newly_pressed, (a && !this->launcher_a_state_) || (touch && !this->launcher_touch_state_),
+                                 b && !this->launcher_b_state_, l && !this->launcher_l_state_,
+                                 r && !this->launcher_r_state_, select && !this->launcher_select_state_);
+    remember();
+    return;
+  }
   // Left/right switch catalogs (up/down still move through the list).
   if (this->catalogs_.size() > 1 && (newly_pressed & ((1U << 1) | (1U << 3))) != 0 &&
       (newly_pressed & ((1U << 0) | (1U << 2))) == 0) {
@@ -1199,16 +1399,22 @@ void PappLoader::handle_launcher_controls_() {
     }
   }
 
-  this->launcher_direction_state_ = direction;
-  this->launcher_a_state_ = a;
-  this->launcher_touch_state_ = touch;
+  remember();
 }
 
 void PappLoader::update_catalog_ui_() {
   if (this->catalog_container_ == nullptr)
     return;
 
+  // The store view keeps the selection and an open detail page across rebuilds
+  // (listings arriving, an install finishing).
+  const uint16_t keep_selection = this->catalog_selection_;
+  const std::string reopen_url = this->detail_url_;
+  if (this->store_ui_)
+    this->close_detail_();
   lv_obj_clean(this->catalog_container_);
+  this->catalog_tiles_.clear();
+  this->free_icons_();
   this->catalog_selection_ = 0;
   this->catalog_header_rows_ = 0;
   if (this->catalogs_.size() > 1) {
@@ -1220,8 +1426,32 @@ void PappLoader::update_catalog_ui_() {
       this->catalog_header_rows_ = 1;
     }
   }
+  if (this->store_ui_) {
+    // The list's light theme does not suit the store: dark, switcher row included.
+    lv_obj_set_style_bg_color(this->catalog_container_, lv_color_hex(0x08111F), 0);
+    lv_obj_set_style_text_color(this->catalog_container_, lv_color_hex(0xE2E8F0), 0);
+    if (this->catalog_header_rows_ > 0) {
+      lv_obj_t *header = lv_obj_get_child(this->catalog_container_, 0);
+      lv_obj_set_style_bg_color(header, lv_color_hex(0x111C33), 0);
+      lv_obj_set_style_text_color(header, lv_color_hex(0xE2E8F0), 0);
+      lv_obj_set_style_border_color(header, lv_color_hex(0x1E2A44), 0);
+    }
+    this->build_drawer_();  // this source's side menu, even when it lists nothing
+  }
   if (this->catalog_entries_.empty()) {
     lv_list_add_text(this->catalog_container_, this->catalog_loading_ ? "Loading..." : "No .papp files found");
+    return;
+  }
+  if (this->store_ui_) {
+    this->build_store_grid_();
+    this->set_catalog_selection_(keep_selection);
+    for (size_t i = 0; i < this->catalog_entries_.size() && !reopen_url.empty(); i++) {
+      if (this->catalog_entries_[i].second == reopen_url) {
+        this->set_catalog_selection_(static_cast<uint16_t>(i));
+        this->open_detail_(static_cast<int>(i));
+        break;
+      }
+    }
     return;
   }
 
@@ -1265,6 +1495,7 @@ void PappLoader::finish_app_() {
     ESP_LOGI(TAG, "PAPP close: app unloaded");
   }
   close_app_sockets_();
+  close_app_tls_();
   this->toggle_wait_release_ = this->toggle_button_ != nullptr;
   this->toggle_close_requested_ = false;
   this->global_close_requested_ = false;
@@ -1278,8 +1509,12 @@ void PappLoader::finish_app_() {
   this->launcher_a_state_ = false;
   this->launcher_touch_state_ = false;
 #endif
+  // The next app starts at 800x480 again. An app that had another canvas is
+  // blanked from the whole panel here, so none of it shows around the next
+  // one (or under a launcher without LVGL).
+  this->restore_legacy_canvas_();
   // LVGL invalidation below redraws the launcher immediately. Avoid an extra
-  // full 800x480 PAPP flush here; that transfer can leave the last game frame
+  // full PAPP flush here; that transfer can leave the last game frame
   // visible while the close path waits for a second display transaction.
   this->restore_lvgl_();
   this->send_report_(closed_by_user ? "closed" : "exited", result, this->report_source_);
@@ -1287,7 +1522,7 @@ void PappLoader::finish_app_() {
 
 void PappLoader::clear_(uint16_t color) {
   if (this->framebuffer_ != nullptr)
-    std::fill_n(this->framebuffer_, VIRTUAL_WIDTH * VIRTUAL_HEIGHT, color);
+    std::fill_n(this->framebuffer_, static_cast<size_t>(this->geometry_.canvas_w) * this->geometry_.canvas_h, color);
 }
 
 void PappLoader::draw_close_overlay_() {
@@ -1328,7 +1563,7 @@ void PappLoader::draw_close_overlay_() {
   }
 
   this->display_->draw_pixels_at(
-      CLOSE_BUTTON_RAW_X, CLOSE_BUTTON_RAW_Y, CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE,
+      this->geometry_.close_raw_x(), this->geometry_.close_raw_y(), CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE,
       reinterpret_cast<const uint8_t *>(close_overlay_buffer), display::COLOR_ORDER_RGB,
       display::COLOR_BITNESS_565, false);
 }
@@ -1339,7 +1574,7 @@ void PappLoader::clear_close_overlay_() {
 
   std::fill_n(close_overlay_buffer, CLOSE_BUTTON_SIZE * CLOSE_BUTTON_SIZE, 0x0000);
   this->display_->draw_pixels_at(
-      CLOSE_BUTTON_RAW_X, CLOSE_BUTTON_RAW_Y, CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE,
+      this->geometry_.close_raw_x(), this->geometry_.close_raw_y(), CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE,
       reinterpret_cast<const uint8_t *>(close_overlay_buffer), display::COLOR_ORDER_RGB,
       display::COLOR_BITNESS_565, false);
 }
@@ -1349,18 +1584,55 @@ void PappLoader::poll_close_button_() {
     return;
 
   auto touch = this->touchscreen_->get_touch();
-  if (!touch.has_value() || (touch->state & touchscreen::STATE_RELEASING) != 0)
-    return;
-
-  const int close_left = CLOSE_BUTTON_SCREEN_X - CLOSE_BUTTON_HIT_PADDING;
-  const int close_top = CLOSE_BUTTON_SCREEN_Y - CLOSE_BUTTON_HIT_PADDING;
-  const int close_right = CLOSE_BUTTON_SCREEN_X + CLOSE_BUTTON_SIZE + CLOSE_BUTTON_HIT_PADDING;
-  const int close_bottom = CLOSE_BUTTON_SCREEN_Y + CLOSE_BUTTON_SIZE + CLOSE_BUTTON_HIT_PADDING;
-  if (touch->x >= close_left && touch->x < close_right && touch->y >= close_top && touch->y < close_bottom) {
-    this->begin_close_();
-    ESP_LOGI(TAG, "PAPP on-screen close requested");
+  if (!touch.has_value() || (touch->state & touchscreen::STATE_RELEASING) != 0) {
+    this->close_hold_since_us_ = 0;
     return;
   }
+  this->close_touch_(touch->x, touch->y);
+}
+
+// A touch on the close control; true when it asked the app to close. Beside
+// the canvas the control is drawn and a touch closes at once. A canvas too
+// wide for that margin (a full-panel one) has app controls in that corner
+// (Tulip's power and shuffle buttons), so the control is not drawn there:
+// taps reach the app and only a touch held CLOSE_HOLD_US closes.
+bool PappLoader::close_touch_(int x, int y) {
+  static constexpr int64_t CLOSE_HOLD_US = 2000000;
+  const canvas::Geometry geometry = this->geometry_;
+  if (!geometry.in_close(x, y)) {
+    this->close_hold_since_us_ = 0;
+    return false;
+  }
+  if (!geometry.close_beside()) {
+    const int64_t now = esp_timer_get_time();
+    if (this->close_hold_since_us_ == 0)
+      this->close_hold_since_us_ = now;
+    if (now - this->close_hold_since_us_ < CLOSE_HOLD_US)
+      return false;
+  }
+  if (!this->global_close_requested_) {
+    this->begin_close_();
+    ESP_LOGI(TAG, "PAPP on-screen close requested");
+  }
+  return true;
+}
+
+// Copies the fingers on the panel for touch_read_points: the touchscreen
+// component updates its list on this (the main loop's) task.
+void PappLoader::snapshot_touches_() {
+  if (this->touchscreen_ == nullptr)
+    return;
+  const touchscreen::TouchPoints_t touches = this->touchscreen_->get_touches();
+  portENTER_CRITICAL(&this->touch_points_lock_);
+  int count = 0;
+  for (const auto &touch : touches) {
+    if (count == MAX_TOUCH_POINTS)
+      break;
+    if ((touch.state & touchscreen::STATE_RELEASING) == 0)
+      this->touch_points_[count++] = touch;
+  }
+  this->touch_point_count_ = count;
+  portEXIT_CRITICAL(&this->touch_points_lock_);
 }
 
 void PappLoader::flush_framebuffer_() {
@@ -1375,18 +1647,23 @@ void PappLoader::flush_framebuffer_() {
   const uint16_t *display_buffer = this->rotated_framebuffer_;
   this->last_frame_direct_ = false;
   bool ppa_ok = false;
+  const int canvas_w = this->geometry_.canvas_w;
+  const int canvas_h = this->geometry_.canvas_h;
   if (this->ppa_srm_client_ != nullptr && this->ppa_framebuffer_ != nullptr) {
-    const size_t frame_bytes = VIRTUAL_WIDTH * VIRTUAL_HEIGHT * sizeof(uint16_t);
+    // Whole cache lines: 768,000 bytes for 800x480, as before.
+    const size_t frame_bytes =
+        canvas::sync_bytes(canvas::frame_bytes(canvas_w, canvas_h), this->frame_alloc_bytes_);
     esp_cache_msync(this->framebuffer_, frame_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     ppa_srm_oper_config_t cfg = {
         .in = {
-            .buffer = this->framebuffer_, .pic_w = VIRTUAL_WIDTH, .pic_h = VIRTUAL_HEIGHT,
-            .block_w = VIRTUAL_WIDTH, .block_h = VIRTUAL_HEIGHT,
+            .buffer = this->framebuffer_,
+            .pic_w = static_cast<uint32_t>(canvas_w), .pic_h = static_cast<uint32_t>(canvas_h),
+            .block_w = static_cast<uint32_t>(canvas_w), .block_h = static_cast<uint32_t>(canvas_h),
             .block_offset_x = 0, .block_offset_y = 0, .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
         },
         .out = {
             .buffer = this->ppa_framebuffer_, .buffer_size = frame_bytes,
-            .pic_w = VIRTUAL_WIDTH, .pic_h = VIRTUAL_HEIGHT,
+            .pic_w = static_cast<uint32_t>(canvas_w), .pic_h = static_cast<uint32_t>(canvas_h),
             .block_offset_x = 0, .block_offset_y = 0, .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
         },
         .rotation_angle = PPA_SRM_ROTATION_ANGLE_180,
@@ -1403,11 +1680,11 @@ void PappLoader::flush_framebuffer_() {
   }
   if (!ppa_ok) {
     // Fallback for boards/IDF builds without a working PPA SRM client.
-    for (int y = 0; y < VIRTUAL_HEIGHT; y++) {
-      const uint16_t *src = this->framebuffer_ + y * VIRTUAL_WIDTH;
-      uint16_t *dst = this->rotated_framebuffer_ + (VIRTUAL_HEIGHT - 1 - y) * VIRTUAL_WIDTH;
-      for (int x = 0; x < VIRTUAL_WIDTH; x++)
-        dst[VIRTUAL_WIDTH - 1 - x] = src[x];
+    for (int y = 0; y < canvas_h; y++) {
+      const uint16_t *src = this->framebuffer_ + static_cast<size_t>(y) * canvas_w;
+      uint16_t *dst = this->rotated_framebuffer_ + static_cast<size_t>(canvas_h - 1 - y) * canvas_w;
+      for (int x = 0; x < canvas_w; x++)
+        dst[canvas_w - 1 - x] = src[x];
     }
     this->direct_frame_[2] = 0;  // the direct path must clear its border again
   }
@@ -1421,15 +1698,17 @@ void PappLoader::send_display_buffer_(const uint16_t *display_buffer, int64_t fl
   // One motion sample per second is enough for remote diagnosis and keeps the
   // raw video traffic small enough that it cannot starve the audio stream.
   static int64_t last_stream_frame_us = 0;
+  const canvas::Geometry geometry = this->geometry_;
   if (this->stream_client_connected_ && this->stream_mutex_ != nullptr && display_buffer != nullptr &&
       flush_start_us - last_stream_frame_us >= 1000000) {
     if (xSemaphoreTake(this->stream_mutex_, 0) == pdTRUE) {
-      constexpr uint16_t x_step = VIRTUAL_WIDTH / SCREEN_STREAM_WIDTH;
-      constexpr uint16_t y_step = VIRTUAL_HEIGHT / SCREEN_STREAM_HEIGHT;
-      for (uint16_t y = 0; y < SCREEN_STREAM_HEIGHT; y++) {
-        const uint16_t *source = display_buffer + (y * y_step) * VIRTUAL_WIDTH;
+      // A 100x60 sample of the canvas (every 8th pixel for 800x480).
+      const int x_step = geometry.canvas_w / SCREEN_STREAM_WIDTH;
+      const int y_step = geometry.canvas_h / SCREEN_STREAM_HEIGHT;
+      for (int y = 0; y < SCREEN_STREAM_HEIGHT; y++) {
+        const uint16_t *source = display_buffer + static_cast<size_t>(y * y_step) * geometry.canvas_w;
         uint16_t *target = this->stream_framebuffer_ + y * SCREEN_STREAM_WIDTH;
-        for (uint16_t x = 0; x < SCREEN_STREAM_WIDTH; x++)
+        for (int x = 0; x < SCREEN_STREAM_WIDTH; x++)
           target[x] = source[x * x_step];
       }
       this->stream_frame_sequence_++;
@@ -1438,14 +1717,20 @@ void PappLoader::send_display_buffer_(const uint16_t *display_buffer, int64_t fl
       xSemaphoreGive(this->stream_mutex_);
     }
   }
+  // The frame is turned 180 degrees, so it goes to the canvas's mirrored
+  // corner: (112, 60) for 800x480 on 1024x600, (0, 0) for a full-panel canvas.
   this->display_->draw_pixels_at(
-      LCD_X_OFFSET, LCD_Y_OFFSET, VIRTUAL_WIDTH, VIRTUAL_HEIGHT,
+      geometry.raw_x(), geometry.raw_y(), geometry.canvas_w, geometry.canvas_h,
       reinterpret_cast<const uint8_t *>(display_buffer), display::COLOR_ORDER_RGB,
       display::COLOR_BITNESS_565, false);
-  if (this->launched_)
-    this->draw_close_overlay_();
-  else
-    this->clear_close_overlay_();
+  // Over the canvas (close_touch_) the control is neither drawn nor cleared:
+  // either would cover the app's own corner.
+  if (geometry.close_beside()) {
+    if (this->launched_)
+      this->draw_close_overlay_();
+    else
+      this->clear_close_overlay_();
+  }
 
   const int64_t flush_us = esp_timer_get_time() - flush_start_us;
   static uint32_t flush_frames = 0;
@@ -1497,8 +1782,9 @@ void PappLoader::screen_stream_task_() {
     const int client_fd = accept(server_fd, reinterpret_cast<sockaddr *>(&peer), &peer_length);
     if (client_fd < 0)
       continue;
-    // A full 800x480 RGB565 frame is 768 KB. Allow slower hosts and TCP
-    // back-pressure to drain it without truncating the diagnostic frame.
+    // A full 800x480 RGB565 frame is 768 KB (a 1024x600 canvas 1.2 MB). Allow
+    // slower hosts and TCP back-pressure to drain it without truncating the
+    // diagnostic frame.
     timeval send_timeout{5, 0};
     setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
     this->stream_client_connected_ = true;
@@ -1570,37 +1856,44 @@ void PappLoader::screen_stream_task_() {
   }
 }
 
-// Sends one PAPPSS01 packet: the app's own 800x480 canvas (logical
-// orientation, the same RGB565 layout as the PAPPFB01 thumbnails), or an empty
-// 0x0 packet when no app is running. The copy lives in PSRAM only while it is
-// sent.
+// Sends one PAPPSS01 packet: the app's own canvas (800x480 unless it chose
+// another size; logical orientation, the same RGB565 layout as the PAPPFB01
+// thumbnails), the menu, or an empty 0x0 packet. The copy lives in PSRAM only
+// while it is sent.
 bool PappLoader::send_screenshot_(int client_fd) {
   static uint32_t screenshot_sequence = 0;
-  constexpr size_t frame_bytes = VIRTUAL_WIDTH * VIRTUAL_HEIGHT * sizeof(uint16_t);
   uint16_t *copy = nullptr;
-  if (this->launched_ && !this->papp_loading_ && this->framebuffer_ != nullptr)
-    copy = static_cast<uint16_t *>(heap_caps_malloc(frame_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (copy != nullptr) {
-    // The app draws without this lock; holding it only keeps a flush (and its
-    // rotation into the panel buffer) from running during the copy.
+  uint16_t width = 0;
+  uint16_t height = 0;
+  size_t bytes = 0;
+  if (this->launched_ && !this->papp_loading_ && this->framebuffer_ != nullptr) {
+    // The app draws without this lock; holding it keeps a flush (and its
+    // rotation into the panel buffer) or a canvas switch from running during
+    // the copy.
     const bool locked = this->display_mutex_ != nullptr &&
                         xSemaphoreTakeRecursive(this->display_mutex_, pdMS_TO_TICKS(200)) == pdTRUE;
-    if (this->last_frame_direct_) {
-      // The frame went straight to the panel buffer, turned 180 degrees:
-      // reading it backwards turns it upright again.
-      const uint16_t *source = this->rotated_framebuffer_;
-      const size_t pixels = static_cast<size_t>(VIRTUAL_WIDTH) * VIRTUAL_HEIGHT;
-      for (size_t i = 0; i < pixels; i++)
-        copy[i] = source[pixels - 1 - i];
-    } else {
-      std::memcpy(copy, this->framebuffer_, frame_bytes);
+    const int canvas_w = this->geometry_.canvas_w;
+    const int canvas_h = this->geometry_.canvas_h;
+    const size_t frame_bytes = canvas::frame_bytes(canvas_w, canvas_h);
+    copy = static_cast<uint16_t *>(heap_caps_malloc(frame_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (copy != nullptr) {
+      if (this->last_frame_direct_) {
+        // The frame went straight to the panel buffer, turned 180 degrees:
+        // reading it backwards turns it upright again.
+        const uint16_t *source = this->rotated_framebuffer_;
+        const size_t pixels = static_cast<size_t>(canvas_w) * canvas_h;
+        for (size_t i = 0; i < pixels; i++)
+          copy[i] = source[pixels - 1 - i];
+      } else {
+        std::memcpy(copy, this->framebuffer_, frame_bytes);
+      }
+      width = static_cast<uint16_t>(canvas_w);
+      height = static_cast<uint16_t>(canvas_h);
+      bytes = frame_bytes;
     }
     if (locked)
       xSemaphoreGiveRecursive(this->display_mutex_);
   }
-  uint16_t width = copy != nullptr ? VIRTUAL_WIDTH : 0;
-  uint16_t height = copy != nullptr ? VIRTUAL_HEIGHT : 0;
-  size_t bytes = copy != nullptr ? frame_bytes : 0;
 #if defined(PAPP_LOADER_USE_LVGL) && defined(LV_USE_SNAPSHOT) && LV_USE_SNAPSHOT
   if (copy == nullptr && !this->launched_) {
     // No app: the main loop snapshots the menu; wait for it briefly. A shot
@@ -1859,23 +2152,32 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
 
   const int64_t render_start_us = esp_timer_get_time();
 
-  int out_w = std::max(1, static_cast<int>(in_w * scale + 0.5f));
-  int out_h = std::max(1, static_cast<int>(in_h * scale + 0.5f));
-  out_w = std::min(out_w, VIRTUAL_WIDTH);
-  out_h = std::min(out_h, VIRTUAL_HEIGHT);
-  const int x0 = (VIRTUAL_WIDTH - out_w) / 2;
-  const int y0 = (VIRTUAL_HEIGHT - out_h) / 2;
+  // The frame scaled, at most the canvas, centred in it. Recomputed under the
+  // display lock by the direct path, so a canvas switch never mixes sizes.
+  int canvas_w = 0, canvas_h = 0, out_w = 0, out_h = 0, x0 = 0, y0 = 0;
+  auto fit = [&]() {
+    canvas_w = this->geometry_.canvas_w;
+    canvas_h = this->geometry_.canvas_h;
+    out_w = std::min(std::max(1, static_cast<int>(in_w * scale + 0.5f)), canvas_w);
+    out_h = std::min(std::max(1, static_cast<int>(in_h * scale + 0.5f)), canvas_h);
+    x0 = (canvas_w - out_w) / 2;
+    y0 = (canvas_h - out_h) / 2;
+  };
 
   // Fast path: one PPA pass scales the frame, turns it 180 degrees for the
-  // panel and writes it centred into rotated_framebuffer_, which goes straight
-  // to the display. Its black border is only cleared when the frame's place
-  // changes. This replaces scaling into a scratch buffer, clearing and copying
-  // into the canvas, then a second PPA pass to rotate the whole canvas (about
-  // 3 MB of memory traffic per frame at 320x240 x2).
+  // panel and writes it centred into rotated_framebuffer_ (canvas-sized),
+  // which goes straight to the display. Its black border is only cleared when
+  // the frame's place changes; a frame that fills the canvas has none. This
+  // replaces scaling into a scratch buffer, clearing and copying into the
+  // canvas, then a second PPA pass to rotate the whole canvas (about 3 MB of
+  // memory traffic per frame at 320x240 x2).
   if (!byte_swap && this->ppa_srm_client_ != nullptr && this->rotated_framebuffer_ != nullptr) {
     if (this->display_mutex_ != nullptr)
       xSemaphoreTakeRecursive(this->display_mutex_, portMAX_DELAY);
-    const size_t frame_bytes = static_cast<size_t>(VIRTUAL_WIDTH) * VIRTUAL_HEIGHT * sizeof(uint16_t);
+    fit();
+    // Whole cache lines (768,000 bytes for 800x480, as before).
+    const size_t frame_bytes =
+        canvas::sync_bytes(canvas::frame_bytes(canvas_w, canvas_h), this->frame_alloc_bytes_);
     const uint16_t place[4] = {static_cast<uint16_t>(x0), static_cast<uint16_t>(y0), static_cast<uint16_t>(out_w),
                                static_cast<uint16_t>(out_h)};
     if (std::memcmp(place, this->direct_frame_, sizeof(place)) != 0) {
@@ -1896,10 +2198,10 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
         },
         .out = {
             .buffer = this->rotated_framebuffer_, .buffer_size = frame_bytes,
-            .pic_w = VIRTUAL_WIDTH, .pic_h = VIRTUAL_HEIGHT,
+            .pic_w = static_cast<uint32_t>(canvas_w), .pic_h = static_cast<uint32_t>(canvas_h),
             // Turned 180 degrees, the block lands mirrored in the frame.
-            .block_offset_x = static_cast<uint32_t>(VIRTUAL_WIDTH - x0 - out_w),
-            .block_offset_y = static_cast<uint32_t>(VIRTUAL_HEIGHT - y0 - out_h),
+            .block_offset_x = static_cast<uint32_t>(canvas_w - x0 - out_w),
+            .block_offset_y = static_cast<uint32_t>(canvas_h - y0 - out_h),
             .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
         },
         .rotation_angle = PPA_SRM_ROTATION_ANGLE_180,
@@ -1928,15 +2230,17 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
     }
   }
 
+  fit();
   bool ppa_scaled = false;
   // The common PAPP path is an exact 2x 400x240 -> 800x480 frame. Let the
   // P4 SRM unit do that copy/scale instead of touching 384,000 pixels on the
   // worker CPU. The old scaler remains below for arbitrary emulator sizes,
   // fractional scales, and byte-swapped input.
   if (!byte_swap && this->ppa_srm_client_ != nullptr && this->ppa_framebuffer_ != nullptr &&
-      out_w == VIRTUAL_WIDTH && out_h == VIRTUAL_HEIGHT && x0 == 0 && y0 == 0) {
+      out_w == canvas_w && out_h == canvas_h && x0 == 0 && y0 == 0) {
     const size_t input_bytes = static_cast<size_t>(in_w) * in_h * sizeof(uint16_t);
-    const size_t output_bytes = static_cast<size_t>(VIRTUAL_WIDTH) * VIRTUAL_HEIGHT * sizeof(uint16_t);
+    const size_t output_bytes =
+        canvas::sync_bytes(canvas::frame_bytes(canvas_w, canvas_h), this->frame_alloc_bytes_);
     esp_cache_msync(const_cast<uint16_t *>(buffer), input_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     ppa_srm_oper_config_t cfg = {
         .in = {
@@ -1946,7 +2250,7 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
         },
         .out = {
             .buffer = this->framebuffer_, .buffer_size = output_bytes,
-            .pic_w = VIRTUAL_WIDTH, .pic_h = VIRTUAL_HEIGHT,
+            .pic_w = static_cast<uint32_t>(canvas_w), .pic_h = static_cast<uint32_t>(canvas_h),
             .block_offset_x = 0, .block_offset_y = 0, .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
         },
         .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
@@ -1968,7 +2272,7 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
   // This avoids the much more expensive nearest-neighbour loop over the
   // entire scaled image while preserving the existing canvas contract.
   if (!ppa_scaled && !byte_swap && this->ppa_srm_client_ != nullptr && this->ppa_framebuffer_ != nullptr &&
-      out_w <= VIRTUAL_WIDTH && out_h <= VIRTUAL_HEIGHT) {
+      out_w <= canvas_w && out_h <= canvas_h) {
     const size_t input_bytes = static_cast<size_t>(in_w) * in_h * sizeof(uint16_t);
     const size_t output_bytes = static_cast<size_t>(out_w) * out_h * sizeof(uint16_t);
     esp_cache_msync(const_cast<uint16_t *>(buffer), input_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
@@ -1994,8 +2298,8 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
       esp_cache_msync(this->ppa_framebuffer_, output_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
       this->clear_(0x0000);
       for (int row = 0; row < out_h; row++) {
-        std::memcpy(this->framebuffer_ + (y0 + row) * VIRTUAL_WIDTH + x0,
-                    this->ppa_framebuffer_ + row * out_w,
+        std::memcpy(this->framebuffer_ + static_cast<size_t>(y0 + row) * canvas_w + x0,
+                    this->ppa_framebuffer_ + static_cast<size_t>(row) * out_w,
                     static_cast<size_t>(out_w) * sizeof(uint16_t));
       }
       ppa_scaled = true;
@@ -2011,7 +2315,7 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
         uint16_t pixel = buffer[src_y * in_w + src_x];
         if (byte_swap)
           pixel = static_cast<uint16_t>((pixel >> 8) | (pixel << 8));
-        this->framebuffer_[(y0 + y) * VIRTUAL_WIDTH + x0 + x] = pixel;
+        this->framebuffer_[static_cast<size_t>(y0 + y) * canvas_w + x0 + x] = pixel;
       }
     }
   }
@@ -2057,8 +2361,12 @@ void PappLoader::read_input_(papp_gamepad_state_t *state) {
   // normal A/fire input, and the touch button is an additional A/fire input.
   if (this->fire_button_ != nullptr && this->fire_button_->get_state())
     state->values[PAPP_INPUT_A] = 1;
-  if (this->touch_button_ != nullptr && this->touch_button_->get_state())
-    state->values[PAPP_INPUT_A] = 1;
+  if (this->touch_button_ != nullptr) {
+    if (!this->touch_button_->get_state())
+      this->touch_button_released_();
+    else if (!this->touch_button_stuck_())
+      state->values[PAPP_INPUT_A] = 1;
+  }
 
   // Elecrow GPIO16 is a resistor ladder. Preserve the calibrated mapping used
   // by the ESPHome UI, while exposing its diagonal/axis directions to PAPPs.
@@ -2202,33 +2510,25 @@ int PappLoader::read_touch_(int *x, int *y) {
       ESP_LOGI(TAG, "PAPP touch RELEASED");
       this->touch_active_ = false;
     }
+    this->close_hold_since_us_ = 0;
     return 0;
   }
 
   const int physical_x = touch->x;
   const int physical_y = touch->y;
-  const int close_left = CLOSE_BUTTON_SCREEN_X - CLOSE_BUTTON_HIT_PADDING;
-  const int close_top = CLOSE_BUTTON_SCREEN_Y - CLOSE_BUTTON_HIT_PADDING;
-  const int close_right = CLOSE_BUTTON_SCREEN_X + CLOSE_BUTTON_SIZE + CLOSE_BUTTON_HIT_PADDING;
-  const int close_bottom = CLOSE_BUTTON_SCREEN_Y + CLOSE_BUTTON_SIZE + CLOSE_BUTTON_HIT_PADDING;
-  if (physical_x >= close_left && physical_x < close_right && physical_y >= close_top && physical_y < close_bottom) {
-    if (!this->global_close_requested_) {
-      this->begin_close_();
-      ESP_LOGI(TAG, "PAPP on-screen close requested");
-    }
+  const canvas::Geometry geometry = this->geometry_;
+  if (this->close_touch_(physical_x, physical_y)) {
     this->touch_active_ = true;
     return 0;
   }
 
-  if (physical_x < LCD_X_OFFSET || physical_x >= LCD_X_OFFSET + VIRTUAL_WIDTH ||
-      physical_y < LCD_Y_OFFSET || physical_y >= LCD_Y_OFFSET + VIRTUAL_HEIGHT) {
+  int canvas_x = 0;
+  int canvas_y = 0;
+  if (!geometry.to_canvas(physical_x, physical_y, &canvas_x, &canvas_y)) {
     if (!this->touch_active_)
       ESP_LOGD(TAG, "PAPP touch outside canvas: physical=(%d,%d)", physical_x, physical_y);
     return 0;
   }
-
-  const int canvas_x = physical_x - LCD_X_OFFSET;
-  const int canvas_y = physical_y - LCD_Y_OFFSET;
 
   // The touchscreen component already reports panel-oriented coordinates.
   // The PAPP framebuffer is rotated later during display flush, but applying
@@ -2354,7 +2654,60 @@ void PappLoader::svc_display_set_scale(float sx, float sy) {
 }
 void PappLoader::svc_display_write_frame_rgb565(const uint16_t *buffer) {
   if (active_ != nullptr && active_->framebuffer_ != nullptr && buffer != nullptr)
-    std::memcpy(active_->framebuffer_, buffer, VIRTUAL_WIDTH * VIRTUAL_HEIGHT * sizeof(uint16_t));
+    std::memcpy(active_->framebuffer_, buffer,
+                canvas::frame_bytes(active_->geometry_.canvas_w, active_->geometry_.canvas_h));
+}
+void PappLoader::svc_display_get_size(int *width, int *height) {
+  int w = canvas::LEGACY_WIDTH;
+  int h = canvas::LEGACY_HEIGHT;
+  if (active_ != nullptr) {
+    // The app's own choice once it made one, else what it is offered.
+    w = active_->canvas_chosen_ ? active_->geometry_.canvas_w : active_->offered_canvas_w_;
+    h = active_->canvas_chosen_ ? active_->geometry_.canvas_h : active_->offered_canvas_h_;
+  }
+  if (width != nullptr)
+    *width = w;
+  if (height != nullptr)
+    *height = h;
+}
+int PappLoader::svc_display_set_canvas(int width, int height) {
+  return active_ != nullptr ? active_->set_canvas_(width, height) : -1;
+}
+int PappLoader::svc_touch_read_points(papp_touch_point_t *points, int max) {
+  if (active_ == nullptr || points == nullptr || max <= 0)
+    return 0;
+  touchscreen::TouchPoint touches[MAX_TOUCH_POINTS];
+  portENTER_CRITICAL(&active_->touch_points_lock_);
+  const int count = active_->touch_point_count_;
+  for (int i = 0; i < count; i++)
+    touches[i] = active_->touch_points_[i];
+  portEXIT_CRITICAL(&active_->touch_points_lock_);
+  const canvas::Geometry geometry = active_->geometry_;
+  int out = 0;
+  for (int i = 0; i < count && out < max; i++) {
+    int x = 0, y = 0;
+    if (!geometry.to_canvas(touches[i].x, touches[i].y, &x, &y))
+      continue;
+    points[out].x = static_cast<int16_t>(x);
+    points[out].y = static_cast<int16_t>(y);
+    points[out].id = touches[i].id;
+    out++;
+  }
+  return out;
+}
+int PappLoader::svc_midi_read(uint8_t *buf, int len) {
+#ifdef PAPP_LOADER_USE_USB_MIDI
+  if (active_ != nullptr && active_->usb_midi_ != nullptr && buf != nullptr && len > 0)
+    return static_cast<int>(active_->usb_midi_->read(buf, static_cast<size_t>(len)));
+#endif
+  return 0;
+}
+int PappLoader::svc_midi_write(const uint8_t *data, int len) {
+#ifdef PAPP_LOADER_USE_USB_MIDI
+  if (active_ != nullptr && active_->usb_midi_ != nullptr && data != nullptr && len > 0)
+    return active_->usb_midi_->write(data, static_cast<size_t>(len)) ? 0 : -1;
+#endif
+  return -1;
 }
 void PappLoader::svc_display_write_frame_custom(const uint16_t *buffer, uint16_t in_w, uint16_t in_h,
                                                 float scale, bool byte_swap) {
@@ -2364,14 +2717,16 @@ void PappLoader::svc_display_write_frame_custom(const uint16_t *buffer, uint16_t
 void PappLoader::svc_display_write_rect(int x, int y, int w, int h, const uint16_t *data) {
   if (active_ == nullptr || active_->framebuffer_ == nullptr || data == nullptr)
     return;
+  const int canvas_w = active_->geometry_.canvas_w;
+  const int canvas_h = active_->geometry_.canvas_h;
   for (int row = 0; row < h; row++) {
     const int dst_y = y + row;
-    if (dst_y < 0 || dst_y >= VIRTUAL_HEIGHT)
+    if (dst_y < 0 || dst_y >= canvas_h)
       continue;
     for (int col = 0; col < w; col++) {
       const int dst_x = x + col;
-      if (dst_x >= 0 && dst_x < VIRTUAL_WIDTH)
-        active_->framebuffer_[dst_y * VIRTUAL_WIDTH + dst_x] = data[row * w + col];
+      if (dst_x >= 0 && dst_x < canvas_w)
+        active_->framebuffer_[dst_y * canvas_w + dst_x] = data[row * w + col];
     }
   }
 }
@@ -2640,7 +2995,12 @@ int PappLoader::svc_net_tcp_recv(int handle, void *buf, int len) {
   return got;
 }
 
+static constexpr int APP_TLS_HANDLE_BASE = 0x10000;  // above every lwIP descriptor
+static int poll_app_tls(int handle);
+
 int PappLoader::svc_net_poll(int handle) {
+  if (handle >= APP_TLS_HANDLE_BASE)
+    return poll_app_tls(handle);
   if (!is_app_socket(handle))
     return -1;
   fd_set readable, writable, failed;
@@ -2734,6 +3094,344 @@ void PappLoader::close_app_sockets_() {
       ::close(fd);
       fd = -1;
     }
+  }
+}
+
+// ── TLS (HTTPS) connections for apps ────────────────────────────────────────
+// esp-tls does the work. Name lookup, the TCP connect and the handshake (the
+// server's certificate checked against the firmware's CA bundle, SNI and the
+// expected name from `host`) run on a short-lived task per connection, so the
+// app's task never waits on DNS, the network or the handshake's crypto. Once
+// ready, the socket is switched to non-blocking and the app's calls read and
+// write through esp_tls_conn_read/write, which return at once.
+//
+// Each session costs mbedTLS's record buffers (CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN
+// and _OUT_CONTENT_LEN, 16 KB and 4 KB by default) plus its context, about
+// 25 KB of internal RAM, more during the handshake, and an lwIP socket (the
+// component reserves APP_TLS_MAX in __init__.py).
+static constexpr int APP_TLS_MAX = 4;
+static constexpr int APP_TLS_TIMEOUT_MS = 15000;
+static constexpr uint32_t APP_TLS_TASK_STACK = 8192;
+static constexpr size_t APP_TLS_HOST_MAX = 253;  // the longest DNS name
+
+enum AppTlsState : int8_t { TLS_CONNECTING = 0, TLS_READY = 1, TLS_FAILED = -1, TLS_CLOSED = 2 };
+
+struct AppTlsSession {
+  int handle{-1};         // the app's handle; -1 when the app holds none
+  bool worker{false};     // a connect task still owns this slot
+  AppTlsState state{TLS_FAILED};
+  esp_tls_t *tls{nullptr};
+};
+
+struct AppTlsJob {
+  int slot;
+  int handle;
+  uint16_t port;
+  char host[APP_TLS_HOST_MAX + 1];
+};
+
+static AppTlsSession s_app_tls[APP_TLS_MAX];
+static SemaphoreHandle_t s_app_tls_lock = nullptr;  // created by populate_services
+static uint32_t s_app_tls_generation = 0;
+
+// Every session change and every esp_tls call on an app's session happens
+// under s_app_tls_lock, so a close from one task cannot free a session another
+// is reading. The calls under it do not block (the sockets are non-blocking).
+class AppTlsLock {
+ public:
+  explicit AppTlsLock(TickType_t wait = pdMS_TO_TICKS(1000)) : lock_(s_app_tls_lock) {
+    if (this->lock_ != nullptr && xSemaphoreTake(this->lock_, wait) != pdTRUE)
+      this->lock_ = nullptr;
+  }
+  ~AppTlsLock() {
+    if (this->lock_ != nullptr)
+      xSemaphoreGive(this->lock_);
+  }
+  AppTlsLock(const AppTlsLock &) = delete;
+  AppTlsLock &operator=(const AppTlsLock &) = delete;
+  bool held() const { return this->lock_ != nullptr; }
+
+ private:
+  SemaphoreHandle_t lock_;  // the lock taken (close_app_tls_ may replace s_app_tls_lock)
+};
+
+static AppTlsSession *find_app_tls(int handle) {
+  if (handle < APP_TLS_HANDLE_BASE)
+    return nullptr;
+  for (auto &session : s_app_tls) {
+    if (session.handle == handle)
+      return &session;
+  }
+  return nullptr;
+}
+
+#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+static void app_tls_connect_task(void *arg) {
+  auto *job = static_cast<AppTlsJob *>(arg);
+  const int64_t started_us = esp_timer_get_time();
+  esp_tls_t *tls = nullptr;
+  bool ready = false;
+  uint32_t ip = 0;
+  if (!PappLoader::svc_net_resolve(job->host, &ip)) {
+    ESP_LOGW(TAG, "PAPP TLS: %s not found", job->host);
+  } else if ((tls = esp_tls_init()) == nullptr) {
+    ESP_LOGW(TAG, "PAPP TLS: out of memory for %s", job->host);
+  } else {
+    char address[16];
+    std::snprintf(address, sizeof(address), "%u.%u.%u.%u", static_cast<unsigned>(ip >> 24),
+                  static_cast<unsigned>((ip >> 16) & 0xFF), static_cast<unsigned>((ip >> 8) & 0xFF),
+                  static_cast<unsigned>(ip & 0xFF));
+    esp_tls_cfg_t cfg{};
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.common_name = job->host;  // SNI and the name the certificate must carry
+    cfg.timeout_ms = APP_TLS_TIMEOUT_MS;
+    int fd = -1;
+    if (esp_tls_conn_new_sync(address, static_cast<int>(std::strlen(address)), job->port, &cfg, tls) == 1 &&
+        esp_tls_get_conn_sockfd(tls, &fd) == ESP_OK && fd >= 0 && set_nonblocking(fd)) {
+      ready = true;
+      ESP_LOGI(TAG, "PAPP TLS: %s:%u ready (%lld ms)", job->host, job->port,
+               static_cast<long long>((esp_timer_get_time() - started_us) / 1000));
+    } else {
+      esp_tls_error_handle_t error = nullptr;
+      if (esp_tls_get_error_handle(tls, &error) == ESP_OK && error != nullptr) {
+        ESP_LOGW(TAG, "PAPP TLS: %s:%u failed: %s (TLS error -0x%04x, certificate flags 0x%x)", job->host, job->port,
+                 esp_err_to_name(error->last_error), static_cast<unsigned>(-error->esp_tls_error_code),
+                 static_cast<unsigned>(error->esp_tls_flags));
+      } else {
+        ESP_LOGW(TAG, "PAPP TLS: %s:%u failed", job->host, job->port);
+      }
+    }
+  }
+
+  bool kept = false;
+  for (;;) {
+    AppTlsLock lock;  // retried, so a lock replaced by close_app_tls_ is picked up
+    if (!lock.held())
+      continue;
+    AppTlsSession &session = s_app_tls[job->slot];
+    session.worker = false;
+    if (session.handle == job->handle) {  // the app has not closed it meanwhile
+      session.state = ready ? TLS_READY : TLS_FAILED;
+      if (ready) {
+        session.tls = tls;
+        kept = true;
+      }
+    }
+    break;
+  }
+  if (!kept && tls != nullptr)
+    esp_tls_conn_destroy(tls);
+  std::free(job);
+  vTaskDelete(nullptr);
+}
+#endif
+
+int PappLoader::svc_net_tls_connect(const char *host, uint16_t port) {
+#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+  if (host == nullptr || *host == '\0' || port == 0 || std::strlen(host) > APP_TLS_HOST_MAX)
+    return -1;
+  auto *job = static_cast<AppTlsJob *>(std::calloc(1, sizeof(AppTlsJob)));
+  if (job == nullptr)
+    return -1;
+  AppTlsLock lock;
+  int slot = -1;
+  for (int i = 0; lock.held() && i < APP_TLS_MAX; i++) {
+    if (s_app_tls[i].handle < 0 && !s_app_tls[i].worker && s_app_tls[i].tls == nullptr) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot < 0) {
+    ESP_LOGW(TAG, "PAPP TLS: no free session for %s (at most %d)", host, APP_TLS_MAX);
+    std::free(job);
+    return -1;
+  }
+  // A new number each time, so a stale handle never reaches a later session.
+  s_app_tls_generation = (s_app_tls_generation + 1) & 0xFFFF;
+  const int handle = APP_TLS_HANDLE_BASE + static_cast<int>(s_app_tls_generation) * APP_TLS_MAX + slot;
+  job->slot = slot;
+  job->handle = handle;
+  job->port = port;
+  std::memcpy(job->host, host, std::strlen(host) + 1);
+  AppTlsSession &session = s_app_tls[slot];
+  session.handle = handle;
+  session.worker = true;
+  session.state = TLS_CONNECTING;
+  session.tls = nullptr;
+  if (xTaskCreatePinnedToCore(&app_tls_connect_task, "papp_tls", APP_TLS_TASK_STACK, job, 5, nullptr,
+                              tskNO_AFFINITY) != pdPASS) {
+    ESP_LOGW(TAG, "PAPP TLS: cannot start a connect task for %s", host);
+    session = AppTlsSession{};
+    std::free(job);
+    return -1;
+  }
+  ESP_LOGI(TAG, "PAPP TLS: connecting to %s:%u", host, port);
+  return handle;
+#else
+  ESP_LOGW(TAG, "PAPP TLS: unavailable, this firmware has no CA bundle (CONFIG_MBEDTLS_CERTIFICATE_BUNDLE)");
+  return -1;
+#endif
+}
+
+int PappLoader::svc_net_tls_status(int handle) {
+  AppTlsLock lock;
+  const AppTlsSession *session = lock.held() ? find_app_tls(handle) : nullptr;
+  if (session == nullptr)
+    return -1;
+  switch (session->state) {
+    case TLS_CONNECTING:
+      return 0;
+    case TLS_READY:
+    case TLS_CLOSED:
+      return 1;
+    default:
+      return -1;
+  }
+}
+
+int PappLoader::svc_net_tls_send(int handle, const void *buf, int len) {
+  if (buf == nullptr || len < 0)
+    return -1;
+  AppTlsLock lock;
+  AppTlsSession *session = lock.held() ? find_app_tls(handle) : nullptr;
+  if (session == nullptr)
+    return -1;
+  if (session->state == TLS_CONNECTING)
+    return 0;
+  if (session->state != TLS_READY || session->tls == nullptr)
+    return -1;
+  if (len == 0)
+    return 0;
+  const ssize_t sent = esp_tls_conn_write(session->tls, buf, static_cast<size_t>(len));
+  if (sent > 0)
+    return static_cast<int>(sent);
+  if (sent == 0 || sent == ESP_TLS_ERR_SSL_WANT_WRITE || sent == ESP_TLS_ERR_SSL_WANT_READ)
+    return 0;
+  ESP_LOGW(TAG, "PAPP TLS: send failed (-0x%04x)", static_cast<unsigned>(-sent));
+  session->state = TLS_FAILED;
+  return -1;
+}
+
+int PappLoader::svc_net_tls_recv(int handle, void *buf, int len) {
+  if (buf == nullptr || len <= 0)
+    return -1;
+  AppTlsLock lock;
+  AppTlsSession *session = lock.held() ? find_app_tls(handle) : nullptr;
+  if (session == nullptr)
+    return -1;
+  if (session->state == TLS_CONNECTING)
+    return 0;
+  if (session->state != TLS_READY || session->tls == nullptr)
+    return -1;
+  const ssize_t got = esp_tls_conn_read(session->tls, buf, static_cast<size_t>(len));
+  if (got > 0)
+    return static_cast<int>(got);
+  if (got == ESP_TLS_ERR_SSL_WANT_READ || got == ESP_TLS_ERR_SSL_WANT_WRITE)
+    return 0;
+#ifdef MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET
+  if (got == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET)  // TLS 1.3 housekeeping, no data
+    return 0;
+#endif
+  // 0 is the server's close_notify; a plain TCP close without one ends the
+  // stream too (HTTP servers often do that after the response).
+  bool closed = got == 0;
+#ifdef MBEDTLS_ERR_SSL_CONN_EOF
+  closed = closed || got == MBEDTLS_ERR_SSL_CONN_EOF;
+#endif
+#ifdef MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY
+  closed = closed || got == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
+#endif
+  if (!closed)
+    ESP_LOGW(TAG, "PAPP TLS: receive failed (-0x%04x)", static_cast<unsigned>(-got));
+  session->state = closed ? TLS_CLOSED : TLS_FAILED;
+  return -1;
+}
+
+void PappLoader::svc_net_tls_close(int handle) {
+  esp_tls_t *tls = nullptr;
+  {
+    AppTlsLock lock;
+    AppTlsSession *session = lock.held() ? find_app_tls(handle) : nullptr;
+    if (session == nullptr)
+      return;
+    // A connect task still running sees the handle gone and frees its own
+    // connection; the slot stays taken until then.
+    tls = session->tls;
+    session->handle = -1;
+    session->tls = nullptr;
+    session->state = TLS_FAILED;
+  }
+  if (tls != nullptr)
+    esp_tls_conn_destroy(tls);
+}
+
+// net_poll for a TLS handle; see psram_app.h.
+static int poll_app_tls(int handle) {
+  AppTlsLock lock;
+  const AppTlsSession *session = lock.held() ? find_app_tls(handle) : nullptr;
+  if (session == nullptr)
+    return -1;
+  switch (session->state) {
+    case TLS_CONNECTING:
+      return 0;
+    case TLS_CLOSED:
+      return 1;  // net_tls_recv reports the close
+    case TLS_READY:
+      break;
+    default:
+      return 4;
+  }
+  int fd = -1;
+  if (session->tls == nullptr || esp_tls_get_conn_sockfd(session->tls, &fd) != ESP_OK || fd < 0)
+    return 4;
+  int ready = esp_tls_get_bytes_avail(session->tls) > 0 ? 1 : 0;
+  fd_set readable, writable, failed;
+  FD_ZERO(&readable);
+  FD_ZERO(&writable);
+  FD_ZERO(&failed);
+  FD_SET(fd, &readable);
+  FD_SET(fd, &writable);
+  FD_SET(fd, &failed);
+  timeval now{0, 0};
+  if (::select(fd + 1, &readable, &writable, &failed, &now) < 0)
+    return ready | 4;
+  return ready | (FD_ISSET(fd, &readable) ? 1 : 0) | (FD_ISSET(fd, &writable) ? 2 : 0) |
+         (FD_ISSET(fd, &failed) ? 4 : 0);
+}
+
+void PappLoader::close_app_tls_() {
+  if (s_app_tls_lock == nullptr)
+    return;
+  esp_tls_t *open[APP_TLS_MAX] = {};
+  {
+    AppTlsLock lock(pdMS_TO_TICKS(2000));
+    if (!lock.held()) {
+      // Only a task deleted inside a TLS call leaves the lock taken. Give up on
+      // its sessions (their memory is lost, the rest works) and start a new
+      // lock, so later apps still get TLS. Connect tasks still running find
+      // their handle gone and free their own connections.
+      ESP_LOGW(TAG, "PAPP TLS: lock still taken after the app exited; abandoning its sessions");
+      for (auto &session : s_app_tls) {
+        session.handle = -1;
+        session.tls = nullptr;
+        session.state = TLS_FAILED;
+      }
+      s_app_tls_lock = xSemaphoreCreateMutex();
+      return;
+    }
+    for (int i = 0; i < APP_TLS_MAX; i++) {
+      AppTlsSession &session = s_app_tls[i];
+      if (session.handle >= 0)
+        ESP_LOGI(TAG, "PAPP TLS: closing a session the app left open");
+      open[i] = session.tls;
+      session.handle = -1;
+      session.tls = nullptr;
+      session.state = TLS_FAILED;
+    }
+  }
+  for (esp_tls_t *tls : open) {
+    if (tls != nullptr)
+      esp_tls_conn_destroy(tls);
   }
 }
 
@@ -2947,6 +3645,18 @@ void PappLoader::populate_services(app_services_t *services) {
   services->net_tcp_recv = &PappLoader::svc_net_tcp_recv;
   services->net_poll = &PappLoader::svc_net_poll;
   services->net_resolve = &PappLoader::svc_net_resolve;
+  services->display_get_size = &PappLoader::svc_display_get_size;
+  services->display_set_canvas = &PappLoader::svc_display_set_canvas;
+  services->midi_read = &PappLoader::svc_midi_read;
+  services->midi_write = &PappLoader::svc_midi_write;
+  services->touch_read_points = &PappLoader::svc_touch_read_points;
+  if (s_app_tls_lock == nullptr)
+    s_app_tls_lock = xSemaphoreCreateMutex();
+  services->net_tls_connect = &PappLoader::svc_net_tls_connect;
+  services->net_tls_status = &PappLoader::svc_net_tls_status;
+  services->net_tls_send = &PappLoader::svc_net_tls_send;
+  services->net_tls_recv = &PappLoader::svc_net_tls_recv;
+  services->net_tls_close = &PappLoader::svc_net_tls_close;
 }
 
 esp_err_t psram_app_load(const char *path, psram_app_handle_t *out_handle) {
@@ -3192,7 +3902,7 @@ void PappLoader::report_task_entry_(void *arg) {
   vTaskDelete(nullptr);
 }
 
-static esp_err_t fetch_http_text(const char *url, std::string *out) {
+esp_err_t fetch_http_text(const char *url, std::string *out, size_t max_bytes) {
   if (url == nullptr || out == nullptr || !is_network_url(url))
     return ESP_ERR_INVALID_ARG;
   out->clear();
@@ -3239,7 +3949,7 @@ static esp_err_t fetch_http_text(const char *url, std::string *out) {
     ESP_LOGE(TAG, "HTTP status %d: %s", status_code, url);
     return http_finish(client, ESP_ERR_INVALID_RESPONSE);
   }
-  if (content_length > static_cast<int64_t>(MAX_CATALOG_SIZE)) {
+  if (content_length > static_cast<int64_t>(max_bytes)) {
     ESP_LOGE(TAG, "%s is too large: %lld bytes", url, static_cast<long long>(content_length));
     return http_finish(client, ESP_ERR_INVALID_SIZE);
   }
@@ -3249,7 +3959,7 @@ static esp_err_t fetch_http_text(const char *url, std::string *out) {
   while (true) {
     const int result = esp_http_client_read(client, buffer, sizeof(buffer));
     if (result > 0) {
-      if (out->size() + static_cast<size_t>(result) > MAX_CATALOG_SIZE)
+      if (out->size() + static_cast<size_t>(result) > max_bytes)
         return http_finish(client, ESP_ERR_INVALID_SIZE);
       out->append(buffer, static_cast<size_t>(result));
       idle_reads = 0;
@@ -3449,9 +4159,11 @@ void PappLoader::update_progress_ui_() {
   portEXIT_CRITICAL(&this->progress_lock_);
   status[sizeof(status) - 1] = '\0';
 
-  // The page's widgets when they are on screen, otherwise the loader's panel.
+  // The page's widgets when they are on screen (and no store detail page covers
+  // them), otherwise the loader's panel.
   lv_obj_t *page_widget = this->progress_fill_ != nullptr ? this->progress_fill_ : this->progress_label_;
-  const bool page_shows = page_widget != nullptr && lv_obj_get_screen(page_widget) == screen;
+  const bool page_shows =
+      page_widget != nullptr && lv_obj_get_screen(page_widget) == screen && this->detail_panel_ == nullptr;
   if (!page_shows) {
     const bool show = active || status[0] != '\0';
     if (!show && this->overlay_panel_ == nullptr)
@@ -3467,6 +4179,7 @@ void PappLoader::update_progress_ui_() {
     lv_obj_set_style_bg_opa(lv_obj_get_parent(this->overlay_fill_), active ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     lv_label_set_text(this->overlay_label_, status[0] != '\0' ? status : "Loading...");
     lv_obj_remove_flag(this->overlay_panel_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(this->overlay_panel_);  // above a store detail page
     if (active) {
       this->cancel_timeout("papp_progress_overlay");
     } else {
@@ -3505,7 +4218,7 @@ void PappLoader::update_progress_ui_() {
 
 // Creates the folders between `root` and the file `target` (root itself must
 // already exist: it is the card's mount point or a folder on it).
-static bool make_parent_dirs(const std::string &root, const std::string &target) {
+bool make_parent_dirs(const std::string &root, const std::string &target) {
   size_t slash = target.find('/');
   while (slash != std::string::npos) {
     const std::string dir = root + "/" + target.substr(0, slash);
@@ -3893,11 +4606,16 @@ int psram_app_run(psram_app_handle_t handle) {
   esp_cache_msync(handle->exec_ptr, handle->code_alloc,
                   ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_INST);
 
-  app_services_t services{};
-  PappLoader::populate_services(&services);
+  // Zeroed room after the table: an app built against a newer psram_app.h
+  // reads NULL for services appended after this loader, not stack garbage.
+  struct {
+    app_services_t services;
+    void *appended_later[PAPP_SERVICES_SPARE_SLOTS];
+  } table{};
+  PappLoader::populate_services(&table.services);
   auto entry = reinterpret_cast<papp_entry_fn_t>(static_cast<uint8_t *>(handle->exec_ptr) + handle->header.entry_off);
   ESP_LOGI(TAG, "Calling PAPP entry point at %p", reinterpret_cast<void *>(entry));
-  const int result = entry(&services);
+  const int result = entry(&table.services);
 
   unmap_exec_alias(handle);
   return result;

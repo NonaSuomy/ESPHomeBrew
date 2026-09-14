@@ -655,8 +655,9 @@ void PappLoader::loop() {
     }
   }
 #ifdef PAPP_LOADER_USE_LVGL
-  if (this->catalog_ui_pending_ && this->catalog_container_ != nullptr && this->lvgl_ != nullptr &&
-      this->lvgl_->is_loop_started()) {
+  // While a PAPP runs, the rebuild waits: LVGL is paused under the app.
+  if (this->catalog_ui_pending_ && !this->launched_ && this->catalog_container_ != nullptr &&
+      this->lvgl_ != nullptr && this->lvgl_->is_loop_started()) {
     this->update_catalog_ui_();
     this->catalog_ui_pending_ = false;
   }
@@ -948,16 +949,20 @@ bool PappLoader::start_loaded_app_(psram_app_handle_t app, const std::string &so
   // loop task; the PAPP worker never calls LVGL directly.
   if (this->lvgl_ != nullptr && this->lvgl_->is_loop_started()) {
     // Direct-rendered PAPPs share the launcher LVGL display but have no LVGL
-    // object of their own. Put an invisible clickable object on top of the
-    // launcher so a release cannot activate or invalidate a button underneath
-    // the PAPP between its frame updates.
+    // object of their own. Put a black clickable object over the whole
+    // launcher, top layer included (store detail page, side menu): a release
+    // cannot reach a button underneath, and the panel around the canvas is
+    // black instead of a frozen store or launcher page.
     if (this->touch_modal_shield_ == nullptr) {
-      lv_obj_t *screen = this->lvgl_->get_screen_active();
-      if (screen != nullptr) {
-        this->touch_modal_shield_ = lv_obj_create(screen);
+      lv_obj_t *top = lv_layer_top();
+      if (top != nullptr) {
+        this->touch_modal_shield_ = lv_obj_create(top);
         lv_obj_remove_style_all(this->touch_modal_shield_);
         lv_obj_set_size(this->touch_modal_shield_, LV_PCT(100), LV_PCT(100));
         lv_obj_center(this->touch_modal_shield_);
+        lv_obj_set_style_bg_color(this->touch_modal_shield_, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(this->touch_modal_shield_, LV_OPA_COVER, 0);
+        lv_obj_move_foreground(this->touch_modal_shield_);
         lv_obj_add_flag(this->touch_modal_shield_, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(
             this->touch_modal_shield_,
@@ -977,7 +982,7 @@ bool PappLoader::start_loaded_app_(psram_app_handle_t app, const std::string &so
     }
     // The PAPP canvas does not cover the whole panel: whatever LVGL last drew
     // around it stays visible while the app runs. Hide the finished download
-    // bar and redraw once, or it stays on screen at 100% under the app.
+    // bar and redraw once, so the panel shows only the black shield.
     this->set_progress_(false, 0, 0, "%s", "");
     this->update_progress_ui_();
     lv_refr_now(nullptr);

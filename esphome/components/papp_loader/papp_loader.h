@@ -96,7 +96,7 @@ class PappLoader : public Component {
       ESP_LOGW("papp_loader", "Ignoring PAPP close request because no app is running");
       return;
     }
-    this->global_close_requested_ = true;
+    this->begin_close_();
     ESP_LOGI("papp_loader", "Close requested remotely");
   }
   void request_screen_stream() {
@@ -356,6 +356,12 @@ class PappLoader : public Component {
   // the normal PAPP X/action input so every loader-backed app gets the same
   // exit request, including apps that do not draw their own controls.
   volatile bool global_close_requested_{false};
+  // When it was requested (esp_timer us): the buttons a close shows the app
+  // follow a short sequence from then on (close_buttons_()).
+  volatile int64_t close_requested_us_{0};
+  void begin_close_();
+  // The close buttons down right now: bit 0 Menu, bit 1 X, bit 2 L3.
+  uint8_t close_buttons_() const;
   int audio_sample_rate_{0};
   SemaphoreHandle_t display_mutex_{nullptr};
   SemaphoreHandle_t keyboard_mutex_{nullptr};

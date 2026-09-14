@@ -1343,7 +1343,7 @@ void PappLoader::poll_close_button_() {
   const int close_right = CLOSE_BUTTON_SCREEN_X + CLOSE_BUTTON_SIZE + CLOSE_BUTTON_HIT_PADDING;
   const int close_bottom = CLOSE_BUTTON_SCREEN_Y + CLOSE_BUTTON_SIZE + CLOSE_BUTTON_HIT_PADDING;
   if (touch->x >= close_left && touch->x < close_right && touch->y >= close_top && touch->y < close_bottom) {
-    this->global_close_requested_ = true;
+    this->begin_close_();
     ESP_LOGI(TAG, "PAPP on-screen close requested");
     return;
   }
@@ -2055,13 +2055,37 @@ void PappLoader::read_input_(papp_gamepad_state_t *state) {
       state->values[PAPP_INPUT_X] = 1;
   }
 
-  // The on-screen close control is intentionally exposed as both MENU and X:
-  // older game PAPPs use the MENU watchdog, while utility PAPPs such as the
-  // touch test use X.  The dedicated L3 service below also sees this request.
-  if (this->global_close_requested_) {
+  // A close (on-screen button or API) shows up as MENU, X and the dedicated L3
+  // service, in the order close_buttons_() gives.
+  const uint8_t close = this->close_buttons_();
+  if (close & 1)
     state->values[PAPP_INPUT_MENU] = 1;
+  if (close & 2)
     state->values[PAPP_INPUT_X] = 1;
-  }
+}
+
+void PappLoader::begin_close_() {
+  if (this->global_close_requested_)
+    return;
+  this->close_requested_us_ = esp_timer_get_time();
+  this->global_close_requested_ = true;
+}
+
+// Apps quit on different things: Menu pressed (most emulators; SNES only while
+// X and Y are up), Menu released (Stella and Atari800 open their exit menu),
+// Menu or L3 held for up to 3 s (Doom, Duke3D, Quake, OpenTyrian), or X
+// (utilities such as the touch test). Holding everything at once hid the first
+// two, so a close taps Menu alone, lets go, then holds Menu, X and L3 until
+// the app returns.
+uint8_t PappLoader::close_buttons_() const {
+  if (!this->global_close_requested_)
+    return 0;
+  const int64_t since_ms = (esp_timer_get_time() - this->close_requested_us_) / 1000;
+  if (since_ms < 250)
+    return 1;  // Menu alone
+  if (since_ms < 500)
+    return 0;  // released
+  return 1 | 2 | 4;
 }
 
 int PappLoader::read_touch_(int *x, int *y) {
@@ -2087,7 +2111,7 @@ int PappLoader::read_touch_(int *x, int *y) {
   const int close_bottom = CLOSE_BUTTON_SCREEN_Y + CLOSE_BUTTON_SIZE + CLOSE_BUTTON_HIT_PADDING;
   if (physical_x >= close_left && physical_x < close_right && physical_y >= close_top && physical_y < close_bottom) {
     if (!this->global_close_requested_) {
-      this->global_close_requested_ = true;
+      this->begin_close_();
       ESP_LOGI(TAG, "PAPP on-screen close requested");
     }
     this->touch_active_ = true;
@@ -2340,7 +2364,7 @@ void PappLoader::svc_input_gamepad_read(papp_gamepad_state_t *state) {
 int PappLoader::svc_input_l3_read() {
   if (active_ == nullptr)
     return 0;
-  if (active_->global_close_requested_)
+  if (active_->close_buttons_() & 4)
     return 1;
   return active_->toggle_button_ != nullptr && active_->toggle_button_->get_state() ? 1 : 0;
 }

@@ -864,11 +864,23 @@ void PappLoader::enqueue_keyboard_text(const std::string &text) {
   if (text.empty())
     return;
 
-  // Arrow keys already have a complete held-state path through the configured
-  // USB binary sensors and read_input_(). Queueing the text sensor's named
-  // arrow tap as well makes Quake menus advance twice for one key press.
-  if (text == "Up" || text == "Down" || text == "Left" || text == "Right")
+  // Arrow keys normally have a held-state path through the configured USB
+  // binary sensors and read_input_(); queueing the text sensor's named arrow
+  // tap as well made Quake menus advance twice. Some usb_hidx builds only
+  // update key sensors for printable keys, so when the arrow's sensor is not
+  // on, press the matching D-pad direction briefly instead (see read_input_).
+  static const char *const arrows[4] = {"Up", "Right", "Down", "Left"};  // PAPP_INPUT_UP..LEFT order
+  static const uint8_t arrow_codes[4] = {0x52, 0x4F, 0x51, 0x50};
+  for (int i = 0; i < 4; i++) {
+    if (text != arrows[i])
+      continue;
+#ifdef PAPP_LOADER_USE_USB_HIDX
+    if (this->usb_hidx_ != nullptr && usb_keyboard_key_pressed(this->usb_hidx_, arrow_codes[i]))
+      return;  // the held sensor has it
+#endif
+    this->arrow_tap_until_us_[i] = esp_timer_get_time() + ARROW_TAP_US;
     return;
+  }
 
   int key = 0;
   if (text == "Backspace")
@@ -2098,6 +2110,14 @@ void PappLoader::read_input_(papp_gamepad_state_t *state) {
     const float y = this->right_stick_y_sensor_->get_state();
     if (y < -stick_deadzone) state->values[PAPP_INPUT_DOWN] = 1;
     if (y > stick_deadzone) state->values[PAPP_INPUT_UP] = 1;
+  }
+
+  // Arrow presses that only came as text (enqueue_keyboard_text): a short
+  // D-pad press, enough for a menu step or a small move.
+  const int64_t now_us = esp_timer_get_time();
+  for (int i = 0; i < 4; i++) {
+    if (now_us < this->arrow_tap_until_us_[i])
+      state->values[PAPP_INPUT_UP + i] = 1;
   }
 
 #ifdef PAPP_LOADER_USE_USB_HIDX

@@ -550,6 +550,10 @@ class PappLoader : public Component {
   // The close buttons down right now: bit 0 Menu, bit 1 X, bit 2 L3.
   uint8_t close_buttons_() const;
   int audio_sample_rate_{0};
+  // Heap diagnostics (log_heap in papp_loader.cpp): the running app's first
+  // short audio write was logged; when loop() logs the heap next (esp_timer us).
+  volatile bool audio_trouble_logged_{false};
+  int64_t next_heap_log_us_{0};
   SemaphoreHandle_t display_mutex_{nullptr};
   SemaphoreHandle_t keyboard_mutex_{nullptr};
   portMUX_TYPE mouse_input_lock_ = portMUX_INITIALIZER_UNLOCKED;

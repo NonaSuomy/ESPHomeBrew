@@ -1,12 +1,12 @@
 {
   "name": "psram_openlara",
   "title": "OpenLara",
-  "version": "0.1.0",
-  "description": "OpenLara, the open Tomb Raider 1 engine, as a PAPP: software renderer at 320x240 (shown 2x), sound, gamepad and USB keyboard. Work in progress. Needs your own Tomb Raider 1 PC data (the DATA folder with the .PHD levels) in /sd/roms/openlara/.",
+  "version": "0.2.0",
+  "description": "OpenLara, the open Tomb Raider 1 engine, as a PAPP: software renderer at 320x240 (shown 2x or 2.5x) or 320x200 on the 640x400 canvas, sound, gamepad and USB keyboard. Work in progress. Needs your own Tomb Raider 1 PC data (the DATA folder with the .PHD levels) in /sd/roms/openlara/.",
   "author": "XProger (OpenLara); ESP32-P4 port by alexkid77",
   "category": "Game",
   "license": "BSD-2-Clause (OpenLara); P4 port has no licence yet",
-  "about": "OpenLara, the open-source Tomb Raider 1 engine, with the software renderer from alexkid77's ESP32-P4 port (320x240 RGB565, scaled 2x), 44.1 kHz sound, the loader's gamepad and USB keyboard. Copy the DATA folder of your own Tomb Raider 1 PC game (GYM.PHD, LEVEL1.PHD, ..., TITLE.PHD and the .PCX pictures) to /sd/roms/openlara/; optional FMV/ movies and music tracks go next to it. Settings and saves are written to the same folder.",
+  "about": "OpenLara, the open-source Tomb Raider 1 engine, with the software renderer from alexkid77's ESP32-P4 port (320x240 RGB565, scaled 2x to 640x480 or 2.5x to 800x600; on the 640x400 canvas it renders a 16:10 320x200 view, scaled 2x), 44.1 kHz sound, the loader's gamepad and USB keyboard. Copy the DATA folder of your own Tomb Raider 1 PC game (GYM.PHD, LEVEL1.PHD, ..., TITLE.PHD and the .PCX pictures) to /sd/roms/openlara/; optional FMV/ movies and music tracks go next to it. Settings and saves are written to the same folder.",
   "controls": [
     "D-pad: move / turn; choose items in the inventory",
     "A: action (grab, pick up, use); select in menus",
@@ -31,6 +31,10 @@
     {"path": "/sd/roms/openlara/FMV/", "note": "The game's movies", "optional": true}
   ],
   "icon": "icon.png",
+  "canvas": {
+    "sizes": ["800x600", "640x480", "640x400"],
+    "recommended": "640x480"
+  },
   "publish": true,
   "dev_build": true,
   "build": "custom",

@@ -28,7 +28,9 @@ extern const app_services_t *papp_svc;
 // because OpenLara prepends it to relative names.
 #define PAPP_OL_DATA_DIR "/sd/roms/openlara/"
 
-// The game renders 320x240 RGB565; the loader scales it 2x to 640x480.
+// The game renders 320 pixels wide and at most 240 high, in RGB565: 320x240
+// (scaled 2x to 640x480, or 2.5x to 800x600) or, on the 640x400 canvas,
+// 320x200 (papp_video_frame_height()). The loader scales it to the canvas.
 #define PAPP_OL_WIDTH 320
 #define PAPP_OL_HEIGHT 240
 
@@ -54,9 +56,11 @@ void papp_close_all_files(void);
 void *papp_alloc_raw(size_t size, int internal);
 
 // ── Video (papp_video.cpp) ────────────────────────────────────────────────
-// Two 320x240 RGB565 frames: the game draws into papp_video_back() while a
-// presenter task on the other core scales the previous one to the screen.
+// Two RGB565 frames of PAPP_OL_WIDTH x papp_video_frame_height(): the game
+// draws into papp_video_back() while a presenter task on the other core
+// scales the previous one to the screen. papp_video_init picks the canvas.
 int papp_video_init(void);
+int papp_video_frame_height(void);  // 240, or 200 on the 640x400 canvas
 uint16_t *papp_video_back(void);
 void papp_video_present(void);  // hand the back buffer over; returns the next one via papp_video_back()
 void papp_video_shutdown(void);

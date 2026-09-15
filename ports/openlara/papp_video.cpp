@@ -1,14 +1,35 @@
 // Video for the OpenLara PAPP (replaces the ESP32-P4 port's PPA code).
 //
-// OpenLara's software renderer draws 320x240 RGB565 into GAPI::swColor. The
-// loader scales such a frame 2x to 640x480, centred on its 800x480 canvas,
+// OpenLara's software renderer draws RGB565 into GAPI::swColor: 320x240, or
+// 320x200 for the 640x400 canvas. The loader scales each frame to the canvas
 // with the P4's PPA (display_write_frame_custom). Its flush costs ~20 ms, so
 // a presenter task on core 1 shows frame N while the game draws frame N+1
 // into the other buffer. The first buffer is the loader's internal-RAM
 // emulator buffer (faster for the renderer than PSRAM) when it has one.
+//
+// The canvas is one of CANVAS_SIZES, picked from what the loader offers (the
+// store's Screen setting, else the listing's recommended 640x480):
+//   800x600  320x240 x2.5, the panel's full height
+//   640x480  320x240 x2, OpenLara's natural size (the picture it always had)
+//   640x400  320x200 x2: the engine renders a 16:10 frame (its projection and
+//            UI follow Core::width / Core::height), so nothing is squashed or
+//            cut off, and each frame has 1/6 fewer pixels to draw and send
 #include "papp_port.h"
 
 #include <string.h>
+
+// Largest first; the same sizes as "canvas" in apps/psram_openlara/papp.json.
+static const struct
+{
+    int w, h;        // canvas
+    int frame_h;     // rendered frame: PAPP_OL_WIDTH x frame_h
+    int tenths;      // scale x10
+} CANVAS_SIZES[] = {{800, 600, 240, 25}, {640, 480, 240, 20}, {640, 400, 200, 20}};
+
+// The frame and its scale: 320x240 x2 (640x480, centred on the 800x480
+// canvas) until papp_video_init switches the canvas.
+static int s_frame_h = PAPP_OL_HEIGHT;
+static float s_scale = 2.0f;
 
 static uint16_t *s_frames[2] = {nullptr, nullptr};
 static bool s_owned[2] = {false, false};   // allocated here (else the loader's)
@@ -18,11 +39,41 @@ static volatile bool s_quit = false;
 static volatile bool s_done = true;
 static void *s_task = nullptr;
 
+// Buffers hold the largest frame (320x240); a 320x200 frame uses the top rows.
 static const size_t FRAME_BYTES = PAPP_OL_WIDTH * PAPP_OL_HEIGHT * sizeof(uint16_t);
 
 static void show(const uint16_t *frame)
 {
-    papp_svc->display_write_frame_custom(frame, PAPP_OL_WIDTH, PAPP_OL_HEIGHT, 2.0f, false);
+    papp_svc->display_write_frame_custom(frame, PAPP_OL_WIDTH, s_frame_h, s_scale, false);
+}
+
+// Switch to the largest of CANVAS_SIZES that fits in the loader's offer (the
+// smallest when none does). A loader without display_set_canvas, or one that
+// refuses, keeps 800x480 with the 320x240 frame at 2x.
+static void choose_canvas()
+{
+    if (papp_svc->display_get_size == nullptr || papp_svc->display_set_canvas == nullptr) {
+        return;
+    }
+    int offer_w = 0, offer_h = 0;
+    papp_svc->display_get_size(&offer_w, &offer_h);
+    const int count = (int)(sizeof(CANVAS_SIZES) / sizeof(CANVAS_SIZES[0]));
+    int pick = count - 1;
+    for (int i = 0; i < count; i++) {
+        if (CANVAS_SIZES[i].w <= offer_w && CANVAS_SIZES[i].h <= offer_h) {
+            pick = i;
+            break;
+        }
+    }
+    const auto &size = CANVAS_SIZES[pick];
+    if (papp_svc->display_set_canvas(size.w, size.h) == 0) {
+        s_frame_h = size.frame_h;
+        s_scale = size.tenths / 10.0f;
+        papp_svc->log_printf("OL: offered a %dx%d canvas, using %dx%d: %dx%d frames x%d.%d\n", offer_w, offer_h,
+                             size.w, size.h, PAPP_OL_WIDTH, s_frame_h, size.tenths / 10, size.tenths % 10);
+    } else {
+        papp_svc->log_printf("OL: %dx%d canvas refused, keeping 800x480\n", size.w, size.h);
+    }
 }
 
 // Every 60 s: frames shown per second and the average time a flush takes.
@@ -69,6 +120,8 @@ static void presenter_task(void *)
 
 extern "C" int papp_video_init(void)
 {
+    // On the game task, before the presenter task exists.
+    choose_canvas();
     uint16_t *emu = papp_svc->display_get_emu_buffer != nullptr ? papp_svc->display_get_emu_buffer() : nullptr;
     for (int i = 0; i < 2; i++) {
         if (i == 0 && emu != nullptr) {
@@ -101,6 +154,11 @@ extern "C" int papp_video_init(void)
         papp_svc->log_printf("OL: no presenter task, presenting on the game task\n");
     }
     return 0;
+}
+
+extern "C" int papp_video_frame_height(void)
+{
+    return s_frame_h;
 }
 
 extern "C" uint16_t *papp_video_back(void)

@@ -202,9 +202,9 @@ static bool poll_input(long long now)
 // ── Health and oxygen bars ──────────────────────────────────────────────────
 // With the software renderer the bar textures (CommonTex CTEX_HEALTH/OXYGEN)
 // are never built, so Level::renderUI draws nothing for them; the original
-// port overlays them itself. Drawn here straight into the 320x240 frame with
-// the engine's own bar colours (level.h CommonTexData, 0xAABBGGRR) at
-// Level::renderUI's positions (640x480 UI units, halved).
+// port overlays them itself. Drawn here straight into the 320x240 (or
+// 320x200) frame with the engine's own bar colours (level.h CommonTexData,
+// 0xAABBGGRR) at Level::renderUI's positions (640x480 UI units, halved).
 
 static const uint32 HEALTH_ROWS[5] = {0xFF2C5D71, 0xFF5E81AE, 0xFF2C5D71, 0xFF1B4557, 0xFF16304F};
 static const uint32 OXYGEN_ROWS[5] = {0xFF647464, 0xFFA47848, 0xFF647464, 0xFF4C504C, 0xFF303030};
@@ -217,8 +217,9 @@ static inline uint16_t rgb565(uint32 abgr)
 
 static void fill_rect(uint16_t *fb, int x, int y, int w, int h, uint16_t color, bool half)
 {
+    const int frame_h = papp_video_frame_height();
     for (int j = y; j < y + h; j++) {
-        if (j < 0 || j >= PAPP_OL_HEIGHT) {
+        if (j < 0 || j >= frame_h) {
             continue;
         }
         for (int i = x; i < x + w; i++) {
@@ -322,7 +323,7 @@ static void show_missing_data()
                          PAPP_OL_DATA_DIR, PAPP_OL_DATA_DIR);
     for (int frame = 0; frame < 2; frame++) {
         uint16_t *fb = papp_video_back();
-        for (int y = 0; y < PAPP_OL_HEIGHT; y++) {
+        for (int y = 0; y < papp_video_frame_height(); y++) {
             for (int x = 0; x < PAPP_OL_WIDTH; x++) {
                 fb[y * PAPP_OL_WIDTH + x] = (((x / 16) ^ (y / 16)) & 1) ? 0x001F : 0x0000;
             }
@@ -377,7 +378,7 @@ extern "C" int papp_openlara_run(void)
     strcpy(saveDir, data_dir);   // "savegame.dat"
 
     Core::width = PAPP_OL_WIDTH;
-    Core::height = PAPP_OL_HEIGHT;
+    Core::height = papp_video_frame_height();  // 200 on the 640x400 canvas: a 16:10 view
     GAPI::swColor = papp_video_back();
     GAPI::resize();
 

@@ -1,7 +1,9 @@
 #include "papp_loader.h"
 #include "papp_internal.h"
+#include "papp_memory.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <climits>
 #include <cstdarg>
@@ -113,6 +115,10 @@ struct __attribute__((packed)) StreamFileHeader {
 enum StreamFileStatus : uint32_t { FILE_OK = 0, FILE_NOT_FOUND = 1, FILE_TOO_LARGE = 2, FILE_BAD_PATH = 3, FILE_READ_ERROR = 4 };
 static constexpr size_t STREAM_FILE_MAX_BYTES = 1024 * 1024;
 static constexpr size_t STREAM_LISTING_MAX_BYTES = 64 * 1024;
+// Heap log lines while an app runs (log_heap): the first once it has had
+// time to load and start its audio, then every 30 s.
+static constexpr int64_t HEAP_LOG_FIRST_US = 10 * 1000000LL;
+static constexpr int64_t HEAP_LOG_INTERVAL_US = 30 * 1000000LL;
 
 static bool send_screen_stream_bytes(int socket_fd, const void *data, size_t length) {
   const auto *bytes = static_cast<const uint8_t *>(data);
@@ -164,6 +170,40 @@ static bool forget_papp_cap_task(TaskHandle_t handle) {
     }
   }
   return false;
+}
+
+// ── Heap diagnostics ──
+// The running app's heap blocks that went to internal RAM because PSRAM was
+// full, and its allocations that failed (svc_mem_*); reset when an app starts.
+static std::atomic<uint32_t> s_app_heap_internal{0};
+static std::atomic<uint32_t> s_app_heap_failed{0};
+
+// Below this, the largest internal DMA-capable block is too small for comfort:
+// the speaker's I2S DMA buffers, SD card transfers and lwIP take it in pieces
+// of a few KB each, and a TLS session needs more.
+static constexpr size_t HEAP_LOW_BLOCK = 16 * 1024;
+
+// One line about the heaps, so the board's log shows whether the drivers still
+// have internal DMA-capable RAM: its free bytes, largest free block and lowest
+// level since boot, PSRAM's free bytes, and the app's heap counters. A warning
+// when the largest block is below HEAP_LOW_BLOCK.
+static void log_heap(const char *when) {
+  constexpr uint32_t dma_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA;
+  const size_t largest_dma = heap_caps_get_largest_free_block(dma_caps);
+  char line[256];
+  std::snprintf(line, sizeof(line),
+                "Heap %s: internal DMA RAM %u B free, largest block %u B, lowest %u B since boot; "
+                "PSRAM %u B free, largest %u B; app blocks in internal RAM %u, failed %u",
+                when, static_cast<unsigned>(heap_caps_get_free_size(dma_caps)), static_cast<unsigned>(largest_dma),
+                static_cast<unsigned>(heap_caps_get_minimum_free_size(dma_caps)),
+                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),
+                static_cast<unsigned>(s_app_heap_internal.load()), static_cast<unsigned>(s_app_heap_failed.load()));
+  if (largest_dma < HEAP_LOW_BLOCK) {
+    ESP_LOGW(TAG, "%s", line);
+  } else {
+    ESP_LOGI(TAG, "%s", line);
+  }
 }
 
 PappLoader *PappLoader::active_ = nullptr;
@@ -773,8 +813,12 @@ void PappLoader::loop() {
       }
       return;
     }
-    if (this->papp_task_done_)
+    if (this->papp_task_done_) {
       this->finish_app_();
+    } else if (this->papp_task_handle_ != nullptr && esp_timer_get_time() >= this->next_heap_log_us_) {
+      this->next_heap_log_us_ = esp_timer_get_time() + HEAP_LOG_INTERVAL_US;
+      log_heap("while the app runs");
+    }
     return;
   }
 
@@ -1075,6 +1119,11 @@ bool PappLoader::start_loaded_app_(psram_app_handle_t app, const std::string &so
   this->app_handle_ = app;
   this->papp_task_done_ = false;
   this->papp_task_result_ = -1;
+  s_app_heap_internal = 0;
+  s_app_heap_failed = 0;
+  this->audio_trouble_logged_ = false;
+  this->next_heap_log_us_ = esp_timer_get_time() + HEAP_LOG_FIRST_US;
+  log_heap("before the app starts");
   const BaseType_t task_result = xTaskCreatePinnedToCore(
       &PappLoader::papp_task_entry_, "papp_main", 16384, this, 5,
       &this->papp_task_handle_, 0);
@@ -1566,6 +1615,7 @@ void PappLoader::finish_app_() {
   }
   close_app_sockets_();
   close_app_tls_();
+  log_heap("after the app ended");
   this->toggle_wait_release_ = this->toggle_button_ != nullptr;
   this->toggle_close_requested_ = false;
   this->global_close_requested_ = false;
@@ -2648,6 +2698,9 @@ void PappLoader::audio_init_(int sample_rate) {
   }
   this->speaker_->set_mute_state(false);
   this->speaker_->set_volume(1.0f);
+  // The speaker's I2S channel and DMA buffers are allocated from internal
+  // DMA-capable RAM as it starts: what is left for them.
+  log_heap("as the app starts audio");
   this->speaker_->start();
 }
 
@@ -2697,6 +2750,12 @@ void PappLoader::audio_submit_(short *stereo_buf, int frame_count) {
     last_audio_debug_log_us = audio_now_us;
   }
   if (written != bytes) {
+    // The first of an app run: a speaker that could not get its I2S DMA
+    // buffers (ESP_ERR_NO_MEM) takes nothing, so show the heap it had.
+    if (!this->audio_trouble_logged_) {
+      this->audio_trouble_logged_ = true;
+      log_heap("at the app's first short audio write");
+    }
     static int64_t last_short_write_log_us = 0;
     const int64_t now_us = esp_timer_get_time();
     if (now_us - last_short_write_log_us >= 1000000) {
@@ -3854,21 +3913,99 @@ int PappLoader::svc_file_seek(void *stream, long offset, int whence) {
 }
 long PappLoader::svc_file_tell(void *stream) { return stream != nullptr ? std::ftell(static_cast<FILE *>(stream)) : -1; }
 
-void *PappLoader::svc_mem_caps_alloc(size_t size, uint32_t caps) {
-  uint32_t real_caps = MALLOC_CAP_8BIT;
-  if (caps & PAPP_MEM_CAP_SPIRAM)
-    real_caps |= MALLOC_CAP_SPIRAM;
-  if (caps & PAPP_MEM_CAP_INTERNAL)
-    real_caps |= MALLOC_CAP_INTERNAL;
-  if (caps & PAPP_MEM_CAP_DMA)
-    real_caps |= MALLOC_CAP_DMA;
-  return heap_caps_malloc(size, real_caps);
+// ── App heap (papp_memory.h) ──
+// ESPHome's CONFIG_SPIRAM_USE_CAPS_ALLOC makes plain malloc() internal RAM
+// only, so the app's heap services pick the heap themselves: PSRAM, and
+// internal RAM only above memory::INTERNAL_RESERVE.
+static_assert(PAPP_MEM_CAP_DMA == memory::APP_CAP_DMA && PAPP_MEM_CAP_SPIRAM == memory::APP_CAP_SPIRAM &&
+                  PAPP_MEM_CAP_INTERNAL == memory::APP_CAP_INTERNAL,
+              "papp_memory.h must know psram_app.h's PAPP_MEM_CAP_* bits");
+
+// ESP-IDF heap caps for papp_memory.h's HEAP_* flags.
+static uint32_t idf_heap_caps(uint32_t heap) {
+  uint32_t caps = MALLOC_CAP_8BIT;
+  if (heap & memory::HEAP_SPIRAM)
+    caps |= MALLOC_CAP_SPIRAM;
+  if (heap & memory::HEAP_INTERNAL)
+    caps |= MALLOC_CAP_INTERNAL;
+  if (heap & memory::HEAP_DMA)
+    caps |= MALLOC_CAP_DMA;
+  return caps;
 }
 
-void *PappLoader::svc_mem_alloc(size_t size) { return std::malloc(size); }
-void *PappLoader::svc_mem_calloc(size_t n, size_t size) { return std::calloc(n, size); }
-void *PappLoader::svc_mem_realloc(void *ptr, size_t size) { return std::realloc(ptr, size); }
-void PappLoader::svc_mem_free(void *ptr) { std::free(ptr); }
+static bool internal_heap_allows(size_t size) {
+  return memory::internal_fits(size, heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                               heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+}
+
+// Counts the app's blocks that went to internal RAM (PSRAM was full) and the
+// ones it could not have, for the heap log lines; the first of each in a run
+// is logged at once.
+static void app_heap_note(bool internal, size_t size) {
+  std::atomic<uint32_t> &count = internal ? s_app_heap_internal : s_app_heap_failed;
+  if (count.fetch_add(1) == 0) {
+    ESP_LOGW(TAG, "PAPP heap: %s %u bytes (PSRAM free %u B, largest %u B; internal free %u B)",
+             internal ? "PSRAM is full; internal RAM for" : "no memory for", static_cast<unsigned>(size),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+  }
+}
+
+// A block from the first heap in `plan` that has room.
+static void *app_heap_alloc(const memory::Plan &plan, size_t size, bool zero) {
+  for (int i = 0; i < plan.count; i++) {
+    const memory::Attempt &attempt = plan.attempts[i];
+    if (attempt.guarded && !internal_heap_allows(size))
+      continue;
+    const uint32_t caps = idf_heap_caps(attempt.heap);
+    void *block = zero ? heap_caps_calloc(1, size, caps) : heap_caps_malloc(size, caps);
+    if (block != nullptr) {
+      if (attempt.guarded)
+        app_heap_note(true, size);
+      return block;
+    }
+  }
+  if (size != 0)
+    app_heap_note(false, size);
+  return nullptr;
+}
+
+void *PappLoader::svc_mem_caps_alloc(size_t size, uint32_t caps) {
+  return app_heap_alloc(memory::caps_plan(caps), size, false);
+}
+
+void *PappLoader::svc_mem_alloc(size_t size) { return app_heap_alloc(memory::plain_plan(), size, false); }
+void *PappLoader::svc_mem_calloc(size_t n, size_t size) {
+  size_t total = 0;
+  if (!memory::calloc_bytes(n, size, &total))
+    return nullptr;
+  return app_heap_alloc(memory::plain_plan(), total, true);
+}
+// Grows or shrinks in PSRAM; a block that was in internal RAM moves there.
+void *PappLoader::svc_mem_realloc(void *ptr, size_t size) {
+  if (ptr == nullptr)
+    return svc_mem_alloc(size);
+  if (size == 0) {
+    heap_caps_free(ptr);
+    return nullptr;
+  }
+  const memory::Plan plan = memory::plain_plan();
+  for (int i = 0; i < plan.count; i++) {
+    const memory::Attempt &attempt = plan.attempts[i];
+    if (attempt.guarded && !internal_heap_allows(size))
+      continue;
+    void *block = heap_caps_realloc(ptr, size, idf_heap_caps(attempt.heap));
+    if (block != nullptr) {
+      if (attempt.guarded)
+        app_heap_note(true, size);
+      return block;
+    }
+  }
+  app_heap_note(false, size);
+  return nullptr;  // ptr is still valid, as with realloc()
+}
+void PappLoader::svc_mem_free(void *ptr) { heap_caps_free(ptr); }
 
 int PappLoader::svc_log_vprintf(const char *fmt, va_list args) {
   char buffer[256];

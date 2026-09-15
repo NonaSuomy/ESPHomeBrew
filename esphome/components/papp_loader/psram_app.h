@@ -140,6 +140,13 @@ typedef struct {
     long   (*file_tell)(void *stream);
 
     /* ── Memory ──────────────────────────────────────────────────────── */
+    /* mem_alloc, mem_calloc and mem_realloc give PSRAM on the ESPHome
+     * loader; internal RAM only when PSRAM is full, and never its last
+     * 64 KB, which the speaker, SD card and network drivers need (its
+     * papp_memory.h). mem_caps_alloc gives the heap the caps name
+     * (PAPP_MEM_CAP_INTERNAL for the few buffers that must be internal);
+     * without SPIRAM, INTERNAL or DMA it is like mem_alloc. mem_free frees
+     * a block from any of them. */
     void *(*mem_alloc)(size_t size);
     void *(*mem_calloc)(size_t n, size_t size);
     void *(*mem_realloc)(void *ptr, size_t size);

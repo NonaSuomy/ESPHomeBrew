@@ -206,6 +206,18 @@ static void log_heap(const char *when) {
   }
 }
 
+// Write an app's frame back from the CPU cache before the PPA reads it. The
+// frame is app memory, so its start and size need not be whole cache lines:
+// app heap blocks come from PSRAM (papp_memory.h), and Doom's 320x200 screen
+// sits 16-byte aligned. A plain C2M msync refuses that ("not aligned with
+// cache line size") and leaves the newest lines dirty, so the PPA reads parts
+// of an older frame. UNALIGNED writes back the partial lines at both ends too,
+// which is safe because nothing is invalidated.
+static void sync_app_frame(const uint16_t *buffer, size_t bytes) {
+  esp_cache_msync(const_cast<uint16_t *>(buffer), bytes,
+                  ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+}
+
 PappLoader *PappLoader::active_ = nullptr;
 
 std::string runtime_path(const char *path) {
@@ -2326,8 +2338,7 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
                       ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE);
       std::memcpy(this->direct_frame_, place, sizeof(place));
     }
-    esp_cache_msync(const_cast<uint16_t *>(buffer), static_cast<size_t>(in_w) * in_h * sizeof(uint16_t),
-                    ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    sync_app_frame(buffer, static_cast<size_t>(in_w) * in_h * sizeof(uint16_t));
     ppa_srm_oper_config_t cfg = {
         .in = {
             .buffer = const_cast<uint16_t *>(buffer), .pic_w = in_w, .pic_h = in_h,
@@ -2379,7 +2390,7 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
     const size_t input_bytes = static_cast<size_t>(in_w) * in_h * sizeof(uint16_t);
     const size_t output_bytes =
         canvas::sync_bytes(canvas::frame_bytes(canvas_w, canvas_h), this->frame_alloc_bytes_);
-    esp_cache_msync(const_cast<uint16_t *>(buffer), input_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    sync_app_frame(buffer, input_bytes);
     ppa_srm_oper_config_t cfg = {
         .in = {
             .buffer = const_cast<uint16_t *>(buffer), .pic_w = in_w, .pic_h = in_h,
@@ -2413,7 +2424,7 @@ void PappLoader::render_custom_(const uint16_t *buffer, uint16_t in_w, uint16_t 
       out_w <= canvas_w && out_h <= canvas_h) {
     const size_t input_bytes = static_cast<size_t>(in_w) * in_h * sizeof(uint16_t);
     const size_t output_bytes = static_cast<size_t>(out_w) * out_h * sizeof(uint16_t);
-    esp_cache_msync(const_cast<uint16_t *>(buffer), input_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    sync_app_frame(buffer, input_bytes);
     ppa_srm_oper_config_t cfg = {
         .in = {
             .buffer = const_cast<uint16_t *>(buffer), .pic_w = in_w, .pic_h = in_h,

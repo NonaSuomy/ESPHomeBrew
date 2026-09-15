@@ -79,6 +79,7 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 | `@esp-bridge readfile path=/sd/roms/redalert/DESYNCLOG.TXT` | Post a text file from the device's SD card; `path=/sd/roms/` lists a directory |
 | `@esp-bridge writefile path=/sd/roms/redalert/redalert.ini` + a code block | Replace a small text file on the SD card with the code block (`edit_requesters` only; not while an app runs) |
 | `@esp-bridge deletefile path=/sd/roms/redalert/sync001.txt` | Remove one text or leftover (`.bak`, `.log`) file from the SD card (`edit_requesters` only; not while an app runs) |
+| `@esp-bridge reset serial=/dev/ttyUSB0 seconds=10` | Hard-reset the device through its USB serial port and post 10 s of boot log (see [below](#when-the-network-fails-serial-reset-and-fallback)) |
 | `@esp-bridge view device.yaml source=local` | Post the YAML with secret values hidden |
 | `@esp-bridge edit device.yaml source=local "find=refresh: 1d" "replace=refresh: 0s"` | Change one exact piece of a local YAML, then validate it (see below) |
 
@@ -159,6 +160,55 @@ The bridge reads the old file, calls `papp_write_file(path, data)`, then reads t
 - **Not while an app runs**, the same people as `writefile` (`[actions].edit_requesters`), and only under `/sd/` without `..`.
 - It needs a loader and `device_control.yaml` with `papp_delete_file`, and `deletefile` in `[actions].enabled`.
 
+## When the network fails: serial reset and fallback
+
+After a heavy app, the device's API can stop answering, for example `Device API call failed while connecting to 10.20.30.180:6053: ReadFailedAPIError: [Errno 104] Connection reset by peer`. The bridge can then use the USB serial port that is plugged in next to it.
+
+### `reset`
+
+`@esp-bridge reset serial=/dev/ttyUSB0 [seconds=N] [device=10.20.30.180]` hard-resets the ESP32 the way esptool does. On the usual USB-UART auto-program circuit, RTS drives EN and DTR drives IO0. The bridge opens the port with both lines released, so opening it doesn't reset anything. It then holds EN low for 100 ms while IO0 stays high, so the chip boots its firmware rather than the ROM download mode.
+
+- `serial=` must be a serial port in `[esphome].devices`. Leave it out to use `[fallback].serial`.
+- `seconds=N` returns N seconds of serial boot log, like `launch … serial=`. Panic lines are quoted in the reply, and a crash dump is decoded.
+- `device=<the device's IP>` also waits for the device's API to answer, up to `[fallback].wait_seconds`, and says how long it took.
+- `reset` must be in `[actions].enabled`, and only `allowed_requesters` can use it.
+- It needs a USB-UART adapter with RTS and DTR wired to EN and IO0 (a `ttyUSB*` port). The chip's own USB-Serial-JTAG port (`ttyACM*`) resets differently.
+
+### Automatic fallback
+
+Turn it on in `bridge.toml`. The port must also be listed in `[esphome].devices`:
+
+```toml
+[fallback]
+serial = "/dev/ttyUSB0"
+enabled = true
+# wait_seconds = 60      # how long to wait for the API after a reset
+# recheck_seconds = 30   # while the network is down, check it at most this often
+```
+
+When a network job fails with a connection-class error (refused, reset by peer, timed out, unreachable), the bridge takes the serial route:
+
+| Job | Serial route |
+|---|---|
+| `launch`, `close`, `catalog`, `screenshot` | One quick network retry after 2 s. Then a reset over serial, a wait of up to `wait_seconds` for the API to answer (a connect check every 3 s), and one retry over the network |
+| `logs … device=<IP>` (the log never connected) | A reset over serial, a wait for the API, then one retry of the capture |
+| `upload … device=<IP>` (OTA) | The same build is flashed over serial with `esphome upload <yaml> --device /dev/ttyUSB0`. Serial flashing follows the same rules as `upload`: `upload` must be enabled, the requester must be allowed, and the port must be in `[esphome].devices` |
+
+The reply lists every step, then the job's own result:
+
+```
+🔌 network failed (Device API call failed while connecting to 10.20.30.180:6053: ReadFailedAPIError: [Errno 104] Connection reset by peer) twice; reset over /dev/ttyUSB0; device back after 18 s; retried: ✅
+✅ `catalog` sent to 10.20.30.180.
+```
+
+The serial boot log from the reset is attached with the job's log. If the device doesn't come back within `wait_seconds`, the job isn't retried, and the reply says so with the boot log attached.
+
+Errors that a reset can't fix never trigger it. These include a wrong API key or password, another device at that address, a device without the needed API action, an OTA upload refused for its password or image, and a screen stream that fails after the API answered. `readfile`, `writefile`, `deletefile` and `run` don't fall back: a reset in the middle of a file write, or halfway through `run`, would not help.
+
+**Network health.** The bridge remembers, in memory only, that "the network path to 10.20.30.180 is down since 14:02:11". While it is down, jobs go straight to the serial route (reset and retry, or serial upload) instead of waiting for the network to fail again. At most once every `recheck_seconds`, a job first makes a light API connect check. As soon as the network answers, the bridge goes back to it, and that job's reply begins with `🔌 network to 10.20.30.180 is back (down since 14:02:11); using it again`. `@esp-bridge status` shows whether the fallback is on and which paths are down. A restart of the bridge forgets the state.
+
+**Try it:** `@esp-bridge reset serial=/dev/ttyUSB0 seconds=10` should post the boot log (`ESP-ROM:esp32p4…`, `rst:0x1 (POWERON)…`). The serial port must be free, so close any `esphome logs` or terminal that has it open. The fallback also works without `reset` in `[actions].enabled`, because `[fallback] enabled` is its own switch.
+
 ## Viewing and editing your local YAML
 
 `view` posts one of your local YAML files, so the team can see how a device is set up. `edit` changes it without you having to open an editor.
@@ -171,7 +221,7 @@ The bridge reads the old file, calls `papp_write_file(path, data)`, then reads t
 
 ## What it will and won't do
 
-- **Only the listed actions**, each a fixed `esphome` command (`config`, `compile`, `upload`, `run --no-logs` followed by `logs`, `logs`) or one of the device API actions. There's no shell and no free-form flags. Anything else is refused with a reason.
+- **Only the listed actions**, each a fixed `esphome` command (`config`, `compile`, `upload`, `run --no-logs` followed by `logs`, `logs`) or one of the device API actions. `reset` only switches the serial port's RTS and DTR lines, and the serial fallback reuses the same `esphome upload` command with the allowlisted port. There's no shell and no free-form flags. Anything else is refused with a reason.
 - **Only listed requesters, YAML patterns, devices and refs.** Paths must stay inside the checkout or the local directory. Log capture is capped (`max_log_seconds`, `max_log_bytes`).
 - **Secrets are masked.** Every value in the configured `secrets.yaml` files is replaced with `***` before anything is posted.
 - **Trust model: read this.** Building an ESPHome config runs code on this machine: external components' Python, PlatformIO scripts and anything else that config pulls in. So the bridge is exactly as trustworthy as whoever can push the refs you allow. Keep `allowed_refs` to branches in this repository (people with write access). **Never allow `pull/*`**, because anyone on GitHub can open a pull request. For extra isolation, run the bridge as a separate user with access to only the serial port and its checkout.
@@ -179,4 +229,4 @@ The bridge reads the old file, calls `papp_write_file(path, data)`, then reads t
 
 ## Tests
 
-`python3 -m unittest discover -s tests` covers request parsing, every allowlist refusal (devices, paths, refs, option injection, disabled actions), the exact `esphome` argv, secret masking, and process time/size limits. CI runs it on every change to `tools/esp_bridge/`.
+`python3 -m unittest discover -s tests` covers request parsing, every allowlist refusal (devices, paths, refs, option injection, disabled actions), the exact `esphome` argv, secret masking, and process time/size limits. It also covers the serial fallback with the port and the API mocked: the order and timing of the RTS/DTR reset, which errors trigger the fallback, reset then retry, OTA then serial upload, and the network health flag. CI runs it on every change to `tools/esp_bridge/`.

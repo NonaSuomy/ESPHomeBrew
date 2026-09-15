@@ -1132,5 +1132,555 @@ class TokenTests(unittest.TestCase):
         self.assertIn("EHGI_BRIDGE_TOKEN", str(caught.exception))
 
 
+# ── serial reset and the serial fallback (#27) ──────────────────────────────
+
+INCIDENT = ("Device API call failed while connecting to 10.0.0.5:6053: ReadFailedAPIError: "
+            "[Errno 104] Connection reset by peer")
+BOOT_LOG = "ESP-ROM:esp32p4-eco2-20240710\nrst:0x1 (POWERON),boot:0x30f (SPI_FAST_FLASH_BOOT)\n"
+
+
+def fallback_config(tmp: Path, enabled: bool = True) -> eb.Config:
+    cfg = make_api_config(tmp)  # devices: /dev/ttyUSB0 and 10.0.0.5; API host 10.0.0.5
+    cfg.enabled = [*cfg.enabled, "screenshot", "reset"]
+    cfg.fallback_serial, cfg.fallback_enabled = "/dev/ttyUSB0", enabled
+    return cfg
+
+
+class FakeClock:
+    """Runner.clock / Runner.sleep without waiting."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def fake_runner(cfg: eb.Config) -> tuple[eb.Runner, FakeClock]:
+    runner, clock = eb.Runner(cfg), FakeClock()
+    runner.clock, runner.sleep = clock, clock.sleep
+    return runner, clock
+
+
+class Device:
+    """A scripted device: its network path is up or down; it records what the bridge did."""
+
+    def __init__(self, up=False):
+        self.up, self.events = up, []
+
+    def action(self, cfg, name, data, timeout=30.0, log_seconds=0):
+        self.events.append("action")
+        if not self.up:
+            raise eb.DeviceUnreachable(INCIDENT)
+        return ""
+
+    def probe(self, cfg, host, timeout=5.0):
+        self.events.append("probe")
+        return None if self.up else "ConnectionRefusedError: [Errno 111] Connection refused"
+
+    def capture_class(self):
+        device = self
+
+        class Capture:
+            def __init__(self, port, max_bytes, baud=115200, reset=False):
+                self.port, self.reset, self.reset_done, self.error = port, reset, False, None
+
+            def start(self):
+                device.events.append(f"reset {self.port}" if self.reset else f"serial {self.port}")
+                self.reset_done = self.reset
+
+            def stop(self):
+                return BOOT_LOG
+
+        return Capture
+
+    def patch(self):
+        return mock.patch.multiple(eb, call_device_action=self.action, probe_network=self.probe,
+                                   SerialCapture=self.capture_class())
+
+
+def line_recorder():
+    """A serial port that records every DTR/RTS change, like pyserial's Serial."""
+
+    class LinePort:
+        def __init__(self):
+            self.__dict__.update(events=[], lines={"dtr": True, "rts": True}, port=None, baudrate=None,
+                                 timeout=None, is_open=False, chunks=[BOOT_LOG.encode()])
+
+        def __setattr__(self, name, value):
+            if name in ("dtr", "rts"):
+                self.events.append((name, value) if self.is_open else (name, value, "before open"))
+                self.lines[name] = value
+            else:
+                self.__dict__[name] = value
+
+        def __getattr__(self, name):
+            if name in ("dtr", "rts"):
+                return self.__dict__["lines"][name]
+            raise AttributeError(name)
+
+        def open(self):
+            self.events.append(("open", self.port))
+            self.is_open = True
+
+        def read(self, n):
+            if self.chunks:
+                return self.chunks.pop(0)
+            import time as t
+            t.sleep(0.01)
+            return b""
+
+        def close(self):
+            self.events.append(("close",))
+
+    return LinePort
+
+
+class ResetLineTests(unittest.TestCase):
+    def tearDown(self):
+        sys.modules.pop("serial", None)
+
+    def test_en_is_pulsed_low_with_io0_high(self):
+        port = line_recorder()()
+        port.is_open = True
+        eb.pulse_reset(port, sleep=lambda seconds: port.events.append(("sleep", seconds)))
+        # RTS drives EN, DTR drives IO0 (asserted = low): DTR stays released so the
+        # chip boots its firmware, RTS holds EN low for 100 ms, then lets go.
+        self.assertEqual(port.events, [("dtr", False), ("rts", True), ("dtr", False), ("sleep", 0.1),
+                                       ("rts", False), ("dtr", False)])
+        self.assertEqual(port.lines, {"dtr": False, "rts": False})
+
+    def test_reset_action_opens_without_a_reset_then_pulses_and_reads_the_boot_log(self):
+        ports = []
+        LinePort = line_recorder()
+
+        def make():
+            ports.append(LinePort())
+            return ports[-1]
+
+        mod = type(sys)("serial")
+        mod.Serial = make
+        sys.modules["serial"] = mod
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = fallback_config(Path(tmp), enabled=False)
+            runner = eb.Runner(cfg)
+            runner.sleep = lambda seconds: __import__("time").sleep(0.05)
+            req = eb.parse_request("@esp-bridge reset serial=/dev/ttyUSB0 seconds=5", None, "esp-bridge")
+            eb.validate(req, cfg)
+            with mock.patch.object(eb, "probe_network") as probe:
+                result = runner.execute(req)
+        probe.assert_not_called()  # no device= to wait for
+        events = ports[0].events
+        self.assertEqual(events[:8], [("dtr", False, "before open"), ("rts", False, "before open"),
+                                      ("open", "/dev/ttyUSB0"), ("dtr", False), ("rts", True), ("dtr", False),
+                                      ("rts", False), ("dtr", False)])
+        self.assertEqual(events[-1], ("close",))
+        self.assertTrue(result.ok, result.summary)
+        self.assertIn("reset over /dev/ttyUSB0", result.summary)
+        self.assertIn("Serial boot log for 5s attached", result.summary)
+        self.assertIn("=== serial /dev/ttyUSB0 ===", result.log)
+        self.assertIn("rst:0x1 (POWERON)", result.log)
+
+    def test_reset_can_wait_for_the_network_and_defaults_to_the_fallback_port(self):
+        device = Device()
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = fallback_config(Path(tmp))
+            runner, clock = fake_runner(cfg)
+            runner.mark_down("10.0.0.5", INCIDENT)
+            probes = iter(["ConnectionRefusedError: refused", "ConnectionRefusedError: refused", None])
+            req = eb.parse_request("@esp-bridge reset device=10.0.0.5", None, "esp-bridge")
+            with device.patch(), mock.patch.object(eb, "probe_network", side_effect=lambda *a, **k: next(probes)):
+                result = runner.execute(req)
+        self.assertEqual(device.events, ["reset /dev/ttyUSB0"])
+        self.assertTrue(result.ok, result.summary)
+        self.assertIn("10.0.0.5 back on the network after 6 s", result.summary)
+        self.assertIn("network to 10.0.0.5 is back", result.summary)
+        self.assertFalse(runner.is_down("10.0.0.5"))
+        self.assertEqual(result.log, "")  # no seconds=: no boot log
+
+    def test_a_port_that_cannot_be_opened_is_reported(self):
+        mod = type(sys)("serial")
+
+        class Busy:
+            def open(self):
+                raise OSError("[Errno 16] Device or resource busy")
+
+        mod.Serial = Busy
+        sys.modules["serial"] = mod
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = fallback_config(Path(tmp))
+            with self.assertRaises(eb.BridgeError) as caught:
+                eb.Runner(cfg).execute(eb.parse_request("@esp-bridge reset", None, "esp-bridge"))
+        self.assertIn("busy", str(caught.exception))
+
+
+class ResetAllowlistTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = fallback_config(Path(self.tmp.name), enabled=False)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def req(self, text):
+        return eb.parse_request("@esp-bridge " + text, None, "esp-bridge")
+
+    def test_reset_needs_an_allowlisted_serial_port(self):
+        for text in ["reset serial=/dev/ttyUSB0", "reset serial=/dev/ttyUSB0 seconds=10",
+                     "reset device=10.0.0.5 serial=/dev/ttyUSB0", "reset device=/dev/ttyUSB0", "reset"]:
+            with self.subTest(text=text):
+                eb.validate(self.req(text), self.cfg)
+        self.assertEqual(eb.reset_target(self.req("reset device=10.0.0.5"), self.cfg), ("/dev/ttyUSB0", "10.0.0.5"))
+        refused = ["reset serial=/dev/ttyACM9",                   # port not listed
+                   "reset serial=10.0.0.5",                       # a network address is not a port
+                   "reset device=10.9.9.9 serial=/dev/ttyUSB0",   # device not listed
+                   "reset serial=/dev/ttyUSB0 device=/dev/ttyACM9",
+                   "reset serial=/dev/ttyUSB0 seconds=9999"]
+        for text in refused:
+            with self.subTest(text=text), self.assertRaises(eb.BridgeError):
+                eb.validate(self.req(text), self.cfg)
+        self.cfg.fallback_serial = None
+        with self.assertRaises(eb.BridgeError):  # no port given and no default
+            eb.validate(self.req("reset"), self.cfg)
+        self.cfg.enabled.remove("reset")
+        with self.assertRaises(eb.BridgeError):
+            eb.validate(self.req("reset serial=/dev/ttyUSB0"), self.cfg)
+
+    def test_serial_still_only_goes_with_the_actions_that_read_it(self):
+        with self.assertRaises(eb.BridgeError):
+            eb.validate(self.req("catalog serial=/dev/ttyUSB0 seconds=5"), self.cfg)
+
+    def test_fallback_port_must_be_allowlisted(self):
+        path = Path(self.tmp.name) / "bridge.toml"
+        base = path.read_text()
+        for section in ['[fallback]\nserial = "/dev/ttyACM9"\nenabled = true\n',
+                        '[fallback]\nserial = "10.0.0.5"\nenabled = true\n',
+                        '[fallback]\nenabled = true\n']:
+            path.write_text(base + section)
+            with self.subTest(section=section), self.assertRaises(SystemExit):
+                eb.Config.load(path, need_token=False)
+        path.write_text(base + '[fallback]\nserial = "/dev/ttyUSB0"\nenabled = true\nwait_seconds = 90\n')
+        cfg = eb.Config.load(path, need_token=False)
+        self.assertEqual((cfg.fallback_port(), cfg.fallback_wait, cfg.fallback_recheck), ("/dev/ttyUSB0", 90, 30))
+        path.write_text(base + '[fallback]\nserial = "/dev/ttyUSB0"\n')
+        self.assertIsNone(eb.Config.load(path, need_token=False).fallback_port())  # off unless enabled
+        path.write_text(base)
+        self.assertIsNone(eb.Config.load(path, need_token=False).fallback_port())
+        cfg.devices = ["10.0.0.5"]  # taken off the allowlist later: the fallback stops using it
+        self.assertIsNone(cfg.fallback_port())
+
+
+class FallbackDecisionTests(unittest.TestCase):
+    def tearDown(self):
+        sys.modules.pop("aioesphomeapi", None)
+
+    @staticmethod
+    def api_errors():
+        class APIConnectionError(Exception):
+            pass
+
+        class ReadFailedAPIError(APIConnectionError):
+            pass
+
+        class TimeoutAPIError(APIConnectionError):
+            pass
+
+        class InvalidAuthAPIError(APIConnectionError):
+            pass
+
+        class ProtocolAPIError(APIConnectionError):
+            pass
+
+        class InvalidEncryptionKeyAPIError(ProtocolAPIError):
+            pass
+
+        class BadNameAPIError(APIConnectionError):
+            pass
+
+        return locals()
+
+    def test_which_errors_are_network_failures(self):
+        e = self.api_errors()
+        for error in [ConnectionResetError(104, "Connection reset by peer"), ConnectionRefusedError(111, "refused"),
+                      TimeoutError(), OSError(113, "No route to host"),
+                      e["ReadFailedAPIError"]("[Errno 104] Connection reset by peer"), e["TimeoutAPIError"]("timeout"),
+                      eb.DeviceUnreachable(INCIDENT)]:
+            with self.subTest(error=repr(error)):
+                self.assertTrue(eb.is_network_error(error))
+        for error in [e["InvalidAuthAPIError"]("bad password"), e["InvalidEncryptionKeyAPIError"]("bad key"),
+                      e["BadNameAPIError"]("expected device-a"), eb.BridgeError("no `papp_close` API action"),
+                      ValueError("x")]:
+            with self.subTest(error=repr(error)):
+                self.assertFalse(eb.is_network_error(error))
+
+    def fake_api(self, error):
+        class FailingClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def connect(self, login=False):
+                raise error
+
+            async def disconnect(self):
+                return None
+
+        fake = type(sys)("aioesphomeapi")
+        fake.APIClient = FailingClient
+        sys.modules["aioesphomeapi"] = fake
+
+    def test_device_api_errors_are_classified(self):
+        e = self.api_errors()
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_api_config(Path(tmp))
+            self.fake_api(e["ReadFailedAPIError"]("[Errno 104] Connection reset by peer"))
+            with self.assertRaises(eb.DeviceUnreachable) as caught:
+                eb.call_device_action(cfg, "papp_close", {})
+            self.assertEqual(str(caught.exception), INCIDENT)  # the incident's message, unchanged
+            self.assertIsNotNone(eb.probe_network(cfg, "10.0.0.5"))
+            self.fake_api(e["InvalidAuthAPIError"]("Invalid password"))
+            with self.assertRaises(eb.BridgeError) as caught:
+                eb.call_device_action(cfg, "papp_close", {})
+            self.assertNotIsInstance(caught.exception, eb.DeviceUnreachable)
+            self.assertIsNone(eb.probe_network(cfg, "10.0.0.5"))  # it answered: the path works
+
+    def test_esphome_output_is_classified(self):
+        refused = "INFO Uploading firmware.bin\nERROR Connecting to 10.0.0.5 port 3232 failed: [Errno 111] Connection refused\n"
+        self.assertEqual(eb.network_failure("upload", refused, False),
+                         "ERROR Connecting to 10.0.0.5 port 3232 failed: [Errno 111] Connection refused")
+        self.assertIsNone(eb.network_failure("upload", "ERROR Error auth result: Invalid password\n", False))
+        self.assertIsNone(eb.network_failure("upload", refused, True))
+        never = ("INFO Starting log output from 10.0.0.5 using esphome API\nWARNING Can't connect to ESPHome API for "
+                 "office @ 10.0.0.5: Error connecting to 10.0.0.5: [Errno 111] Connect call failed (SocketAPIError)\n")
+        self.assertIn("Can't connect to ESPHome API", eb.network_failure("logs", never, True))
+        connected = "INFO Successfully connected to office @ 10.0.0.5 in 0.1s\n[W][api]: Connection reset by peer\n"
+        self.assertIsNone(eb.network_failure("logs", connected, True))
+
+    def test_non_network_failures_never_reset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = fallback_config(Path(tmp))
+            runner, _ = fake_runner(cfg)
+            device = Device(up=True)
+            missing = eb.BridgeError("The device has no `papp_close` API action.")
+            with device.patch(), mock.patch.object(eb, "call_device_action", side_effect=missing) as action:
+                with self.assertRaises(eb.BridgeError) as caught:
+                    runner.execute(eb.parse_request("@esp-bridge close", None, "esp-bridge"))
+        self.assertIs(caught.exception, missing)
+        self.assertEqual(action.call_count, 1)
+        self.assertEqual(device.events, [])  # no reset, no probe
+        self.assertFalse(runner.is_down("10.0.0.5"))
+
+    def test_without_the_fallback_the_network_error_stands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = fallback_config(Path(tmp), enabled=False)
+            runner, _ = fake_runner(cfg)
+            device = Device()
+            with device.patch(), self.assertRaises(eb.DeviceUnreachable):
+                runner.execute(eb.parse_request("@esp-bridge catalog", None, "esp-bridge"))
+        self.assertEqual(device.events, ["action", "action"])  # one quick network retry, no reset
+        self.assertTrue(runner.is_down("10.0.0.5"))
+
+
+class FallbackRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = fallback_config(Path(self.tmp.name))
+        self.runner, self.clock = fake_runner(self.cfg)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def req(self, text, requester="nona"):
+        req = eb.parse_request("@esp-bridge " + text, None, "esp-bridge")
+        req.requester = requester
+        return req
+
+    def test_network_failure_resets_over_serial_and_retries(self):
+        device = Device()
+        attempts = iter([eb.DeviceUnreachable(INCIDENT), eb.DeviceUnreachable(INCIDENT), ""])
+
+        def action(*args, **kwargs):
+            device.events.append("action")
+            outcome = next(attempts)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        probes = iter(["ConnectionRefusedError: refused"] * 5 + [None])
+        with device.patch(), mock.patch.object(eb, "call_device_action", action), \
+                mock.patch.object(eb, "probe_network", side_effect=lambda *a, **k: device.events.append("probe") or next(probes)):
+            result = self.runner.execute(self.req("close"))
+        self.assertEqual(device.events, ["action", "action", "reset /dev/ttyUSB0"] + ["probe"] * 6 + ["action"])
+        self.assertTrue(result.ok)
+        first = result.summary.splitlines()[0]
+        self.assertEqual(first, f"🔌 network failed ({INCIDENT}) twice; reset over /dev/ttyUSB0; "
+                                "device back after 15 s; retried: ✅")
+        self.assertIn("✅ `close` sent to 10.0.0.5", result.summary)
+        self.assertIn("=== serial /dev/ttyUSB0 after the reset ===", result.log)
+        self.assertIn("rst:0x1 (POWERON)", result.log)
+        self.assertFalse(self.runner.is_down("10.0.0.5"))
+
+    def test_a_device_that_does_not_come_back_is_reported_with_its_boot_log(self):
+        device = Device()
+        with device.patch(), self.assertRaises(eb.BridgeError) as caught:
+            self.runner.execute(self.req("launch url=" + STORE))
+        message = str(caught.exception)
+        self.assertIn("reset over /dev/ttyUSB0", message)
+        self.assertIn("device not back on the network after 60 s; not retried", message)
+        self.assertIn("rst:0x1 (POWERON)", caught.exception.log)
+        self.assertEqual(device.events.count("action"), 2)
+        self.assertTrue(self.runner.is_down("10.0.0.5"))
+
+    def test_failed_retry_is_reported(self):
+        device = Device()
+        with device.patch(), mock.patch.object(eb, "probe_network", return_value=None), \
+                self.assertRaises(eb.BridgeError) as caught:
+            self.runner.execute(self.req("catalog"))
+        self.assertIn("device back after 0 s; retried: ❌ (Device API call failed", str(caught.exception))
+        self.assertTrue(self.runner.is_down("10.0.0.5"))
+
+    def test_network_logs_reset_and_retry(self):
+        device = Device()
+        never = "WARNING Can't connect to ESPHome API for office @ 10.0.0.5: [Errno 111] Connect call failed (SocketAPIError)\n"
+        ok = "INFO Successfully connected to office @ 10.0.0.5 in 0.1s\n[I][app]: hello\n"
+        with device.patch(), mock.patch.object(eb, "probe_network", return_value=None), \
+                mock.patch.object(eb, "run_process", side_effect=[(None, never, False), (None, ok, False)]) as run:
+            result = self.runner.execute(self.req("logs office.yaml source=local device=10.0.0.5 seconds=30"))
+        self.assertEqual([call.args[0][-2:] for call in run.call_args_list], [["--device", "10.0.0.5"]] * 2)
+        self.assertEqual(device.events, ["reset /dev/ttyUSB0"])
+        self.assertTrue(result.ok)
+        self.assertIn("network failed (WARNING Can't connect to ESPHome API", result.summary)
+        self.assertIn("reset over /dev/ttyUSB0; device back after 0 s; retried: ✅", result.summary)
+        self.assertIn("captured 30s of logs", result.summary)
+        self.assertIn("[I][app]: hello", result.log)
+
+    def test_ota_failure_flashes_the_same_build_over_serial(self):
+        device = Device()
+        refused = "INFO Uploading\nERROR Connecting to 10.0.0.5 port 3232 failed: [Errno 111] Connection refused\n"
+        req = self.req("upload office.yaml source=local device=10.0.0.5")
+        eb.validate(req, self.cfg)
+        with device.patch(), mock.patch.object(eb, "run_process",
+                                               side_effect=[(1, refused, False), (0, "INFO Successfully uploaded program.\n", False)]) as run:
+            result = self.runner.execute(req)
+        office = self.cfg.local_dir / "office.yaml"
+        self.assertEqual([call.args[0] for call in run.call_args_list],
+                         [eb.esphome_argv(self.cfg, "upload", office, "10.0.0.5"),
+                          eb.esphome_argv(self.cfg, "upload", office, "/dev/ttyUSB0")])
+        self.assertEqual(device.events, [])  # flashing, not a reset
+        self.assertTrue(result.ok, result.summary)
+        self.assertIn("network failed (ERROR Connecting to 10.0.0.5 port 3232 failed", result.summary)
+        self.assertIn("flashing the same build over /dev/ttyUSB0 instead (serial flashing follows the `upload` rules)",
+                      result.summary)
+        self.assertIn("serial upload: ✅", result.summary)
+        self.assertIn("upload `office.yaml` → `/dev/ttyUSB0`", result.summary)
+        self.assertIn("=== over the network (10.0.0.5) ===", result.log)
+        self.assertIn("Successfully uploaded", result.log)
+        self.assertTrue(self.runner.is_down("10.0.0.5"))
+
+    def test_only_network_ota_failures_go_to_serial(self):
+        req = self.req("upload office.yaml source=local device=10.0.0.5")
+        with mock.patch.object(eb, "run_process", return_value=(1, "ERROR Error auth result: Invalid password\n", False)) as run:
+            result = self.runner.execute(req)
+        self.assertEqual(run.call_count, 1)
+        self.assertFalse(result.ok)
+        self.assertNotIn("🔌", result.summary)
+        self.cfg.devices = ["10.0.0.5"]  # fallback port no longer allowlisted: no serial flashing
+        refused = "ERROR Connecting to 10.0.0.5 port 3232 failed: [Errno 111] Connection refused\n"
+        with mock.patch.object(eb, "run_process", return_value=(1, refused, False)) as run:
+            result = eb.Runner(self.cfg).execute(req)
+        self.assertEqual(run.call_count, 1)
+        self.assertFalse(result.ok)
+        self.assertIn("exited 1", result.summary)
+
+    def test_serial_upload_follows_the_upload_rules(self):
+        self.cfg.enabled.remove("upload")
+        with self.assertRaises(eb.BridgeError):
+            self.runner.execute(self.req("upload office.yaml source=local device=10.0.0.5"))
+        posted = []
+
+        class FakeHub:
+            def call(self, tool, args, timeout=90):
+                if tool == "post_message":
+                    posted.append(args["text"])
+                return {}
+
+        self.cfg.enabled.append("upload")
+        with mock.patch.object(eb, "run_process") as run:
+            eb.handle_event({"from": "mallory", "from_kind": "human", "channel": "general", "id": "m",
+                             "text": "@esp-bridge upload office.yaml source=local device=10.0.0.5"},
+                            self.cfg, FakeHub(), self.runner)
+        run.assert_not_called()
+        self.assertIn("not allowed", posted[-1])
+
+
+class NetworkHealthTests(unittest.TestCase):
+    def test_down_path_goes_straight_to_serial_and_swaps_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = fallback_config(Path(tmp))
+            runner, clock = fake_runner(cfg)
+            device = Device()
+            req = lambda: eb.parse_request("@esp-bridge catalog", None, "esp-bridge")  # noqa: E731
+            with device.patch():
+                with self.assertRaises(eb.BridgeError):  # network fails, reset, device never comes back
+                    runner.execute(req())
+                self.assertTrue(runner.is_down("10.0.0.5"))
+                self.assertIn("Network to 10.0.0.5: down since", runner.execute(eb.Request(action="status")).summary)
+
+                device.events.clear()
+                clock.now += 10  # within recheck_seconds: no network attempt, straight to serial
+                with self.assertRaises(eb.BridgeError) as caught:
+                    runner.execute(req())
+                self.assertEqual(device.events[0], "reset /dev/ttyUSB0")
+                self.assertNotIn("action", device.events)
+                self.assertIn("went straight to serial", str(caught.exception))
+
+                device.events.clear()
+                clock.now += 31  # a light check is due; still down: one check, then serial
+                with self.assertRaises(eb.BridgeError):
+                    runner.execute(req())
+                self.assertEqual(device.events[:2], ["probe", "reset /dev/ttyUSB0"])
+
+                device.events.clear()
+                device.up = True
+                clock.now += 31  # the network answers again: back to it, and the reply says so
+                result = runner.execute(req())
+            self.assertEqual(device.events, ["probe", "action"])
+            self.assertTrue(result.ok)
+            self.assertRegex(result.summary, r"^🔌 network to 10\.0\.0\.5 is back \(down since \d\d:\d\d:\d\d\); using it again\n")
+            self.assertIn("✅ `catalog` sent to 10.0.0.5", result.summary)
+            self.assertFalse(runner.is_down("10.0.0.5"))
+            self.assertNotIn("down since", runner.execute(eb.Request(action="status")).summary)
+
+    def test_upload_goes_straight_to_serial_while_the_network_is_down(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = fallback_config(Path(tmp))
+            runner, clock = fake_runner(cfg)
+            runner.mark_down("10.0.0.5", "OTA refused")
+            clock.now += 5
+            req = eb.parse_request("@esp-bridge upload office.yaml source=local device=10.0.0.5", None, "esp-bridge")
+            with mock.patch.object(eb, "run_process", return_value=(0, "INFO Successfully uploaded program.\n", False)) as run, \
+                    mock.patch.object(eb, "probe_network") as probe:
+                result = runner.execute(req)
+        probe.assert_not_called()
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][-2:], ["--device", "/dev/ttyUSB0"])
+        self.assertIn("went straight to serial", result.summary)
+        self.assertTrue(result.ok)
+
+    def test_a_working_network_clears_the_flag_without_a_reset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = fallback_config(Path(tmp), enabled=False)  # health is tracked even without the fallback
+            runner, clock = fake_runner(cfg)
+            runner.mark_down("10.0.0.5", "reset by peer")
+            device = Device(up=True)
+            with device.patch():
+                result = runner.execute(eb.parse_request("@esp-bridge close", None, "esp-bridge"))
+        self.assertEqual(device.events, ["action"])  # not due for a check yet; tried the network, it worked
+        self.assertIn("is back", result.summary)
+        self.assertFalse(runner.is_down("10.0.0.5"))
+
+
 if __name__ == "__main__":
     unittest.main()

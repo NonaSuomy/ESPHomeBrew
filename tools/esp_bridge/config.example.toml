@@ -56,6 +56,22 @@ allowed_url_prefixes = [
 # firmware_elf = ["~/code/esphome006/config/.esphome/build/*/.pioenvs/*/firmware.elf"]
 # addr2line = "~/.platformio/packages/toolchain-riscv32-esp/bin/riscv32-esp-elf-addr2line"
 
+# [fallback]
+# When the device's network API fails with a connection-class error (refused,
+# reset by peer, timed out, unreachable), use the USB serial port instead:
+#   * launch/close/catalog/screenshot and `logs` over the network: hard-reset the
+#     device over serial (RTS/DTR, as esptool does), wait for its API to answer,
+#     then retry the job once over the network;
+#   * `upload` over OTA: flash the same build with `esphome upload --device <serial>`.
+# While the network is down, jobs go straight to serial, and the network is
+# checked again at most every recheck_seconds; the bridge goes back to it as
+# soon as it answers. Off unless enabled. The port must also be in
+# [esphome].devices, and it is the default port for `@esp-bridge reset`.
+# serial = "/dev/ttyUSB0"
+# enabled = true
+# wait_seconds = 60                          # how long to wait for the API after a reset
+# recheck_seconds = 30                       # while the network is down, check it at most this often
+
 [console]
 # Print every request the bridge gets (who, which command) and its result in
 # this terminal. Set to false to keep the terminal quiet.
@@ -64,7 +80,7 @@ show_requests = true
 [actions]
 # Start read-only; add "upload", "run", "logs" when you're happy with it.
 enabled = ["status", "config", "compile", "upload", "logs", "run", "launch", "close", "catalog", "screenshot", "readfile",
-           "writefile", "deletefile", "view", "edit"]
+           "writefile", "deletefile", "view", "edit", "reset"]
 # Who may change local YAML with `edit`, or files on the device's SD card with
 # `writefile`/`deletefile` (a subset of allowed_requesters). An edited config can pull in code that
 # runs on this machine when compiled, so list only people and agents you trust with

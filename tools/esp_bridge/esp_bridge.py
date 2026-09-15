@@ -31,10 +31,14 @@ Request format (reply in any channel, mention the bridge):
     @esp-bridge writefile path=/sd/roms/redalert/redalert.ini   # edit_requesters only; the new
                                                                # content is the message's code block
     @esp-bridge launch url=… seconds=30 serial=/dev/ttyUSB0   # also read the serial port
+    @esp-bridge reset serial=/dev/ttyUSB0 seconds=10          # hard reset over serial + boot log
 launch/close/catalog call the papp_loader API actions from esphome/device_control.yaml
 over the ESPHome native API (needs aioesphomeapi, which the ESPHome venv already has).
 With seconds=N they also return N seconds of device log; serial= (a port from
 [esphome].devices) adds the serial console, where a crash's full panic dump goes.
+With [fallback] enabled, a device whose network API fails is reset over serial
+(then the job is retried over the network), and an OTA upload is flashed over
+serial instead.
 Agents may instead send the same fields as message data: {"esp_bridge": {...}}.
 
 Usage:
@@ -70,7 +74,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ACTIONS = ("status", "config", "compile", "upload", "logs", "run", "launch", "close", "catalog", "screenshot",
-           "readfile", "writefile", "deletefile", "view", "edit")
+           "readfile", "writefile", "deletefile", "view", "edit", "reset")
 # Bridge action -> ESPHome API action (esphome/device_control.yaml).
 DEVICE_API_ACTIONS = {"launch": "papp_launch", "close": "papp_close", "catalog": "papp_refresh_catalog",
                       "screenshot": "papp_screenshot", "readfile": "papp_read_file",
@@ -91,9 +95,72 @@ NEEDS_DEVICE = {"upload", "logs", "run"}
 REF_RE = re.compile(r"^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,120}$")
 TAIL_LINES = 40
 
+# Serial fallback ([fallback]): when the device's network path fails, these
+# actions reset the device over serial and are retried once over the network;
+# an OTA `upload` is flashed over serial instead.
+FALLBACK_RESET_ACTIONS = {"launch", "close", "catalog", "screenshot", "logs"}
+RESET_PULSE_SECONDS = 0.1   # EN held low, as esptool's hard reset does
+NETWORK_RETRY_DELAY = 2.0   # one quick network retry of an API action before any reset
+PROBE_TIMEOUT = 5.0         # the light API connect check
+PROBE_INTERVAL = 3.0        # between checks while waiting for the device to come back
+# An OTA upload that failed on the network (not on a wrong password or a bad image).
+OTA_NETWORK_FAILURE = re.compile(
+    r"Connecting to \S+ port \d+ failed|Error connecting to|Connection (?:reset|refused|aborted|timed out)|timed out|"
+    r"No route to host|(?:Host|Network) is unreachable|Broken pipe|Error resolving IP address|Errno (?:32|104|110|111|113)\b",
+    re.I)
+# `esphome logs` over the API keeps reconnecting, so a dead network shows as
+# connection warnings and no "Successfully connected" line.
+LOGS_NETWORK_FAILURE = re.compile(r"Can't connect to ESPHome API|Error connecting to|Connection (?:reset|refused)|"
+                                  r"No route to host|(?:Host|Network) is unreachable", re.I)
+LOGS_CONNECTED = re.compile(r"Successfully connected to")
+# aioesphomeapi errors a reset can't fix (a wrong key or password, another device at that address).
+NOT_NETWORK_ERRORS = ("auth", "encryption", "badname", "badmac")
+
 
 class BridgeError(Exception):
     """A request that is refused or cannot run; the message is shown to the requester."""
+
+    def __init__(self, message: str = "", log: str = ""):
+        super().__init__(message)
+        self.log = log  # attached to the reply (e.g. what a failed fallback saw)
+
+
+class DeviceUnreachable(BridgeError):
+    """The device's network path failed (refused, reset, timed out): the serial fallback may help."""
+
+
+def is_serial_port(name: str | None) -> bool:
+    """A serial port name (/dev/ttyUSB0, COM3), as opposed to a network address."""
+    return bool(name) and (name.startswith("/dev/") or re.fullmatch(r"COM\d+", name, re.I) is not None)
+
+
+def is_network_error(error: BaseException) -> bool:
+    """Connection-class failures (refused, reset, timed out, unreachable) that a reset may get around.
+
+    A wrong API key or password, another device at the address, or a device
+    without the needed action are not: resetting would not change them.
+    """
+    if isinstance(error, BridgeError):
+        return isinstance(error, DeviceUnreachable)
+    names = [cls.__name__.lower() for cls in type(error).__mro__]
+    if any(word in name for name in names for word in NOT_NETWORK_ERRORS):
+        return False
+    return isinstance(error, OSError) or "apiconnectionerror" in names  # TimeoutError is an OSError
+
+
+def network_failure(action: str, log: str, ok: bool) -> str | None:
+    """Why an OTA `upload` or network `logs` run failed on the network, or None if it didn't."""
+    if action == "upload" and not ok:
+        found = OTA_NETWORK_FAILURE.search(log)
+    elif action == "logs" and not LOGS_CONNECTED.search(log):
+        found = LOGS_NETWORK_FAILURE.search(log)
+    else:
+        return None
+    if not found:
+        return None
+    start = log.rfind("\n", 0, found.start()) + 1
+    end = log.find("\n", found.end())
+    return ANSI.sub("", log[start:end if end >= 0 else len(log)]).strip()[:300]
 
 
 # ── configuration ───────────────────────────────────────────────────────────
@@ -142,6 +209,10 @@ class Config:
     firmware_elf: list[str] = field(default_factory=list)  # globs; default: the local/repo build dirs
     addr2line: str | None = None
     edit_requesters: list[str] = field(default_factory=list)  # who may `edit` local YAML (none by default)
+    fallback_serial: str | None = None  # [fallback] serial: default `reset` port, and the fallback's port
+    fallback_enabled: bool = False      # [fallback] enabled: fall back to serial when the network fails
+    fallback_wait: int = 60             # seconds to wait for the device's API after a reset
+    fallback_recheck: int = 30          # while the network is down, check it at most this often
 
     @staticmethod
     def load(path: Path, *, need_token: bool = True) -> "Config":
@@ -194,7 +265,24 @@ class Config:
             "https://github.com/NonaSuomy/papp-conversions/releases/download/",
             "https://nonasuomy.github.io/papp-conversions/",
         ]))
+        fallback = raw.get("fallback", {})
+        cfg.fallback_serial = fallback.get("serial") or None
+        cfg.fallback_enabled = bool(fallback.get("enabled", False))
+        cfg.fallback_wait = int(fallback.get("wait_seconds", 60))
+        cfg.fallback_recheck = int(fallback.get("recheck_seconds", 30))
+        if cfg.fallback_serial and (cfg.fallback_serial not in cfg.devices or not is_serial_port(cfg.fallback_serial)):
+            raise SystemExit(f"[fallback].serial `{cfg.fallback_serial}` must be a serial port that is also listed in "
+                             "[esphome].devices.")
+        if cfg.fallback_enabled and not cfg.fallback_serial:
+            raise SystemExit("[fallback] is enabled but has no `serial` port.")
         return cfg
+
+    def fallback_port(self) -> str | None:
+        """The serial port the automatic fallback may use, or None when it is off."""
+        port = self.fallback_serial
+        if self.fallback_enabled and port and port in self.devices and is_serial_port(port):
+            return port
+        return None
 
 
 # ── requests ────────────────────────────────────────────────────────────────
@@ -317,6 +405,35 @@ def validate_deletefile(req: Request, cfg: Config) -> None:
         raise BridgeError(f"`deletefile` only removes text and leftover files ({', '.join(DELETEFILE_EXTENSIONS)}).")
 
 
+def reset_target(req: Request, cfg: Config) -> tuple[str, str | None]:
+    """`reset`: (the serial port to pulse, the network address to wait for or None).
+
+    `serial=` names the port ([fallback].serial when left out); `device=` is
+    either that port again or the device's network address, whose API the
+    bridge then waits for. The port must be in [esphome].devices; the address
+    too, or be the [device_api] host.
+    """
+    wait_for = None
+    port = req.serial
+    if req.device:
+        if is_serial_port(req.device):
+            if port and port != req.device:
+                raise BridgeError("`reset` got two different serial ports; give one with `serial=`.")
+            port = req.device
+        elif req.device in cfg.devices or req.device == cfg.api_host:
+            wait_for = req.device
+        else:
+            raise BridgeError(f"Device `{req.device}` is not in this bridge's allowlist.")
+    port = port or cfg.fallback_serial
+    if not port:
+        raise BridgeError(f"`reset` needs `serial=` (a serial port from: {', '.join(cfg.devices) or 'none'}).")
+    if port not in cfg.devices:
+        raise BridgeError(f"Serial port `{port}` is not in this bridge's allowlist.")
+    if not is_serial_port(port):
+        raise BridgeError(f"`reset` works through a serial port (/dev/tty…), and `{port}` is a network address.")
+    return port, wait_for
+
+
 def _inside(base: Path, rel: str) -> Path:
     if not rel or rel.startswith(("/", "\\", "~")) or re.match(r"^[A-Za-z]:", rel):
         raise BridgeError("YAML paths must be relative.")
@@ -337,9 +454,12 @@ def validate(req: Request, cfg: Config) -> Path | None:
             raise BridgeError(f"Device `{req.device}` is not in this bridge's allowlist.")
     if (req.action in {"logs", "run"} or req.seconds_given) and not 5 <= req.seconds <= cfg.max_log_seconds:
         raise BridgeError(f"`seconds` must be between 5 and {cfg.max_log_seconds}.")
+    if req.action == "reset":
+        reset_target(req, cfg)
+        return None
     if req.serial is not None:
         if req.action not in ("launch", "close", "readfile") or not req.seconds_given:
-            raise BridgeError("`serial=` goes with `launch`/`close`/`readfile` and `seconds=`.")
+            raise BridgeError("`serial=` goes with `launch`/`close`/`readfile` and `seconds=`, or with `reset`.")
         if req.serial not in cfg.devices:
             raise BridgeError(f"Serial port `{req.serial}` is not in this bridge's allowlist.")
     if req.action in DEVICE_API_ACTIONS:
@@ -545,21 +665,71 @@ def call_device_action(cfg: Config, action: str, data: dict[str, str], timeout: 
             captured.append(f"[esp-bridge] device log ended early: {type(error).__name__}: {error}")
             return "\n".join(captured)
         if isinstance(error, asyncio.TimeoutError):
-            raise BridgeError(f"The device at {cfg.api_host} did not answer within {timeout:.0f}s "
-                              f"(stuck while {stage[0]}).") from error
-        raise BridgeError(f"Device API call failed while {stage[0]}: {type(error).__name__}: {error}") from error
+            raise DeviceUnreachable(f"The device at {cfg.api_host} did not answer within {timeout:.0f}s "
+                                    f"(stuck while {stage[0]}).") from error
+        kind = DeviceUnreachable if is_network_error(error) else BridgeError
+        raise kind(f"Device API call failed while {stage[0]}: {type(error).__name__}: {error}") from error
     return "\n".join(captured)
+
+
+def probe_network(cfg: Config, host: str, timeout: float = PROBE_TIMEOUT) -> str | None:
+    """A light check of the network path to the device: connect to its API, then hang up.
+
+    Returns None when the device answers (a refused login still proves the
+    path works), otherwise why it did not.
+    """
+    import asyncio
+
+    try:
+        from aioesphomeapi import APIClient
+    except ImportError as error:
+        raise BridgeError("aioesphomeapi is missing; run the bridge with the ESPHome venv's python.") from error
+
+    async def go() -> None:
+        address = await asyncio.get_running_loop().run_in_executor(None, resolve_host, host, cfg.api_port)
+        client = APIClient(address, cfg.api_port, None, noise_psk=cfg.api_key, client_info="esp-bridge")
+        await client.connect(login=True)
+        try:
+            await client.disconnect()
+        except Exception:  # noqa: BLE001 - it answered; that is all this checks
+            pass
+
+    try:
+        asyncio.run(asyncio.wait_for(go(), timeout))
+    except Exception as error:  # noqa: BLE001
+        if isinstance(error, asyncio.TimeoutError):
+            return f"no answer from {host}:{cfg.api_port} within {timeout:.0f}s"
+        if is_network_error(error):
+            return f"{type(error).__name__}: {error}"
+    return None
+
+
+def pulse_reset(port, sleep=time.sleep) -> None:
+    """Hard-reset an ESP32 through a USB-serial adapter's control lines, as esptool does.
+
+    The usual auto-program circuit ties RTS to EN and DTR to IO0; an asserted
+    line pulls its pin low. IO0 stays high, so the chip boots its firmware
+    rather than the ROM download mode, while EN is held low for 100 ms.
+    """
+    port.dtr = False        # IO0 high: a normal boot
+    port.rts = True         # EN low: the chip is held in reset
+    port.dtr = port.dtr     # Windows' usbser.sys only applies RTS with a DTR write (esptool does the same)
+    sleep(RESET_PULSE_SECONDS)
+    port.rts = False        # EN high: the chip starts
+    port.dtr = port.dtr
 
 
 class SerialCapture:
     """Read a serial port in the background (the full panic dump only goes there).
 
-    DTR/RTS stay low so opening the port does not reset the board. Needs
-    pyserial, which the ESPHome venv has.
+    DTR/RTS stay low so opening the port does not reset the board. With
+    reset=True the board is then hard-reset (pulse_reset) and its boot log is
+    what gets captured. Needs pyserial, which the ESPHome venv has.
     """
 
-    def __init__(self, port: str, max_bytes: int, baud: int = 115200):
+    def __init__(self, port: str, max_bytes: int, baud: int = 115200, reset: bool = False):
         self.port, self.max_bytes, self.baud = port, max_bytes, baud
+        self.reset, self.reset_done = reset, False
         self.data = bytearray()
         self.error: str | None = None
         self._stop = threading.Event()
@@ -580,6 +750,14 @@ class SerialCapture:
         except Exception as error:  # noqa: BLE001 - busy port, missing device, permissions
             self.error = f"could not open {self.port}: {error}"
             return
+        if self.reset:
+            try:
+                pulse_reset(port)
+                self.reset_done = True
+            except Exception as error:  # noqa: BLE001 - an adapter without modem control lines
+                self.error = f"could not reset through {self.port}: {error}"
+                port.close()
+                return
 
         def reader() -> None:
             try:
@@ -968,6 +1146,37 @@ class JobResult:
     files: list[tuple[str, bytes, str]] = field(default_factory=list)  # (name, content, content type)
 
 
+@dataclass
+class StepsResult:
+    """The outcome of a job's esphome commands."""
+    ok: bool
+    detail: str
+    log: str
+    device: str | None = None          # where they ran (the serial port after a serial upload)
+    network_error: str | None = None   # set when an OTA upload / network logs failed on the network
+
+
+@dataclass
+class NetworkHealth:
+    """The bridge's view of the network path to one device (in memory only)."""
+    down_since: float | None = None  # time.time() of the failure; None while it works
+    reason: str = ""
+    last_check: float = 0.0          # Runner.clock() of the last network attempt or check
+
+
+@dataclass
+class Fallback:
+    """What the serial fallback did during one job, for the reply and the log."""
+    notes: list[str] = field(default_factory=list)
+    log: str = ""
+
+    def line(self) -> str:
+        return "🔌 " + "; ".join(self.notes) if self.notes else ""
+
+    def prefix(self) -> str:
+        return self.line() + "\n" if self.notes else ""
+
+
 def run_process(argv: list[str], cwd: Path, timeout: int, max_bytes: int, stop_after: int | None = None) -> tuple[int | None, str, bool]:
     """Run argv (no shell). Returns (exit code or None on timeout/stop, output, truncated)."""
     proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
@@ -1008,6 +1217,197 @@ class Runner:
     def __init__(self, cfg: Config, dry_run: bool = False):
         self.cfg, self.dry_run = cfg, dry_run
         self.secrets = load_secret_values(cfg.secrets_files)
+        self.health: dict[str, NetworkHealth] = {}  # network address -> state of the path to it
+        self.clock, self.sleep = time.monotonic, time.sleep  # tests replace these
+
+    # ── network health and the serial fallback ──
+
+    def mark_down(self, host: str, reason: str) -> None:
+        health = self.health.setdefault(host, NetworkHealth())
+        if health.down_since is None:
+            health.down_since = time.time()
+        health.reason, health.last_check = reason, self.clock()
+
+    def mark_up(self, host: str, fb: Fallback | None = None) -> None:
+        health = self.health.setdefault(host, NetworkHealth())
+        if health.down_since is not None and fb is not None:
+            fb.notes.append(f"network to {host} is back (down since {self.since(host)}); using it again")
+        health.down_since, health.reason, health.last_check = None, "", self.clock()
+
+    def since(self, host: str) -> str:
+        down = self.health[host].down_since
+        return time.strftime("%H:%M:%S", time.localtime(down)) if down else "now"
+
+    def is_down(self, host: str) -> bool:
+        return self.health.get(host, NetworkHealth()).down_since is not None
+
+    def wait_for_network(self, host: str) -> float | None:
+        """Seconds until the device's API answered, or None if it didn't within [fallback] wait_seconds."""
+        began = self.clock()
+        while True:
+            if probe_network(self.cfg, host) is None:
+                return self.clock() - began
+            if self.clock() - began >= self.cfg.fallback_wait:
+                return None
+            self.sleep(PROBE_INTERVAL)
+
+    def network_or_serial(self, host: str, attempt, serial_route=None, quick_retry: bool = False):
+        """Run `attempt` over the network; if the network path fails, take the serial route.
+
+        Returns (the result, Fallback). `attempt` raises DeviceUnreachable, or
+        returns a StepsResult with network_error set, when the network failed.
+        serial_route(port, fallback) does the job over serial instead (reset,
+        then retry; or a serial upload). Without a usable fallback port the
+        network failure is reported as before. While the path is marked down,
+        jobs go straight to the serial route, and the network is checked again
+        at most every [fallback] recheck_seconds.
+        """
+        fb = Fallback()
+        port = self.cfg.fallback_port() if serial_route else None
+        health = self.health.setdefault(host, NetworkHealth())
+        if health.down_since is not None:
+            if self.clock() - health.last_check >= self.cfg.fallback_recheck:
+                why = probe_network(self.cfg, host)
+                if why is None:
+                    self.mark_up(host, fb)
+                else:
+                    self.mark_down(host, why)
+            if health.down_since is not None and port:
+                fb.notes.append(f"network to {host} down since {self.since(host)} ({health.reason}); went straight to serial")
+                return serial_route(port, fb), fb
+        tries = 2 if quick_retry else 1
+        for attempt_number in range(tries):
+            failed_log = ""
+            try:
+                value = attempt()
+                why = getattr(value, "network_error", None)
+                failed_log = getattr(value, "log", "") if why else ""
+            except DeviceUnreachable as error:
+                value, why, failed_log, failure = None, str(error), error.log, error
+            if why is None:
+                if health.down_since is not None:
+                    self.mark_up(host, fb)
+                return value, fb
+            if attempt_number + 1 < tries:
+                self.sleep(NETWORK_RETRY_DELAY)
+        self.mark_down(host, why)
+        if not port:
+            if value is not None:
+                return value, fb  # the job's own failure report stands
+            raise failure
+        fb.notes.append(f"network failed ({why})" + (" twice" if tries > 1 else ""))
+        if failed_log:
+            fb.log += f"=== over the network ({host}) ===\n{failed_log}\n\n"
+        return serial_route(port, fb), fb
+
+    def fallback_error(self, fb: Fallback) -> BridgeError:
+        return BridgeError(fb.line(), log=mask(fb.log, self.secrets))
+
+    def reset_and_retry(self, port: str, host: str, attempt, fb: Fallback):
+        """Serial route for API actions and network logs: reset, wait for the API, retry once."""
+        capture = SerialCapture(port, self.cfg.max_log_bytes, reset=True)
+        capture.start()
+        if not capture.reset_done:
+            fb.notes.append(f"reset over {port} failed ({capture.error})")
+            raise self.fallback_error(fb)
+        fb.notes.append(f"reset over {port}")
+        try:
+            back = self.wait_for_network(host)
+        finally:
+            fb.log += f"=== serial {port} after the reset ===\n{capture.stop()}\n\n"
+        if back is None:
+            self.mark_down(host, f"no answer {self.cfg.fallback_wait}s after a serial reset")
+            fb.notes.append(f"device not back on the network after {self.cfg.fallback_wait} s; not retried "
+                            "(the serial boot log is attached)")
+            raise self.fallback_error(fb)
+        self.mark_up(host)
+        fb.notes.append(f"device back after {back:.0f} s")
+        try:
+            value = attempt()
+            why = getattr(value, "network_error", None)
+            if why:
+                fb.log += f"=== retry over the network ===\n{value.log}\n\n"
+        except DeviceUnreachable as error:
+            why = str(error)
+            fb.log += error.log
+        except BridgeError as error:
+            fb.notes.append(f"retried: ❌ ({error})")
+            raise self.fallback_error(fb) from error
+        if why:
+            self.mark_down(host, why)
+            fb.notes.append(f"retried: ❌ ({why})")
+            raise self.fallback_error(fb)
+        fb.notes.append("retried: ✅" if getattr(value, "ok", True) else "retried: ❌")
+        return value
+
+    def serial_upload(self, yaml_path: Path, port: str, fb: Fallback) -> StepsResult:
+        """Serial route for an OTA upload: flash the same build with `esphome upload --device <port>`.
+
+        Same rules as `upload` itself: an allowed requester, `upload` enabled,
+        and a port listed in [esphome].devices (Config.fallback_port checks it).
+        """
+        fb.notes.append(f"flashing the same build over {port} instead (serial flashing follows the `upload` rules)")
+        steps = [("upload", esphome_argv(self.cfg, "upload", yaml_path, port), self.cfg.timeouts["upload"], None)]
+        outcome = self.run_steps(steps, yaml_path.parent)
+        outcome.device = port
+        fb.notes.append("serial upload: ✅" if outcome.ok else "serial upload: ❌")
+        return outcome
+
+    def reset_device(self, req: Request, start: float) -> JobResult:
+        """`reset`: pulse EN over the serial port, optionally read the boot log and wait for the network."""
+        port, host = reset_target(req, self.cfg)
+        if self.dry_run:
+            return JobResult(True, f"🔄 The device on `{port}` would be reset (dry run).", "", 0.0)
+        capture = SerialCapture(port, self.cfg.max_log_bytes, reset=True)
+        capture.start()
+        if not capture.reset_done:
+            raise BridgeError(f"Could not reset: {capture.error}.")
+        began = self.clock()
+        back = None
+        try:
+            if host:
+                back = self.wait_for_network(host)
+            if req.seconds_given:
+                self.sleep(max(0.0, req.seconds - (self.clock() - began)))
+        finally:
+            serial_log = capture.stop()
+        fb = Fallback([f"reset over {port} (EN pulsed low, IO0 high: a normal boot)"])
+        if host and back is None:
+            self.mark_down(host, f"no answer {self.cfg.fallback_wait}s after a serial reset")
+            fb.notes.append(f"{host} not back on the network after {self.cfg.fallback_wait} s")
+        elif host:
+            fb.notes.append(f"{host} back on the network after {back:.0f} s")
+            self.mark_up(host, fb)
+        log = mask(f"=== serial {port} ===\n{serial_log}", self.secrets) if req.seconds_given else ""
+        summary = "🔄 " + "; ".join(fb.notes) + "." + (f" Serial boot log for {req.seconds}s attached." if log else "")
+        panic = [line for line in serial_log.splitlines() if PANIC_LINE.search(line)]
+        if panic and log:
+            summary += "\nSerial console:\n```\n" + mask("\n".join(panic[:12]), self.secrets) + "\n```"
+        decoded = decode_crash(self.cfg, log) if log else ""
+        if decoded:
+            log += f"\n\n=== crash decoded ===\n{decoded}"
+        return JobResult(not host or back is not None, summary, log, time.monotonic() - start)
+
+    def run_steps(self, steps: list[tuple[str, list[str], int, int | None]], cwd: Path) -> StepsResult:
+        """Run a job's esphome commands in order; the first failure stops them."""
+        log_parts: list[str] = []
+        ok = True
+        detail = ""
+        for name, argv, timeout, stop_after in steps:
+            log_parts.append(f"$ {' '.join(shlex.quote(a) for a in argv)}\n")
+            if self.dry_run:
+                log_parts.append("(dry run: not executed)\n")
+                continue
+            code, out, truncated = run_process(argv, cwd, timeout, self.cfg.max_log_bytes, stop_after)
+            log_parts.append(out + ("\n[log truncated]\n" if truncated else ""))
+            if name == "logs" and stop_after is not None and code is None:
+                detail = f"captured {stop_after}s of logs"
+                continue
+            if code != 0:
+                ok = False
+                detail = f"`{name}` {'timed out' if code is None else f'exited {code}'}"
+                break
+        return StepsResult(ok, detail, "".join(log_parts))
 
     def _git(self, *args: str) -> str:
         assert self.cfg.repo_path is not None
@@ -1125,16 +1525,27 @@ class Runner:
         if req.action == "status":
             enabled = ", ".join(self.cfg.enabled)
             devices = ", ".join(self.cfg.devices) or "none"
-            return JobResult(True, f"Bridge `{self.cfg.handle}` is up. Actions: {enabled}. Devices: {devices}.", "", 0.0)
+            text = f"Bridge `{self.cfg.handle}` is up. Actions: {enabled}. Devices: {devices}."
+            port = self.cfg.fallback_port()
+            text += f" Serial fallback: {'on, ' + port if port else 'off'}."
+            for host, health in self.health.items():
+                if health.down_since is not None:
+                    text += f" Network to {host}: down since {self.since(host)} ({health.reason})."
+            return JobResult(True, text, "", 0.0)
         base = validate(req, self.cfg)
+        if req.action == "reset":
+            return self.reset_device(req, start)
         if req.action == "screenshot":
             if self.dry_run:
                 return JobResult(True, f"📸 Screenshot would be taken on {self.cfg.api_host} (dry run).", "", 0.0)
-            width, height, raw = capture_screenshot(self.cfg)
+            host = self.cfg.api_host
+            (width, height, raw), fb = self.network_or_serial(
+                host, lambda: capture_screenshot(self.cfg), quick_retry=True,
+                serial_route=lambda port, fb: self.reset_and_retry(port, host, lambda: capture_screenshot(self.cfg), fb))
             png = rgb565_to_png(raw, width, height)
             name = time.strftime("screenshot-%Y%m%d-%H%M%S.png")
-            return JobResult(True, f"📸 Screenshot of the running PAPP ({width}×{height}) from {self.cfg.api_host}.", "",
-                             time.monotonic() - start, [(name, png, "image/png")])
+            return JobResult(True, f"{fb.prefix()}📸 Screenshot of the running PAPP ({width}×{height}) from {host}.",
+                             mask(fb.log, self.secrets), time.monotonic() - start, [(name, png, "image/png")])
         if req.action == "readfile":
             if self.dry_run:
                 return JobResult(True, f"📄 `{req.path}` would be read from {self.cfg.api_host} (dry run).", "", 0.0)
@@ -1172,27 +1583,36 @@ class Runner:
             if req.action == "launch" and req.url and req.url.startswith(PROXIED_PREFIXES) and not self.dry_run:
                 data["url"] = proxy_url(self.cfg, req.url)
                 served = f" (served from this machine as {data['url']})"
-            log = ""
+            log, fb = "", Fallback()
             if not self.dry_run:
-                capture = SerialCapture(req.serial, self.cfg.max_log_bytes) if req.serial else None
-                if capture:
-                    capture.start()
-                try:
-                    log = call_device_action(self.cfg, DEVICE_API_ACTIONS[req.action], data,
-                                             log_seconds=req.seconds if req.seconds_given else 0)
-                finally:
+                def attempt() -> str:
+                    capture = SerialCapture(req.serial, self.cfg.max_log_bytes) if req.serial else None
                     if capture:
-                        serial_log = capture.stop()
-                if capture:
-                    log = f"=== device log (network) ===\n{log}\n\n=== serial {req.serial} ===\n{serial_log}"
+                        capture.start()
+                    try:
+                        device_log = call_device_action(self.cfg, DEVICE_API_ACTIONS[req.action], data,
+                                                        log_seconds=req.seconds if req.seconds_given else 0)
+                    finally:
+                        if capture:
+                            serial_log = capture.stop()
+                    if capture:
+                        device_log = f"=== device log (network) ===\n{device_log}\n\n=== serial {req.serial} ===\n{serial_log}"
+                    return device_log
+
+                host = self.cfg.api_host
+                route = ((lambda port, fb: self.reset_and_retry(port, host, attempt, fb))
+                         if req.action in FALLBACK_RESET_ACTIONS else None)
+                log, fb = self.network_or_serial(host, attempt, route, quick_retry=True)
             what = f"`{req.action}`" + (f" `{req.url.rsplit('/', 1)[-1]}`" if req.url else "")
             logged = f" Device log for {req.seconds}s attached." if req.seconds_given and not self.dry_run else ""
             decoded = decode_crash(self.cfg, log, req.url) if log else ""
             if decoded:
                 log += f"\n\n=== crash decoded ===\n{decoded}"
                 logged += " 💥 The device crashed: the decoded backtrace is at the end of the log."
-            return JobResult(True, f"✅ {what} sent to {self.cfg.api_host}{served}{' (dry run)' if self.dry_run else ''}.{logged}",
-                             log, time.monotonic() - start)
+            if fb.log:
+                log = f"{mask(fb.log, self.secrets)}=== final attempt ===\n{log}"
+            return JobResult(True, f"{fb.prefix()}✅ {what} sent to {self.cfg.api_host}{served}"
+                                   f"{' (dry run)' if self.dry_run else ''}.{logged}", log, time.monotonic() - start)
         assert base is not None and req.yaml is not None
         where = "local config"
         if req.source == "repo":
@@ -1218,28 +1638,28 @@ class Runner:
             steps.append((req.action, esphome_argv(self.cfg, req.action, yaml_path, req.device), timeout, None))
         if req.action in {"logs", "run"}:
             steps.append(("logs", esphome_argv(self.cfg, "logs", yaml_path, req.device), req.seconds + 30, req.seconds))
-        log_parts: list[str] = []
-        ok = True
-        detail = ""
-        for name, argv, timeout, stop_after in steps:
-            log_parts.append(f"$ {' '.join(shlex.quote(a) for a in argv)}\n")
-            if self.dry_run:
-                log_parts.append("(dry run: not executed)\n")
-                continue
-            code, out, truncated = run_process(argv, yaml_path.parent, timeout, self.cfg.max_log_bytes, stop_after)
-            log_parts.append(out + ("\n[log truncated]\n" if truncated else ""))
-            if name == "logs" and stop_after is not None and code is None:
-                detail = f"captured {stop_after}s of logs"
-                continue
-            if code != 0:
-                ok = False
-                detail = f"`{name}` {'timed out' if code is None else f'exited {code}'}"
-                break
-        log = mask("".join(log_parts), self.secrets)
+        fb = Fallback()
+        if self.dry_run or req.action not in ("upload", "logs") or not req.device or is_serial_port(req.device):
+            outcome = self.run_steps(steps, yaml_path.parent)
+        else:
+            # An OTA upload, or logs over the network: the serial fallback applies.
+            def attempt() -> StepsResult:
+                result = self.run_steps(steps, yaml_path.parent)
+                result.network_error = network_failure(req.action, result.log, result.ok)
+                return result
+
+            if req.action == "upload":
+                route = lambda port, fb: self.serial_upload(yaml_path, port, fb)  # noqa: E731
+            else:
+                route = lambda port, fb: self.reset_and_retry(port, req.device, attempt, fb)  # noqa: E731
+            outcome, fb = self.network_or_serial(req.device, attempt, route)
+        log = mask(f"{fb.log}=== final attempt ===\n{outcome.log}" if fb.log else outcome.log, self.secrets)
+        ok, detail = outcome.ok, outcome.detail
         took = time.monotonic() - start
-        verb = f"{req.action} `{req.yaml}`" + (f" → `{req.device}`" if req.device else "")
+        device = outcome.device or req.device
+        verb = f"{req.action} `{req.yaml}`" + (f" → `{device}`" if device else "")
         summary = f"{'✅' if ok else '❌'} {verb} from {where}: {'ok' if ok else 'failed'}" + (f" ({detail})" if detail else "") + f" in {took:.0f}s."
-        return JobResult(ok, summary, log, took)
+        return JobResult(ok, fb.prefix() + summary, log, took)
 
 
 # ── hub (EhGI MCP over streamable HTTP) ─────────────────────────────────────
@@ -1414,7 +1834,7 @@ def handle_event(event: dict, cfg: Config, hub: Hub, runner: Runner) -> None:
     try:
         result = runner.execute(req)
     except BridgeError as error:
-        result = JobResult(False, f"❌ `{req.action}` could not run: {error}", "", 0.0)
+        result = JobResult(False, f"❌ `{req.action}` could not run: {error}", error.log, 0.0)
     except Exception as error:  # noqa: BLE001 - report anything unexpected instead of dying
         result = JobResult(False, f"❌ `{req.action}` crashed: {type(error).__name__}: {error}", "", 0.0)
     finally:
@@ -1498,6 +1918,8 @@ def run_command(args: argparse.Namespace, cfg: Config) -> int:
             result = Runner(cfg, args.dry_run).execute(req)
         except BridgeError as error:
             print(f"refused: {error}", file=sys.stderr)
+            if error.log:
+                print(error.log, file=sys.stderr)
             return 2
         print(result.summary)
         print(result.log)

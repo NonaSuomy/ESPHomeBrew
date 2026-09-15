@@ -1,21 +1,29 @@
 {
   "name": "psram_touchtest",
   "title": "Touch test",
-  "version": "0.1.0",
-  "description": "Draws a colored marker in each corner and a crosshair where you touch, to check touch_read and the canvas orientation.",
+  "version": "0.2.0",
+  "description": "Draws a colored marker in each corner and a crosshair where you touch, to check touch_read and the canvas orientation, on the canvas size chosen with the store's Screen setting.",
   "author": "RetroESP32-P4",
   "category": "Tool",
   "license": "Unspecified (upstream has no licence file)",
-  "about": "Draws a coloured marker in each corner and a crosshair wherever you touch, to check the touch panel's calibration and orientation.",
+  "about": "Draws a coloured marker in each corner and a crosshair wherever you touch, to check the touch panel's calibration and orientation. It uses whatever canvas size the Screen setting picks (the whole 1024x600 panel unless you choose another), so the markers show where that canvas's corners are.",
+  "changelog": "0.2.0: draws at the canvas size from the store's Screen setting (whole panel by default)\n0.1.0: first release",
   "controls": [
     "Touch: draws a crosshair under the finger",
     "X: back to the launcher"
   ],
   "icon": "icon.png",
+  "canvas": {
+    "recommended": "1024x600"
+  },
   "build": "plain",
   "source": {
     "repo": "https://github.com/NonaSuomy/RetroESP32-P4",
     "ref": "5c475e9df46c43463bd85c43f647d513d3b9bfa2",
     "path": "apps/psram_touchtest"
-  }
+  },
+  "patches": [
+    "local:ports/retroesp32/patches/*.patch",
+    "local:ports/touchtest/patches/*.patch"
+  ]
 }

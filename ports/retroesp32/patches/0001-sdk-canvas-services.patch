@@ -1,0 +1,60 @@
+diff --git a/components/psram_app_loader/include/psram_app.h b/components/psram_app_loader/include/psram_app.h
+index e7fe3fb..8a72c6a 100644
+--- a/components/psram_app_loader/include/psram_app.h
++++ b/components/psram_app_loader/include/psram_app.h
+@@ -63,6 +63,13 @@ typedef struct {
+     int values[PAPP_INPUT_MAX];
+ } papp_gamepad_state_t;
+ 
++/* A queued USB keyboard event (input_keyboard_read), as in the ESPHome
++ * papp_loader's psram_app.h. */
++typedef struct {
++    int key;
++    int down;
++} papp_keyboard_event_t;
++
+ /* ── Memory Capability Flags (matches ESP-IDF MALLOC_CAP_*) ─────────── */
+ 
+ #define PAPP_MEM_CAP_SPIRAM   (1 << 10)  /* MALLOC_CAP_SPIRAM */
+@@ -182,6 +189,41 @@ typedef struct {
+      *     if (svc->paddle_read) { int raw = svc->paddle_read(); ... } */
+     int (*paddle_read)(void);
+ 
++    /* ── Services of the ESPHome papp_loader (papp-conversions) ──────── */
++    /* Declared here, in the loader's order, so an app built with this SDK
++     * can reach display_get_size / display_set_canvas. See
++     * esphome/components/papp_loader/psram_app.h in papp-conversions for
++     * what each one does. A launcher that ends its table earlier does not
++     * have them: only the ESPHome papp_loader fills these in. */
++    int (*input_l3_read)(void);
++    int (*input_mouse_read)(int *dx, int *dy, int *buttons);
++    int (*input_keyboard_read)(papp_keyboard_event_t *event);
++
++    int  (*net_udp_open)(uint16_t port, int broadcast);
++    int  (*net_udp_send)(int handle, const void *buf, int len, uint32_t ip, uint16_t port);
++    int  (*net_udp_recv)(int handle, void *buf, int len, uint32_t *ip, uint16_t *port);
++    void (*net_udp_close)(int handle);
++    int  (*net_ipv4)(uint32_t *ip, uint32_t *netmask);
++
++    int  (*net_tcp_connect)(uint32_t ip, uint16_t port);
++    int  (*net_tcp_listen)(uint16_t port);
++    int  (*net_tcp_accept)(int handle, uint32_t *ip, uint16_t *port);
++    int  (*net_tcp_send)(int handle, const void *buf, int len);
++    int  (*net_tcp_recv)(int handle, void *buf, int len);
++    int  (*net_poll)(int handle);
++    int  (*net_resolve)(const char *host, uint32_t *ip);
++
++    /* The canvas: the part of the panel the app draws, 800x480 until the
++     * app switches. display_get_size gives the size to use (the store's
++     * Screen setting, else the listing's recommended size, else the
++     * device's default canvas); display_set_canvas switches to width x
++     * height (even, at least 320x240, at most the panel) and returns 0, or
++     * -1 when it refuses. Afterwards the framebuffer, the flushes,
++     * display_write_frame_custom (centred in the canvas) and touch_read
++     * (canvas coordinates) all use the new size. */
++    void (*display_get_size)(int *width, int *height);
++    int  (*display_set_canvas)(int width, int height);
++
+ } app_services_t;
+ 
+ /* ── Entry Point Signature ───────────────────────────────────────────── */

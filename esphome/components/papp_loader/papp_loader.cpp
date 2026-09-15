@@ -3917,12 +3917,21 @@ long PappLoader::svc_file_tell(void *stream) { return stream != nullptr ? std::f
 // ESPHome's CONFIG_SPIRAM_USE_CAPS_ALLOC makes plain malloc() internal RAM
 // only, so the app's heap services pick the heap themselves: PSRAM, and
 // internal RAM only above memory::INTERNAL_RESERVE.
-static_assert(memory::CAP_DMA == MALLOC_CAP_DMA && memory::CAP_SPIRAM == MALLOC_CAP_SPIRAM &&
-                  memory::CAP_INTERNAL == MALLOC_CAP_INTERNAL && memory::CAP_8BIT == MALLOC_CAP_8BIT,
-              "papp_memory.h caps must be ESP-IDF's MALLOC_CAP_* bits");
-static_assert(PAPP_MEM_CAP_DMA == MALLOC_CAP_DMA && PAPP_MEM_CAP_SPIRAM == MALLOC_CAP_SPIRAM &&
-                  PAPP_MEM_CAP_INTERNAL == MALLOC_CAP_INTERNAL,
-              "psram_app.h PAPP_MEM_CAP_* must be ESP-IDF's MALLOC_CAP_* bits");
+static_assert(PAPP_MEM_CAP_DMA == memory::APP_CAP_DMA && PAPP_MEM_CAP_SPIRAM == memory::APP_CAP_SPIRAM &&
+                  PAPP_MEM_CAP_INTERNAL == memory::APP_CAP_INTERNAL,
+              "papp_memory.h must know psram_app.h's PAPP_MEM_CAP_* bits");
+
+// ESP-IDF heap caps for papp_memory.h's HEAP_* flags.
+static uint32_t idf_heap_caps(uint32_t heap) {
+  uint32_t caps = MALLOC_CAP_8BIT;
+  if (heap & memory::HEAP_SPIRAM)
+    caps |= MALLOC_CAP_SPIRAM;
+  if (heap & memory::HEAP_INTERNAL)
+    caps |= MALLOC_CAP_INTERNAL;
+  if (heap & memory::HEAP_DMA)
+    caps |= MALLOC_CAP_DMA;
+  return caps;
+}
 
 static bool internal_heap_allows(size_t size) {
   return memory::internal_fits(size, heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
@@ -3949,7 +3958,8 @@ static void *app_heap_alloc(const memory::Plan &plan, size_t size, bool zero) {
     const memory::Attempt &attempt = plan.attempts[i];
     if (attempt.guarded && !internal_heap_allows(size))
       continue;
-    void *block = zero ? heap_caps_calloc(1, size, attempt.caps) : heap_caps_malloc(size, attempt.caps);
+    const uint32_t caps = idf_heap_caps(attempt.heap);
+    void *block = zero ? heap_caps_calloc(1, size, caps) : heap_caps_malloc(size, caps);
     if (block != nullptr) {
       if (attempt.guarded)
         app_heap_note(true, size);
@@ -3985,7 +3995,7 @@ void *PappLoader::svc_mem_realloc(void *ptr, size_t size) {
     const memory::Attempt &attempt = plan.attempts[i];
     if (attempt.guarded && !internal_heap_allows(size))
       continue;
-    void *block = heap_caps_realloc(ptr, size, attempt.caps);
+    void *block = heap_caps_realloc(ptr, size, idf_heap_caps(attempt.heap));
     if (block != nullptr) {
       if (attempt.guarded)
         app_heap_note(true, size);

@@ -25,51 +25,52 @@ static int failures = 0;
 static constexpr uint32_t APP_SPIRAM = 1u << 10;
 static constexpr uint32_t APP_INTERNAL = 1u << 11;
 static constexpr uint32_t APP_DMA = 1u << 2;
+static_assert(APP_CAP_SPIRAM == APP_SPIRAM && APP_CAP_INTERNAL == APP_INTERNAL && APP_CAP_DMA == APP_DMA,
+              "the ABI's PAPP_MEM_CAP_* bits");
 
-static bool same(const Attempt &a, uint32_t caps, bool guarded) { return a.caps == caps && a.guarded == guarded; }
+static bool same(const Attempt &a, uint32_t heap, bool guarded) { return a.heap == heap && a.guarded == guarded; }
+
+static bool is_plain(const Plan &plan) {
+  return plan.count == 2 && same(plan.attempts[0], HEAP_SPIRAM, false) && same(plan.attempts[1], HEAP_INTERNAL, true);
+}
 
 // The app's plain heap: PSRAM first, internal RAM only as a guarded second try.
 static void test_plain_plan() {
   const Plan plan = plain_plan();
-  CHECK(plan.count == 2);
-  CHECK(same(plan.attempts[0], CAP_SPIRAM | CAP_8BIT, false));
-  CHECK(same(plan.attempts[1], CAP_INTERNAL | CAP_8BIT, true));
+  CHECK(is_plain(plan));
   // Never an unguarded internal try: that is what starved the drivers.
   for (int i = 0; i < plan.count; i++)
-    CHECK(!((plan.attempts[i].caps & CAP_INTERNAL) != 0 && !plan.attempts[i].guarded));
+    CHECK(!((plan.attempts[i].heap & HEAP_INTERNAL) != 0 && !plan.attempts[i].guarded));
 }
 
-// mem_caps_alloc: named caps as before, no placement caps like mem_alloc.
+// mem_caps_alloc: named heaps as before, no named heap like mem_alloc.
 static void test_caps_plan() {
   Plan plan = caps_plan(APP_SPIRAM);
-  CHECK(plan.count == 1 && same(plan.attempts[0], CAP_SPIRAM | CAP_8BIT, false));
+  CHECK(plan.count == 1 && same(plan.attempts[0], HEAP_SPIRAM, false));
 
   plan = caps_plan(APP_SPIRAM | APP_DMA);  // frame buffers (touchtest, LVGL)
-  CHECK(plan.count == 1 && same(plan.attempts[0], CAP_SPIRAM | CAP_DMA | CAP_8BIT, false));
+  CHECK(plan.count == 1 && same(plan.attempts[0], HEAP_SPIRAM | HEAP_DMA, false));
 
   plan = caps_plan(APP_INTERNAL);  // NetSurf's and Tulip's locks
-  CHECK(plan.count == 1 && same(plan.attempts[0], CAP_INTERNAL | CAP_8BIT, false));
+  CHECK(plan.count == 1 && same(plan.attempts[0], HEAP_INTERNAL, false));
 
   plan = caps_plan(APP_INTERNAL | APP_DMA);  // OpenLara's internal frame
-  CHECK(plan.count == 1 && same(plan.attempts[0], CAP_INTERNAL | CAP_DMA | CAP_8BIT, false));
+  CHECK(plan.count == 1 && same(plan.attempts[0], HEAP_INTERNAL | HEAP_DMA, false));
 
   plan = caps_plan(APP_DMA);
-  CHECK(plan.count == 1 && same(plan.attempts[0], CAP_DMA | CAP_8BIT, false));
+  CHECK(plan.count == 1 && same(plan.attempts[0], HEAP_DMA, false));
 
   // Both heaps at once names none, and still fails as it always did.
   plan = caps_plan(APP_SPIRAM | APP_INTERNAL);
-  CHECK(plan.count == 1 && same(plan.attempts[0], CAP_SPIRAM | CAP_INTERNAL | CAP_8BIT, false));
+  CHECK(plan.count == 1 && same(plan.attempts[0], HEAP_SPIRAM | HEAP_INTERNAL, false));
 
-  // No placement: 0, or only bits the loader does not map (Doom's compat
-  // header passes MALLOC_CAP_8BIT) -> the plain heap.
-  for (uint32_t caps : {0u, CAP_8BIT, 1u << 20}) {
-    plan = caps_plan(caps);
-    CHECK(plan.count == 2 && same(plan.attempts[0], CAP_SPIRAM | CAP_8BIT, false) &&
-          same(plan.attempts[1], CAP_INTERNAL | CAP_8BIT, true));
-  }
-  // Unknown bits are dropped from a named placement.
-  plan = caps_plan(APP_SPIRAM | (1u << 20));
-  CHECK(plan.count == 1 && same(plan.attempts[0], CAP_SPIRAM | CAP_8BIT, false));
+  // No PAPP_MEM_CAP_* bit: 0, or only bits the loader does not map (Doom's
+  // compat header passes its MALLOC_CAP_8BIT, 1 << 13) -> the plain heap.
+  for (uint32_t caps : {0u, 1u << 13, 1u << 3, 1u << 20})
+    CHECK(is_plain(caps_plan(caps)));
+  // Unknown bits are dropped from a named heap.
+  plan = caps_plan(APP_SPIRAM | (1u << 13));
+  CHECK(plan.count == 1 && same(plan.attempts[0], HEAP_SPIRAM, false));
 }
 
 // Internal RAM keeps its reserve.

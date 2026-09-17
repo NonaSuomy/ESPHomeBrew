@@ -411,8 +411,8 @@
       "optional": true
     },
     {
-      "path": "/sd/roms/redalert/counterstrike/EXPAND.MIX",
-      "note": "Needed to show Counterstrike missions",
+      "path": "/sd/roms/redalert/EXPAND.MIX",
+      "note": "Optional Counterstrike expansion data",
       "optional": true
     },
     {
@@ -426,8 +426,18 @@
       "optional": true
     },
     {
-      "path": "/sd/roms/redalert/aftermath/EXPAND2.MIX",
-      "note": "Needed to show Aftermath missions",
+      "path": "/sd/roms/redalert/EXPAND2.MIX",
+      "note": "Optional Aftermath expansion data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/redalert/HIRES1.MIX",
+      "note": "Optional high-resolution expansion data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/redalert/LORES1.MIX",
+      "note": "Optional low-resolution expansion data",
       "optional": true
     }
   ]

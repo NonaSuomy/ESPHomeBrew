@@ -1,13 +1,13 @@
 {
   "name": "psram_redalert",
   "title": "Red Alert",
-  "version": "0.2.1",
-  "description": "Command & Conquer: Red Alert (Vanilla Conquer) as a PAPP, with movies, music, touch, keyboard and mouse, and network multiplayer against PCs running Vanilla Conquer. LAN play works out of the box; for other networks or the internet, set [Network] Protocol=tcp and Host=<the host's IP> in /sd/roms/redalert/redalert.ini (the host needs Protocol=tcp and TCP port 1234 open). Needs your own REDALERT.MIX and MAIN.MIX (from the freeware release or your CDs) in /sd/roms/redalert/.",
+  "version": "0.2.2",
+  "description": "Command & Conquer: Red Alert (Vanilla Conquer) as a PAPP, with movies, music, touch, keyboard and mouse, and network multiplayer against PCs running Vanilla Conquer. LAN play works out of the box; for other networks or the internet, set [Network] Protocol=tcp and Host=<the host's IP> in /sd/roms/redalert/redalert.ini (the host needs Protocol=tcp and TCP port 1234 open). Needs your own REDALERT.MIX and MAIN.MIX (from the freeware release or your CDs) in /sd/roms/redalert/. Optional Allied, Soviet, Counterstrike, and Aftermath data can be kept in their matching subfolders.",
   "author": "Westwood / Electronic Arts; Vanilla Conquer port",
   "category": "Game",
   "license": "GPL-3.0 (Vanilla Conquer)",
-  "about": "Command & Conquer: Red Alert on Vanilla Conquer, with movies, music, touch, USB keyboard and mouse. Plays network games against PCs running Vanilla Conquer, on the LAN or over TCP across networks. Needs REDALERT.MIX and MAIN.MIX from the freeware release or your own discs in /sd/roms/redalert/. The game draws a 640x400 picture, so by default the canvas is exactly that size (no border to copy each frame); the store's Screen setting can switch back to the 800x480 canvas.",
-  "changelog": "0.2.0: 640x400 canvas by default, or 800x480 from the store's Screen setting; touch follows the canvas",
+  "about": "Command & Conquer: Red Alert on Vanilla Conquer, with movies, music, touch, USB keyboard and mouse. Plays network games against PCs running Vanilla Conquer, on the LAN or over TCP across networks. Needs REDALERT.MIX and MAIN.MIX from the freeware release or your own discs in /sd/roms/redalert/. Optional CD data goes in allied/, soviet/, counterstrike/, or aftermath/; Counterstrike uses EXPAND.MIX and Aftermath uses EXPAND2.MIX. The game draws a 640x400 picture, so by default the canvas is exactly that size (no border to copy each frame); the store's Screen setting can switch back to the 800x480 canvas.",
+  "changelog": "0.2.2: SD-card checker now lists base files and optional Allied, Soviet, Counterstrike, and Aftermath data",
   "controls": [
     "Touch: move the cursor; tap = click, drag = select",
     "USB mouse and keyboard: as on a PC",
@@ -380,5 +380,55 @@
     "-lstdc++",
     "-lsupc++"
   ],
-  "newlib": true
+  "newlib": true,
+  "requires": [
+    {
+      "path": "/sd/roms/redalert/REDALERT.MIX",
+      "note": "Required Red Alert base game data"
+    },
+    {
+      "path": "/sd/roms/redalert/MAIN.MIX",
+      "note": "Required Red Alert base game data"
+    },
+    {
+      "path": "/sd/roms/redalert/allied/MAIN.MIX",
+      "note": "Optional Allied CD data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/redalert/soviet/MAIN.MIX",
+      "note": "Optional Soviet CD data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/redalert/counterstrike/",
+      "note": "Optional Counterstrike folder",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/redalert/counterstrike/MAIN.MIX",
+      "note": "Optional Counterstrike game data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/redalert/counterstrike/EXPAND.MIX",
+      "note": "Needed to show Counterstrike missions",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/redalert/aftermath/",
+      "note": "Optional Aftermath folder",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/redalert/aftermath/MAIN.MIX",
+      "note": "Optional Aftermath game data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/redalert/aftermath/EXPAND2.MIX",
+      "note": "Needed to show Aftermath missions",
+      "optional": true
+    }
+  ]
 }

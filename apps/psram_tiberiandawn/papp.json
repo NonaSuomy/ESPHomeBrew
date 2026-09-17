@@ -1,13 +1,13 @@
 {
   "name": "psram_tiberiandawn",
   "title": "Tiberian Dawn",
-  "version": "0.1.1",
-  "description": "Command & Conquer: Tiberian Dawn (Vanilla Conquer) as a PAPP, with movies, music, touch, keyboard and mouse, and network multiplayer against PCs running Vanilla Conquer. Needs your own CONQUER.MIX and GENERAL.MIX in /sd/roms/tiberiandawn/.",
+  "version": "0.1.2",
+  "description": "Command & Conquer: Tiberian Dawn (Vanilla Conquer) as a PAPP, with movies, music, touch, keyboard and mouse, and network multiplayer against PCs running Vanilla Conquer. Needs CONQUER.MIX and CCLOCAL.MIX in /sd/roms/tiberiandawn/, plus GENERAL.MIX in both the gdi/ and nod/ folders. Optional Covert Ops and CD media files are checked in their original folders.",
   "author": "Westwood / Electronic Arts; Vanilla Conquer port",
   "category": "Game",
   "license": "GPL-3.0 (Vanilla Conquer)",
-  "about": "Command & Conquer: Tiberian Dawn on Vanilla Conquer, with movies, music, touch, USB keyboard and mouse. The game draws a native 640x400 picture; the store's Screen setting can switch the surrounding loader canvas to 800x480.",
-  "changelog": "0.1.0: initial ESP32-P4 PAPP port with 640x400 rendering, touch, USB input, audio and SD-card data paths",
+  "about": "Command & Conquer: Tiberian Dawn on Vanilla Conquer, with movies, music, touch, USB keyboard and mouse. Use the original CD layout: CONQUER.MIX, CCLOCAL.MIX, theater files, and optional media at the root, with gdi/, nod/, and covertops/ subfolders. The game draws a native 640x400 picture; the store's Screen setting can switch the surrounding loader canvas to 800x480.",
+  "changelog": "0.1.2: SD-card checker now matches the original gdi, nod, and covertops folder layout",
   "controls": [
     "Touch: move the cursor; tap = click, drag = select",
     "USB mouse and keyboard: as on a PC",
@@ -152,8 +152,56 @@
       "note": "Required Tiberian Dawn game data"
     },
     {
-      "path": "/sd/roms/tiberiandawn/GENERAL.MIX",
-      "note": "Required Tiberian Dawn game data"
+      "path": "/sd/roms/tiberiandawn/CCLOCAL.MIX",
+      "note": "Required Tiberian Dawn interface data"
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/gdi/GENERAL.MIX",
+      "note": "Required GDI game data"
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/nod/GENERAL.MIX",
+      "note": "Required Nod game data"
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/covertops/",
+      "note": "Optional Covert Ops folder",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/covertops/GENERAL.MIX",
+      "note": "Optional Covert Ops game data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/covertops/MOVIES.MIX",
+      "note": "Optional Covert Ops movies",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/covertops/SCORES.MIX",
+      "note": "Optional Covert Ops score data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/gdi/MOVIES.MIX",
+      "note": "Optional GDI movies",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/gdi/SCORES.MIX",
+      "note": "Optional GDI score data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/nod/MOVIES.MIX",
+      "note": "Optional Nod movies",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/nod/SCORES.MIX",
+      "note": "Optional Nod score data",
+      "optional": true
     },
     {
       "path": "/sd/roms/tiberiandawn/TRANSIT.MIX",
@@ -161,13 +209,28 @@
       "optional": true
     },
     {
-      "path": "/sd/roms/tiberiandawn/MOVIES.MIX",
-      "note": "Optional movies",
+      "path": "/sd/roms/tiberiandawn/SPEECH.MIX",
+      "note": "Optional speech data",
       "optional": true
     },
     {
-      "path": "/sd/roms/tiberiandawn/SCORES.MIX",
-      "note": "Optional score data",
+      "path": "/sd/roms/tiberiandawn/SOUNDS.MIX",
+      "note": "Optional sound data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/WINTER.MIX",
+      "note": "Optional winter theater data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/DESERT.MIX",
+      "note": "Optional desert theater data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/TEMPERAT.MIX",
+      "note": "Optional temperate theater data",
       "optional": true
     }
   ]

@@ -1,0 +1,174 @@
+{
+  "name": "psram_tiberiandawn",
+  "title": "Tiberian Dawn",
+  "version": "0.1.0",
+  "description": "Command & Conquer: Tiberian Dawn (Vanilla Conquer) as a PAPP, with movies, music, touch, keyboard and mouse, and network multiplayer against PCs running Vanilla Conquer. Needs your own CONQUER.MIX and GENERAL.MIX in /sd/roms/tiberiandawn/.",
+  "author": "Westwood / Electronic Arts; Vanilla Conquer port",
+  "category": "Game",
+  "license": "GPL-3.0 (Vanilla Conquer)",
+  "about": "Command & Conquer: Tiberian Dawn on Vanilla Conquer, with movies, music, touch, USB keyboard and mouse. The game draws a native 640x400 picture; the store's Screen setting can switch the surrounding loader canvas to 800x480.",
+  "changelog": "0.1.0: initial ESP32-P4 PAPP port with 640x400 rendering, touch, USB input, audio and SD-card data paths",
+  "controls": [
+    "Touch: move the cursor; tap = click, drag = select",
+    "USB mouse and keyboard: as on a PC",
+    "A: left click at the cursor",
+    "B: right click at the cursor",
+    "Up/Down: menus; scroll the sidebar",
+    "Start: Enter (confirm, skip movies)",
+    "Select: Esc (options menu, skip movies)",
+    "Menu + X: quit to launcher"
+  ],
+  "upstream": {
+    "project": "Vanilla Conquer",
+    "version": "ce83b59",
+    "url": "https://github.com/TheAssemblyArmada/Vanilla-Conquer"
+  },
+  "icon": "icon.png",
+  "canvas": {
+    "sizes": [
+      "640x400",
+      "800x480"
+    ],
+    "recommended": "640x400"
+  },
+  "dev_build": true,
+  "build": "custom",
+  "source": {
+    "repo": "https://github.com/NonaSuomy/Vanilla-Conquer",
+    "ref": "vanilla",
+    "path": "tiberiandawn"
+  },
+  "patches": [
+    "local:ports/tiberiandawn/patches/*.patch"
+  ],
+  "linker_script": "local:ports/tiberiandawn/papp_cpp.ld",
+  "includes": [
+    "local:ports/tiberiandawn/net",
+    "common",
+    "tiberiandawn",
+    ".",
+    "local:ports/tiberiandawn",
+    "local:"
+  ],
+  "cflags": [
+    "-std=gnu11",
+    "-Os",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-DPAPP_APP_SIDE=1"
+  ],
+  "cxxflags": [
+    "-std=gnu++11",
+    "-Os",
+    "-fsigned-char",
+    "-fcheck-new",
+    "-fno-lifetime-dse",
+    "-fno-exceptions",
+    "-fno-rtti",
+    "-fno-threadsafe-statics",
+    "-fno-use-cxa-atexit",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-DPAPP_APP_SIDE=1",
+    "-DENGLISH",
+    "-DTRUE_FALSE_DEFINED",
+    "-DNEW_VIDEO_BUILD",
+    "-Wno-write-strings",
+    "-Wno-narrowing",
+    "-Wno-deprecated-declarations",
+    "-Wno-register",
+    "-Wno-attributes",
+    "-D_DEBUG",
+    "-DLOGGING_LEVEL=4",
+    "-DNETWORKING",
+    "-DWINSOCK_IPX"
+  ],
+  "groups": [
+    {
+      "dir": "tiberiandawn",
+      "prefix": "td_",
+      "files": [
+        "*.cpp"
+      ],
+      "exclude": [
+        "dllinterface.cpp",
+        "dllinterfaceeditor.cpp",
+        "sidebarglyphx.cpp"
+      ]
+    },
+    {
+      "dir": "common",
+      "prefix": "c_",
+      "archive": true,
+      "files": [
+        "*.cpp"
+      ],
+      "exclude": [
+        "file_posix.cpp",
+        "file_win.cpp",
+        "paths_posix.cpp",
+        "paths_win.cpp",
+        "video_ddraw.cpp",
+        "video_null.cpp",
+        "video_sdl1.cpp",
+        "video_sdl2.cpp",
+        "soundio.cpp",
+        "soundio_null.cpp",
+        "soundio_openal.cpp",
+        "vqaaudio_dsound.cpp",
+        "vqaaudio_null.cpp",
+        "vqaaudio_openal.cpp",
+        "wwkeyboard_sdl1.cpp",
+        "wwkeyboard_sdl2.cpp",
+        "wwkeyboard_sdl32.cpp",
+        "wwkeyboard_win32.cpp"
+      ]
+    },
+    {
+      "dir": "local:ports/tiberiandawn",
+      "prefix": "papp_",
+      "files": [
+        "papp_main.cpp",
+        "papp_video.cpp",
+        "papp_input.cpp",
+        "papp_paths.cpp",
+        "papp_sound.cpp",
+        "papp_vqaaudio.cpp",
+        "papp_net.cpp",
+        "papp_syscalls.c",
+        "gitinfo.cpp"
+      ]
+    }
+  ],
+  "ldflags": [
+    "-Wl,--wrap=exit",
+    "-lstdc++",
+    "-lsupc++"
+  ],
+  "newlib": true,
+  "requires": [
+    {
+      "path": "/sd/roms/tiberiandawn/CONQUER.MIX",
+      "note": "Required Tiberian Dawn game data"
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/GENERAL.MIX",
+      "note": "Required Tiberian Dawn game data"
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/TRANSIT.MIX",
+      "note": "Optional transition data and movies",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/MOVIES.MIX",
+      "note": "Optional movies",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/SCORES.MIX",
+      "note": "Optional score data",
+      "optional": true
+    }
+  ]
+}

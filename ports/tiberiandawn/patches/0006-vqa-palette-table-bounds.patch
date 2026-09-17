@@ -1,0 +1,18 @@
+diff --git a/common/vqapalette.cpp b/common/vqapalette.cpp
+index 4e4fd1f..93ac99c 100644
+--- a/common/vqapalette.cpp
++++ b/common/vqapalette.cpp
+@@ -49,7 +49,12 @@ void VQA_SetPalette(uint8_t* palette, int numbytes, bool slowpal)
+     if (PalettesRead && InterpolationTable) {
+         void* paletteinterpol = (void*)&InterpolationTable->PaletteInterpolationTable;
+         size_t table_size = sizeof(InterpolationTable->PaletteInterpolationTable);
+-        memcpy(paletteinterpol, InterpolatedPalettes[PaletteCounter++], table_size);
++        // A movie can change palette more often than its .VQP (or the AAGUN.VQP
++        // stand-in) has tables: keep the last table instead of copying from NULL.
++        if (PaletteCounter < 100 && InterpolatedPalettes[PaletteCounter] != nullptr) {
++            memcpy(paletteinterpol, InterpolatedPalettes[PaletteCounter], table_size);
++        }
++        ++PaletteCounter;
+     }
+ 
+     Set_Palette(palette);

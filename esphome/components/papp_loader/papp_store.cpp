@@ -947,7 +947,10 @@ void PappLoader::build_store_grid_() {
 
   lv_obj_t *grid = plain_box(this->catalog_container_);
   lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, 0);
-  lv_obj_set_size(grid, width, rows * (TILE_H + TILE_GAP));
+  // Leave a full gap below the final row. The tiles start half a gap down,
+  // so without this extra space the last row extends past the grid's content
+  // bounds and can be clipped while the list is being scrolled.
+  lv_obj_set_size(grid, width, rows * (TILE_H + TILE_GAP) + TILE_GAP);
 
   this->tile_icons_.resize(count);
   for (size_t i = 0; i < count; i++) {

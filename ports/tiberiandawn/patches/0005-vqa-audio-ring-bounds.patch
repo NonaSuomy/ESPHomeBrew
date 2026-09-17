@@ -1,0 +1,52 @@
+diff --git a/common/vqaloader.cpp b/common/vqaloader.cpp
+index 752619e..0f0aa4a 100644
+--- a/common/vqaloader.cpp
++++ b/common/vqaloader.cpp
+@@ -266,6 +266,11 @@ int VQA_Load_SND0(VQAHandle* handle, unsigned iffsize)
+         return VQAERR_NONE;
+     }
+ 
++    if (size_aligned > (unsigned)config->AudioBufSize) {
++        // Larger than the whole audio ring: skip it rather than overrun the buffer.
++        return handle->StreamHandler(handle, VQACMD_SEEK, (void*)SEEK_CUR, size_aligned) ? VQAERR_SEEK : VQAERR_NONE;
++    }
++
+     if (handle->StreamHandler(handle, VQACMD_READ, audio->Buffer, size_aligned)) {
+         return VQAERR_READ;
+     }
+@@ -322,6 +327,11 @@ int VQA_Load_SND1(VQAHandle* handle, unsigned iffsize)
+         return VQAERR_NONE;
+     }
+ 
++    if ((unsigned)snd1hdr.OutSize > (unsigned)config->AudioBufSize || size_aligned > config->AudioBufSize) {
++        // Larger than the whole audio ring: skip it rather than overrun the buffer.
++        return handle->StreamHandler(handle, VQACMD_SEEK, (void*)SEEK_CUR, size_aligned) ? VQAERR_SEEK : VQAERR_NONE;
++    }
++
+     if (snd1hdr.OutSize == snd1hdr.Size) {
+         if (handle->StreamHandler(handle, VQACMD_READ, audio->Buffer, size_aligned)) {
+             return VQAERR_READ;
+@@ -377,6 +387,11 @@ int VQA_Load_SND2(VQAHandle* handle, unsigned iffsize)
+         return VQAERR_NONE;
+     }
+ 
++    if (decomp_size > (unsigned)config->AudioBufSize || size_aligned > (unsigned)config->AudioBufSize) {
++        // Larger than the whole audio ring: skip it rather than overrun the buffer.
++        return handle->StreamHandler(handle, VQACMD_SEEK, (void*)SEEK_CUR, size_aligned) ? VQAERR_SEEK : VQAERR_NONE;
++    }
++
+     void* buffer = &audio->Buffer[config->AudioBufSize - size_aligned];
+ 
+     if (handle->StreamHandler(handle, VQACMD_READ, buffer, size_aligned)) {
+@@ -1348,8 +1363,9 @@ VQAData* VQA_AllocBuffers(VQAHeader* header, VQAConfig* config)
+             }
+ 
+             if (config->AudioBufSize == -1) {
+-                config->AudioBufSize =
+-                    (audio->BytesPerSecond + (audio->BytesPerSecond / 2)) / config->HMIBufSize * config->HMIBufSize;
++                // 4 s instead of 1.5 s: a movie's first audio chunk goes straight
++                // into this ring and must fit.
++                config->AudioBufSize = (audio->BytesPerSecond * 4) / config->HMIBufSize * config->HMIBufSize;
+             }
+ 
+             if (config->AudioBufSize <= 0) {

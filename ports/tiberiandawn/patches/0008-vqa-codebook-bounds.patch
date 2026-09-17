@@ -1,0 +1,69 @@
+diff --git a/common/vqaloader.cpp b/common/vqaloader.cpp
+index 2615aac..25fb605 100644
+--- a/common/vqaloader.cpp
++++ b/common/vqaloader.cpp
+@@ -106,12 +106,21 @@ int VQA_Load_CBF0(VQAHandle* handle, unsigned iffsize)
+     return VQAERR_NONE;
+ }
+ 
++// Codebook buffers get MaxCBSize of slack: compressed codebook parts are
++// staged near the end and can run past MaxCBSize (see VQA_Load_CBPZ).
++#define VQA_CB_ALLOC(data) (2 * (unsigned)(data)->MaxCBSize)
++
+ int VQA_Load_CBFZ(VQAHandle* handle, unsigned iffsize)
+ {
+     VQALoader* loader = &handle->VQABuf->Loader;
+     VQACBNode* curcb = loader->CurCB;
+     unsigned lcwoffset = handle->VQABuf->MaxCBSize - ((iffsize + 1) & 0xFFFE);
+ 
++    if (((iffsize + 1) & 0xFFFE) > handle->VQABuf->MaxCBSize) {
++        // Bigger than the codebook buffer: skip it rather than write before it.
++        return handle->StreamHandler(handle, VQACMD_SEEK, (void*)SEEK_CUR, (iffsize + 1) & (~1)) ? VQAERR_SEEK : VQAERR_NONE;
++    }
++
+     if (handle->StreamHandler(handle, VQACMD_READ, &loader->CurCB->Buffer[lcwoffset], (iffsize + 1) & (~1))) {
+         return VQAERR_READ;
+     }
+@@ -131,6 +140,11 @@ int VQA_Load_CBP0(VQAHandle* handle, unsigned iffsize)
+     VQALoader* loader = &handle->VQABuf->Loader;
+     VQACBNode* curcb = (VQACBNode*)loader->CurCB;
+ 
++    if (handle->VQABuf->Loader.PartialCBSize + ((iffsize + 1) & (~1)) > VQA_CB_ALLOC(handle->VQABuf)) {
++        // Past the end of the codebook buffer: skip this part.
++        return handle->StreamHandler(handle, VQACMD_SEEK, (void*)SEEK_CUR, (iffsize + 1) & (~1)) ? VQAERR_SEEK : VQAERR_NONE;
++    }
++
+     if (handle->StreamHandler(
+             handle, VQACMD_READ, &loader->CurCB->Buffer[handle->VQABuf->Loader.PartialCBSize], (iffsize + 1) & (~1))) {
+         return VQAERR_READ;
+@@ -162,6 +176,13 @@ int VQA_Load_CBPZ(VQAHandle* handle, unsigned iffsize)
+         curcb->CBOffset = data->MaxCBSize - (handle->Header.Groupsize * padsize + 0x64);
+     }
+ 
++    // The room above was sized from the first part; later parts can be
++    // bigger (PROLOG) and ran past the buffer. The buffer has MaxCBSize of
++    // slack (VQA_CB_ALLOC); a part that still would not fit is skipped.
++    if (curcb->CBOffset + data->Loader.PartialCBSize + padsize > VQA_CB_ALLOC(data)) {
++        return handle->StreamHandler(handle, VQACMD_SEEK, (void*)SEEK_CUR, padsize) ? VQAERR_SEEK : VQAERR_NONE;
++    }
++
+     if (handle->StreamHandler(
+             handle, VQACMD_READ, &curcb->Buffer[curcb->CBOffset] + data->Loader.PartialCBSize, padsize)) {
+         return VQAERR_READ;
+@@ -1270,14 +1291,14 @@ VQAData* VQA_AllocBuffers(VQAHeader* header, VQAConfig* config)
+ 
+     // Make a linked list of nodes.
+     for (int index = 0; index < config->NumCBBufs; ++index) {
+-        cbnode = (VQACBNode*)malloc(data->MaxCBSize + sizeof(VQACBNode));
++        cbnode = (VQACBNode*)malloc(VQA_CB_ALLOC(data) + sizeof(VQACBNode));
+ 
+         if (cbnode == nullptr) {
+             VQA_FreeBuffers(data, config, header);
+             return nullptr;
+         }
+ 
+-        data->MemUsed += data->MaxCBSize + sizeof(VQACBNode);
++        data->MemUsed += VQA_CB_ALLOC(data) + sizeof(VQACBNode);
+         memset(cbnode, 0, sizeof(*cbnode));
+ 
+         // Set buffer to be the allocated memory in excess of the node struct size.

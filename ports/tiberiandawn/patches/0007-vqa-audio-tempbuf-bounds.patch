@@ -1,0 +1,51 @@
+diff --git a/common/vqaloader.cpp b/common/vqaloader.cpp
+index 0f0aa4a..2615aac 100644
+--- a/common/vqaloader.cpp
++++ b/common/vqaloader.cpp
+@@ -257,6 +257,10 @@ int VQA_Load_SND0(VQAHandle* handle, unsigned iffsize)
+     }
+ 
+     if (size_aligned <= audio->TempBufLen || audio->AudBufPos) {
++        if (size_aligned > audio->TempBufLen) {
++            // Would overrun TempBuf: skip this chunk.
++            return handle->StreamHandler(handle, VQACMD_SEEK, (void*)SEEK_CUR, size_aligned) ? VQAERR_SEEK : VQAERR_NONE;
++        }
+         if (handle->StreamHandler(handle, VQACMD_READ, audio->TempBuf, size_aligned)) {
+             return VQAERR_READ;
+         }
+@@ -308,6 +312,10 @@ int VQA_Load_SND1(VQAHandle* handle, unsigned iffsize)
+     size_aligned -= sizeof(snd1hdr);
+ 
+     if ((unsigned)snd1hdr.OutSize <= audio->TempBufLen || audio->AudBufPos > 0) {
++        if ((unsigned)snd1hdr.OutSize > audio->TempBufLen || (unsigned)size_aligned > audio->TempBufLen) {
++            // Would overrun TempBuf: skip this chunk.
++            return handle->StreamHandler(handle, VQACMD_SEEK, (void*)SEEK_CUR, size_aligned) ? VQAERR_SEEK : VQAERR_NONE;
++        }
+         if (snd1hdr.OutSize == snd1hdr.Size) {
+             if (handle->StreamHandler(handle, VQACMD_READ, audio->TempBuf, size_aligned)) {
+                 return VQAERR_READ;
+@@ -373,6 +381,10 @@ int VQA_Load_SND2(VQAHandle* handle, unsigned iffsize)
+     unsigned decomp_size = iffsize * (handle->VQABuf->Audio.BitsPerSample / 4);
+ 
+     if (decomp_size <= handle->VQABuf->Audio.TempBufLen || handle->VQABuf->Audio.AudBufPos != 0) {
++        if (decomp_size > audio->TempBufLen || size_aligned > audio->TempBufLen) {
++            // Would overrun TempBuf (the read lands at TempBufLen - size): skip.
++            return handle->StreamHandler(handle, VQACMD_SEEK, (void*)SEEK_CUR, size_aligned) ? VQAERR_SEEK : VQAERR_NONE;
++        }
+         void* buffer = &audio->TempBuf[handle->VQABuf->Audio.TempBufLen - size_aligned];
+ 
+         if (handle->StreamHandler(handle, VQACMD_READ, buffer, size_aligned)) {
+@@ -1397,8 +1409,11 @@ VQAData* VQA_AllocBuffers(VQAHeader* header, VQAConfig* config)
+ 
+                 data->MemUsed += audio->NumAudBlocks * 2;
+                 memset(audio->IsLoaded, 0, audio->NumAudBlocks * 2);
+-                audio->TempBufLen = 2 * (audio->BytesPerSecond / header->FPS) + 100;
+-                audio->TempBuf = (uint8_t*)malloc(2 * (audio->BytesPerSecond / header->FPS) + 100);
++                // One second, not two frames: later audio chunks are decoded
++                // here without a size check, and some movies (PROLOG) carry
++                // bigger ones, which overran the buffer into the heap.
++                audio->TempBufLen = audio->BytesPerSecond + 100;
++                audio->TempBuf = (uint8_t*)malloc(audio->TempBufLen);
+ 
+                 if (audio->TempBuf == nullptr) {
+                     VQA_FreeBuffers(data, config, header);

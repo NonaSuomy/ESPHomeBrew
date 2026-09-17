@@ -156,6 +156,51 @@
       "note": "Required Tiberian Dawn interface data"
     },
     {
+      "path": "/sd/roms/tiberiandawn/conquer.ini",
+      "note": "Optional Tiberian Dawn settings",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/DESEICNH.MIX",
+      "note": "Optional desert theater speech data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/LOCAL.MIX",
+      "note": "Optional low-resolution interface data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/SC-000.MIX",
+      "note": "Optional Covert Ops mission data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/SC-001.MIX",
+      "note": "Optional Covert Ops mission data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/TEMPICNH.MIX",
+      "note": "Optional temperate theater speech data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/UPDATE.MIX",
+      "note": "Optional update data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/UPDATEC.MIX",
+      "note": "Optional update data",
+      "optional": true
+    },
+    {
+      "path": "/sd/roms/tiberiandawn/WINTICNH.MIX",
+      "note": "Optional winter theater speech data",
+      "optional": true
+    },
+    {
       "path": "/sd/roms/tiberiandawn/gdi/GENERAL.MIX",
       "note": "Required GDI game data"
     },

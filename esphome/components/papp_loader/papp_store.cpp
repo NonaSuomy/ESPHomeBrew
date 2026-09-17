@@ -1087,7 +1087,7 @@ void PappLoader::open_detail_(int index) {
   if (!have.empty()) {
     buttons.emplace_back(ACTION_LAUNCH, LV_SYMBOL_PLAY "  Launch");
     if (remote && info != nullptr && !info->version.empty() && have != info->version)
-      buttons.emplace_back(ACTION_INSTALL, LV_SYMBOL_REFRESH "  Update to v" + info->version);
+      buttons.emplace_back(ACTION_INSTALL, LV_SYMBOL_REFRESH "  Update to\nv" + info->version);
   } else if (remote) {
     buttons.emplace_back(ACTION_STREAM, LV_SYMBOL_PLAY "  Stream");
     if (info != nullptr && info->size > 0 && info->sha256.size() == 64)
@@ -1119,13 +1119,20 @@ void PappLoader::open_detail_(int index) {
     lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(button, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_t *label = text_label(button, buttons[i].second, 0xFFFFFF);
-    if (buttons[i].first == ACTION_SCREEN) {
-      // Its text changes with each press, and takes a second line for
-      // "(Recommended)": wrap it inside the button, centred.
-      lv_obj_set_width(label, DETAIL_ICON - 16);
+    // Keep detail-button labels inside their fixed boxes. The update number
+    // gets its own line; other labels scroll horizontally if a future label
+    // is wider than the button.
+    const int32_t label_width = DETAIL_ICON - 16;
+    const int32_t line_height = lv_font_get_line_height(lv_obj_get_style_text_font(label, LV_PART_MAIN));
+    lv_obj_set_width(label, label_width);
+    if (buttons[i].second.find('\n') != std::string::npos) {
+      lv_obj_set_height(label, line_height * 2);
       lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-      lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    } else {
+      lv_obj_set_height(label, line_height);
+      lv_label_set_long_mode(label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     }
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(label);
     lv_obj_add_event_cb(button, store_button_event_cb_, LV_EVENT_ALL, new DetailButtonContext{this, buttons[i].first});  // NOLINT
     this->detail_buttons_.push_back(button);
@@ -1331,8 +1338,8 @@ std::vector<std::string> PappLoader::screen_options_(int index, std::string *rec
                                 *recommended);
 }
 
-// "Screen 1024x600", "Screen Default", or the recommended size (also what
-// an app with no setting gets) with "(Recommended)" under it.
+// "Screen 1024x600", "Screen Default", or the recommended size marked with
+// an asterisk (also what an app with no setting gets).
 std::string PappLoader::screen_label_(int index) {
   std::string recommended;
   this->screen_options_(index, &recommended);
@@ -1340,7 +1347,7 @@ std::string PappLoader::screen_label_(int index) {
   if (size.empty())
     size = recommended;
   return std::string(LV_SYMBOL_IMAGE "  Screen ") + (size.empty() ? std::string("Default") : size) +
-         (!size.empty() && size == recommended ? "\n(Recommended)" : "");
+         (!size.empty() && size == recommended ? "*" : "");
 }
 
 // One press of Screen: the next size the app can use on this panel. Without a

@@ -114,7 +114,7 @@ papp_loader:
 
 **Per-app Screen setting.** An app whose listing has `"canvas"` ([building.md](building.md#store-listing-optional)) gets a **Screen** button on its detail page. Each press moves to the next choice and saves it: **Default** (`canvas_width`/`canvas_height`), then the panel size, 1024×600, 800×480 and 640×480 (those that fit the panel), or the sizes the listing names. The app gets it the next time it starts.
 
-When the listing recommends a size (`canvas_recommended`) that fits the panel, that size replaces **Default**: the button shows it with "(Recommended)" underneath, an app with no saved setting is offered it instead of `canvas_width`/`canvas_height`, and choosing it again clears the saved setting.
+When the listing recommends a size (`canvas_recommended`) that fits the panel, that size replaces **Default**: the button marks it with an asterisk, an app with no saved setting is offered it instead of `canvas_width`/`canvas_height`, and choosing it again clears the saved setting.
 
 The settings live in `<install_dir>/settings.json` (by default `/sd/roms/papp/settings.json`), by app name — the `.papp` file name without its `-version` suffix, so a streamed and an installed copy share one:
 

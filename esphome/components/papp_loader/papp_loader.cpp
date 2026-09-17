@@ -1907,7 +1907,7 @@ void PappLoader::screen_stream_task_entry_(void *arg) {
 }
 
 void PappLoader::screen_stream_task_() {
-  const int server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+  const int server_fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
   if (server_fd < 0)
     return;
   int reuse = 1;

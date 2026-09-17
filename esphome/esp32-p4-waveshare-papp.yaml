@@ -1,0 +1,768 @@
+# ESP32-P4 Waveshare 7-inch Wi-Fi 6 touch display PAPP launcher.
+#
+# This is a standalone copy of the working PAPP launcher with the Waveshare
+# LCD, GT911, backlight, Wi-Fi-hosted C6, and ESP32-P4 settings applied.
+# The supplied benchmark YAML does not define SD-card or audio hardware, so
+# those sections are retained from the known-good launcher and marked below.
+# This file is a template for the Waveshare unit; it is not a flash target here.
+
+substitutions:
+  device_name: esp32-p4-waveshare-papp
+  friendly_name: "ESP32-P4 Waveshare PAPP Library"
+  # PAPP catalogs: your LAN library and the GitHub store.
+  # Replace with the host serving a LAN PAPP folder, or leave the Network
+  # catalog disabled in papp_loader if this unit should use Store/Storage only.
+  papp_lan_url: "http://papp-server.local:8000/"
+  papp_store_url: "https://nonasuomy.github.io/papp-conversions/"
+
+# Remote launch/close/refresh API actions for the ESP bridge and Home Assistant
+# (papp_launch(url), papp_close, papp_refresh_catalog).
+packages:
+  papp_control:
+    url: https://github.com/NonaSuomy/papp-conversions
+    ref: main
+    files: [esphome/device_control.yaml]
+    refresh: 0s
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  platformio_options:
+    extra_scripts:
+      - pre:/home/nonasuomy/code/esphome006/config/idf61_compat.py
+    build_flags:
+      # ESPHome's ADC component still refers to the pre-IDF-6.1 name.
+      # ESP-IDF 6.1 exposes the equivalent 12 dB setting as ADC_ATTEN_DB_12.
+      - -DADC_ATTEN_DB_11=ADC_ATTEN_DB_12
+      - -DLV_USE_SNAPSHOT=1
+      - -DLV_FONT_MONTSERRAT_28=1
+      - -DLV_FONT_MONTSERRAT_16=1
+      - -Wno-error
+      - -Wno-error=format
+      - -Wno-error=implicit-fallthrough
+      - -Wno-error=missing-field-initializers
+      - -Wno-error=old-style-definition
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          id(papp_runtime)->set_catalog_container(id(papp_list));
+          id(papp_runtime)->select_catalog("Storage");
+          auto files = id(sd_card).list_directory("/", 0);
+          ESP_LOGI("sdcard", "SD boot listing: %u entries", (unsigned) files.size());
+          for (const auto &file : files)
+            ESP_LOGI("sdcard", "  %s", file.c_str());
+
+esp32:
+  variant: esp32p4
+  board: esp32-p4-evboard
+  flash_size: 32MB
+  cpu_frequency: 360MHz
+  engineering_sample: true
+  framework:
+    type: esp-idf
+    # Match the full Waveshare build that previously had working game audio.
+    version: 6.1.0
+    # Reuse the complete local IDF 6.1 checkout without copying its large
+    # submodule tree into PlatformIO's package cache.
+    source: symlink:///home/nonasuomy/.cache/esphome/idf/frameworks/6.1.0
+    # The USB-HID tester that is already working on this board uses the
+    # develop branch; it also has the ESP-IDF 6.1 source-group fix needed for
+    # ESP32-P4's duplicate-named eFuse sources.
+    platform_version: https://github.com/pioarduino/platform-espressif32.git#develop
+    advanced:
+      enable_idf_experimental_features: true
+      disable_vfs_support_dir: false
+      include_builtin_idf_components:
+        - fatfs
+        - wear_levelling
+        - esp_adc
+    sdkconfig_options:
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_ESP32_SPIRAM_SUPPORT: "y"
+      CONFIG_SPIRAM_USE_MALLOC: "y"
+      CONFIG_SPIRAM_SPEED_200M: "y"
+      CONFIG_SPIRAM_SPEED: "200"
+      CONFIG_FATFS_LFN_HEAP: "y"
+      CONFIG_FATFS_LFN_STACK: "y"
+      CONFIG_VFS_SUPPORT_IO: "y"
+      CONFIG_VFS_SUPPORT_DIR: "y"
+      CONFIG_VFS_MAX_COUNT: "16"
+      CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
+      CONFIG_ESP_TIMER_TASK_STACK_SIZE: "4096"
+      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "60"
+      CONFIG_ESP_TASK_LOOP_STACK_SIZE: "16384"
+      CONFIG_LWIP_SOCKET: "y"
+      CONFIG_LWIP_MAX_SOCKETS: "16"
+
+safe_mode:
+  disabled: true
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "P4 Waveshare Fallback"
+    password: ""
+
+captive_portal:
+
+esp32_hosted:
+  variant: ESP32C6
+  reset_pin: GPIO54
+  cmd_pin: GPIO19
+  clk_pin: GPIO18
+  d0_pin: GPIO14
+  d1_pin: GPIO15
+  d2_pin: GPIO16
+  d3_pin: GPIO17
+  active_high: true
+  slot: 1
+
+psram:
+  mode: hex
+  speed: 200MHz
+
+esp_ldo:
+  - channel: 3
+    voltage: 2.5V
+
+# The Waveshare benchmark has no Ethernet block; Wi-Fi is configured above.
+
+external_components:
+  - source:
+      type: local
+      path: /home/nonasuomy/code/esphome006/config/components
+    components: [lvgl, sd_mmc_card, usb_hidx, i2s_audio, ledc, mipi_dsi, sha256]
+  - source:
+      type: git
+      url: https://github.com/NonaSuomy/papp-conversions
+      ref: main
+    components: [define_fixup, usb_msc, usb_midi]
+    refresh: 0s
+  # Keep the app-grid layout fix in the checked-out latest source used here.
+  - source:
+      type: local
+      path: /home/nonasuomy/code/papp-conversions/esphome/components
+    components: [papp_loader]
+
+define_fixup:
+
+sd_mmc_card:
+  id: sd_card
+  clk_pin: GPIO43
+  cmd_pin: GPIO44
+  data0_pin: GPIO39
+  mode_1bit: true
+  slot: 1
+
+usb_host:
+  enable_hubs: true
+
+# A USB stick (FAT32) mounts at /usb0 when plugged in; the loader looks for apps
+# and game data there as well as on the SD card.
+usb_msc:
+  id: usb_storage
+
+# A class-compliant USB-MIDI cable or keyboard (Textech 15ca:0101): its
+# notes show in the log (VERBOSE) and, later, reach apps through the loader.
+usb_midi:
+  id: usb_midi_port
+
+usb_hidx:
+  id: usb_hidx_component
+  hub: true
+  # Keep the generic HID gamepad for ordinary USB controllers, and also
+  # compile the dedicated Nintendo Switch Pro protocol driver.  The latter
+  # is selected by VID:PID (057E:2009) at runtime.
+  drivers:
+    - switch
+  keyboard:
+    layout: us
+  mouse: {}
+  gamepad:
+    device_id: gamepad_main
+    type: generic
+
+i2c:
+  - id: bsp2_bus
+    sda: GPIO07
+    scl: GPIO08
+    frequency: 400kHz
+
+touchscreen:
+  - platform: gt911
+    id: touch_panel
+    i2c_id: bsp2_bus
+    address: 0x5D
+    reset_pin: GPIO23
+    transform:
+      swap_xy: false
+      mirror_x: true
+      mirror_y: true
+    calibration:
+      x_min: 0
+      x_max: 1024
+      y_min: 0
+      y_max: 600
+    update_interval: 8ms
+
+display:
+  - platform: mipi_dsi
+    id: main_display
+    show_test_card: false
+    model: CUSTOM
+    update_interval: never
+    reset_pin:
+      number: GPIO33
+    # Keep the PAPP framebuffer path rotated in software, as in the working
+    # launcher; the Waveshare panel is mounted 180 degrees relative to it.
+    rotation: 180
+    transform: disabled
+    auto_clear_enabled: false
+    hsync_back_porch: 160
+    lane_bit_rate: 1000Mbps
+    color_order: rgb
+    lanes: 2
+    hsync_pulse_width: 70
+    hsync_front_porch: 160
+    vsync_back_porch: 23
+    vsync_pulse_width: 1
+    vsync_front_porch: 12
+    pclk_frequency: 51MHz
+    dimensions:
+      width: 1024
+      height: 600
+    init_sequence:
+      - [0xB2, 0x10]
+      - [0x80, 0x8B]
+      - [0x81, 0x78]
+      - [0x82, 0x84]
+      - [0x83, 0x88]
+      - [0x84, 0xA8]
+      - [0x85, 0xE3]
+      - [0x86, 0x88]
+      - [0x11, 0x00]
+      - delay 120ms
+      - [0x29]
+
+output:
+  - platform: ledc
+    pin: GPIO32
+    id: backlight_pwm
+    frequency: 1000Hz
+    inverted: true
+
+light:
+  - platform: monochromatic
+    output: backlight_pwm
+    name: "Display Backlight"
+    id: display_backlight
+    restore_mode: RESTORE_DEFAULT_ON
+
+# The supplied Waveshare benchmark YAML has no audio codec or amplifier
+# definition. Audio is intentionally omitted here until the target schematic
+# supplies its I2S pins; GPIO23 is already the GT911 reset pin on this board.
+
+text_sensor:
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_keyboard
+    internal: true
+
+binary_sensor:
+  # Held keyboard keys: the PAPP loader maps these to gamepad buttons for apps
+  # (arrows/WASD move, Space/Enter/Z = A, X = B, C = X, V/Tab = Y, Q/E = L/R,
+  # Escape = Menu, Enter = Start, Backspace = Select).
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_up
+    key: 0x52
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_down
+    key: 0x51
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_left
+    key: 0x50
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_right
+    key: 0x4F
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_w
+    key: 0x1A
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_a
+    key: 0x04
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_s
+    key: 0x16
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_d
+    key: 0x07
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_space
+    key: 0x2C
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_enter
+    key: 0x28
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_z
+    key: 0x1D
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_x
+    key: 0x1B
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_c
+    key: 0x06
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_v
+    key: 0x19
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_tab
+    key: 0x2B
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_q
+    key: 0x14
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_e
+    key: 0x08
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_escape
+    key: 0x29
+    internal: true
+  - platform: usb_hidx
+    type: keyboard
+    id: papp_key_backspace
+    key: 0x2A
+    internal: true
+  - platform: usb_hidx
+    type: mouse
+    id: papp_mouse_left
+    left_button: true
+    internal: true
+  - platform: usb_hidx
+    type: mouse
+    id: papp_mouse_right
+    right_button: true
+    internal: true
+  - platform: usb_hidx
+    type: gamepad
+    name: "PAPP D-Pad Up"
+    id: papp_dpad_up
+    internal: true
+    dpad_up: true
+  - platform: usb_hidx
+    type: gamepad
+    name: "PAPP D-Pad Down"
+    id: papp_dpad_down
+    internal: true
+    dpad_down: true
+  - platform: usb_hidx
+    type: gamepad
+    name: "PAPP D-Pad Left"
+    id: papp_dpad_left
+    internal: true
+    dpad_left: true
+  - platform: usb_hidx
+    type: gamepad
+    name: "PAPP D-Pad Right"
+    id: papp_dpad_right
+    internal: true
+    dpad_right: true
+  - platform: usb_hidx
+    type: gamepad
+    name: "PAPP A"
+    id: papp_a
+    internal: true
+    button_a: true
+  - platform: usb_hidx
+    type: gamepad
+    name: "PAPP B"
+    id: papp_b
+    internal: true
+    button_b: true
+  - platform: usb_hidx
+    type: gamepad
+    name: "PAPP X"
+    id: papp_x
+    internal: true
+    button_x: true
+  - platform: usb_hidx
+    type: gamepad
+    name: "PAPP Y"
+    id: papp_y
+    internal: true
+    button_y: true
+  - platform: usb_hidx
+    type: gamepad
+    name: "PAPP L"
+    id: papp_l
+    internal: true
+    button_l: true
+  - platform: usb_hidx
+    type: gamepad
+    name: "PAPP R"
+    id: papp_r
+    internal: true
+    button_r: true
+  - platform: usb_hidx
+    type: gamepad
+    name: "PAPP Select"
+    id: papp_select
+    internal: true
+    button_minus: true
+  - platform: usb_hidx
+    type: gamepad
+    name: "PAPP Start"
+    id: papp_start
+    internal: true
+    button_plus: true
+  - platform: usb_hidx
+    type: gamepad
+    name: "PAPP Right Trigger"
+    id: papp_right_trigger
+    internal: true
+    button_zr: true
+
+sensor:
+  # Keep the axis reports registered so the selected USB driver can expose
+  # analog input to PAPPs without bringing in any of the larger UI pages.
+  - platform: usb_hidx
+    type: gamepad
+    axis: lx
+    name: "PAPP Left Stick X"
+    id: papp_lx
+    internal: true
+  - platform: usb_hidx
+    type: gamepad
+    axis: ly
+    name: "PAPP Left Stick Y"
+    id: papp_ly
+    internal: true
+  - platform: usb_hidx
+    type: gamepad
+    axis: rx
+    name: "PAPP Right Stick X"
+    id: papp_rx
+    internal: true
+  - platform: usb_hidx
+    type: gamepad
+    axis: ry
+    name: "PAPP Right Stick Y"
+    id: papp_ry
+    internal: true
+  - platform: usb_hidx
+    type: mouse
+    x_delta: true
+    name: "PAPP Mouse X"
+    id: papp_mouse_x
+    internal: true
+  - platform: usb_hidx
+    type: mouse
+    y_delta: true
+    name: "PAPP Mouse Y"
+    id: papp_mouse_y
+    internal: true
+
+papp_loader:
+  id: papp_runtime
+  display_id: main_display
+  touchscreen_id: touch_panel
+  lvgl_id: lvgl_component
+  usb_hidx_id: usb_hidx_component
+  usb_midi_id: usb_midi_port
+  path: /sd/roms/papp/doom.papp
+  catalogs:
+    - name: Storage
+      url: /sd/roms/papp/
+      actions:
+        - label: Mount
+          then:
+            - lambda: |-
+                id(sd_card).mount();
+                id(usb_storage).mount();
+                auto files = id(sd_card).list_directory("/", 0);
+                ESP_LOGI("sdcard", "Manual SD listing: %u entries", (unsigned) files.size());
+                id(papp_runtime)->set_catalog_container(id(papp_list));
+                id(papp_runtime)->select_catalog("Storage");
+        - label: Eject storage
+          then:
+            - lambda: |-
+                id(sd_card).unmount();
+                id(usb_storage).unmount();
+                id(papp_runtime)->set_catalog_container(id(papp_list));
+                id(papp_runtime)->select_catalog("Storage");
+    - name: Network
+      url: "${papp_lan_url}"
+    - name: Store
+      url: "${papp_store_url}"
+  default_catalog: Storage
+  library_style: grid
+  autostart: false
+  button_up: papp_dpad_up
+  button_down: papp_dpad_down
+  button_left: papp_dpad_left
+  button_right: papp_dpad_right
+  button_select: papp_select
+  button_start: papp_start
+  button_a: papp_a
+  button_b: papp_b
+  button_x: papp_x
+  button_y: papp_y
+  button_l: papp_l
+  button_r: papp_r
+  fire_button: papp_right_trigger
+  left_stick_x_sensor: papp_lx
+  left_stick_y_sensor: papp_ly
+  right_stick_x_sensor: papp_rx
+  right_stick_y_sensor: papp_ry
+
+logger:
+  level: DEBUG
+  hardware_uart: USB_SERIAL_JTAG
+
+button:
+  - platform: template
+    name: "Remote Launch psram LVGL"
+    id: remote_launch_psram_lvgl
+    on_press:
+      - lambda: id(papp_runtime)->request_launch("/sd/roms/papp/psram_lvgl.papp");
+  - platform: template
+    name: "Remote Launch NES"
+    id: remote_launch_nes
+    on_press:
+      - lambda: id(papp_runtime)->request_launch("/sd/roms/papp/nes.papp");
+  - platform: template
+    name: "Remote Launch Template"
+    id: remote_launch_template
+    on_press:
+      - lambda: id(papp_runtime)->request_launch("/sd/roms/papp/ESP32_P4_PAPP_Template.papp");
+  - platform: template
+    name: "Remote Launch Doom"
+    id: remote_launch_doom
+    on_press:
+      - lambda: id(papp_runtime)->request_launch("/sd/roms/papp/doom.papp");
+  - platform: template
+    name: "Remote Launch Duke3D"
+    id: remote_launch_duke3d
+    on_press:
+      - lambda: id(papp_runtime)->request_launch("/sd/roms/papp/duke3d.papp");
+  - platform: template
+    name: "Remote Launch OpenTyrian"
+    id: remote_launch_opentyrian
+    on_press:
+      - lambda: id(papp_runtime)->request_launch("/sd/roms/papp/opentyrian.papp");
+  - platform: template
+    name: "Remote Launch Quake"
+    id: remote_launch_quake
+    on_press:
+      - lambda: id(papp_runtime)->request_launch("/sd/roms/papp/quake.papp");
+  - platform: template
+    name: "Remote Launch Touchtest"
+    id: remote_launch_touchtest
+    on_press:
+      - lambda: id(papp_runtime)->request_launch("/sd/roms/papp/touchtest.papp");
+  - platform: template
+    name: "Remote Close PAPP"
+    id: remote_close_papp
+    on_press:
+      - lambda: id(papp_runtime)->request_close();
+  - platform: template
+    name: "Remote Enable Screen Stream"
+    id: remote_enable_screen_stream
+    on_press:
+      - lambda: id(papp_runtime)->request_screen_stream();
+
+text:
+  - platform: template
+    name: "Remote PAPP Path or URL"
+    id: remote_papp_path
+    mode: text
+    optimistic: true
+    on_value:
+      - lambda: id(papp_runtime)->request_launch(x);
+
+api:
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+
+script:
+  # The loader has one catalog URL and one list at a time. Each page points it at
+  # its own catalog and list; refresh_catalog() is ignored while a fetch is
+  # already running, so refresh again shortly after to make the current page win.
+  - id: papp_catalog_sync
+    mode: restart
+    then:
+      - lambda: id(papp_runtime)->refresh_catalog();
+      - delay: 4s
+      - lambda: id(papp_runtime)->refresh_catalog();
+
+lvgl:
+  id: lvgl_component
+  # A touch or key must not wake LVGL behind a running PAPP: it would repaint
+  # the launcher over the app (the loader pauses LVGL while an app runs).
+  resume_on_input: false
+  # PAPP already uses the display's software path on this panel because the
+  # MIPI buffer is not PPA-aligned. Keep the same working rotation path and
+  # avoid compiling the external PPA wrapper without its source subdirectory.
+  use_ppa: false
+  # A larger partial buffer gives scrolling enough rendering throughput on the
+  # P4 panel while remaining comfortably inside PSRAM.
+  buffer_size: 0.5
+  # LVGL's default refresh interval is too slow for touch scrolling.
+  update_interval: 16ms
+  color_depth: 16
+  byte_order: little_endian
+  default_font: montserrat_20
+  log_level: WARN
+  pages:
+    - id: papp_page
+      width: 1024
+      height: 600
+      pad_all: 18
+      scrollbar_mode: "OFF"
+      bg_color: 0x08111F
+      on_load:
+        - lambda: |-
+            id(papp_runtime)->select_catalog("Storage");
+            id(papp_runtime)->set_catalog_container(id(papp_list));
+        - script.execute: papp_catalog_sync
+      widgets:
+        - label:
+            text: "LIBRARY"
+            align: TOP_LEFT
+            text_color: 0x55D6FF
+        - label:
+            text: "ESPHOMEBREW"
+            align: TOP_MID
+            text_color: 0x55D6FF
+        - list:
+            id: papp_list
+            x: 0
+            # Nearly the whole page: the store grid gets five columns. The right
+            # edge stays free for the side menu tab (Storage: Mount / Eject SD,
+            # every source: Refresh).
+            y: 42
+            width: 950
+            height: 530
+            bg_color: 0x101F31
+            border_width: 1
+            border_color: 0x2D5875
+            scrollbar_mode: AUTO
+            scroll_momentum: true
+            scroll_elastic: false
+    - id: papp_store_page
+      width: 1024
+      height: 600
+      pad_all: 18
+      scrollbar_mode: "OFF"
+      bg_color: 0x08111F
+      on_load:
+        - lambda: |-
+            id(papp_runtime)->select_catalog("Store");
+            id(papp_runtime)->set_catalog_container(id(papp_store_list));
+        - script.execute: papp_catalog_sync
+      widgets:
+        - label:
+            text: "PAPP STORE"
+            align: TOP_LEFT
+            text_color: 0x55D6FF
+        - label:
+            text: "GITHUB"
+            align: TOP_MID
+            text_color: 0x55D6FF
+        - label:
+            text: "Store: nonasuomy.github.io/papp-conversions"
+            x: 0
+            y: 42
+            text_color: 0xA0B8CC
+        - list:
+            id: papp_store_list
+            x: 0
+            y: 78
+            width: 650
+            height: 450
+            bg_color: 0x101F31
+            border_width: 1
+            border_color: 0x2D5875
+            scrollbar_mode: AUTO
+        - obj:
+            x: 680
+            y: 78
+            width: 300
+            height: 450
+            bg_color: 0x101F31
+            border_width: 1
+            border_color: 0x2D5875
+            pad_all: 18
+            widgets:
+              - label:
+                  text: "GITHUB STORE"
+                  text_color: 0x55D6FF
+              - button:
+                  id: refresh_papp_store
+                  width: 260
+                  height: 54
+                  y: 52
+                  widgets:
+                    - label:
+                        text: "REFRESH STORE"
+                        align: CENTER
+                  on_click:
+                    - script.execute: papp_catalog_sync
+              - button:
+                  id: back_to_papp_library
+                  width: 260
+                  height: 54
+                  y: 120
+                  widgets:
+                    - label:
+                        text: "BACK TO LIBRARY"
+                        align: CENTER
+                  on_click:
+                    - lvgl.page.show: papp_page
+              - label:
+                  text: "Tap a PAPP to stream it
+from GitHub Releases.
+New versions show up
+after REFRESH STORE."
+                  x: 0
+                  y: 200
+                  text_color: 0xA0B8CC

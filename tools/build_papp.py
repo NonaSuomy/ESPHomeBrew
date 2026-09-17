@@ -532,7 +532,9 @@ def canvas_listing(name: str, canvas: object) -> dict:
 # What an app needs on the card, shown with a tick or a cross on its store
 # page: /sd/<path>, a folder ending in '/', or a pattern ('*', '?') in the
 # last part. The loader looks for it under every data root.
-MAX_REQUIRES = 24
+# Keep enough room for detailed CD layouts (including optional expansion files)
+# while retaining a bounded listing size for store metadata.
+MAX_REQUIRES = 32
 REQUIRES_NOTE_LIMIT = 80
 REQUIRES_SEGMENT = re.compile(r"[^/\\:\x00-\x1f\x7f]+")
 

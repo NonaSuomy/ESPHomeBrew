@@ -149,3 +149,11 @@ index 4564962..b5d9a0e 100644
      int changed = now ^ old;
      const int events[16] = { event_joypad1_select,0,0,event_joypad1_start,event_joypad1_up,event_joypad1_right,event_joypad1_down,event_joypad1_left,0,0,0,0,0,event_joypad1_a,event_joypad1_b,0 };
      for (int i = 0; i < 16; ++i) if ((changed & (1 << i)) && events[i]) {
+
+diff --git a/components/nofrendo/nofrendo.c b/components/nofrendo/nofrendo.c
+--- a/components/nofrendo/nofrendo.c
++++ b/components/nofrendo/nofrendo.c
+@@ -267,2 +267,2 @@ int main_loop(const char *filename, system_t type)
+-   console.nextfilename = filename;
++   console.nextfilename = filename ? strdup(filename) : NULL;
+    console.nexttype = type;

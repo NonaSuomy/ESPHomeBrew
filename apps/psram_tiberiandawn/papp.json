@@ -35,7 +35,7 @@
   "build": "custom",
   "source": {
     "repo": "https://github.com/NonaSuomy/Vanilla-Conquer",
-    "ref": "vanilla",
+    "ref": "ce83b59edd99cccac6cebaae054ca04962c744b7",
     "path": "tiberiandawn"
   },
   "patches": [

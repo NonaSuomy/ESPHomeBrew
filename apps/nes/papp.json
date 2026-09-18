@@ -1,13 +1,14 @@
 {
   "name": "nes",
   "title": "NES (nofrendo)",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Nintendo Entertainment System emulator as a PSRAM app. Add .nes ROMs under /sd/roms/nes/ or /usb0/roms/nes/.",
   "author": "nofrendo; P4 PAPP port by NonaSuomy",
   "category": "Emulator",
   "license": "LGPL-2.0",
   "icon": "icon.png",
   "about": "The classic nofrendo 2.0 NES core running as an ESP32-P4 PAPP. The launcher selects a .nes ROM from the configured storage; no ROMs are bundled.",
+  "changelog": "0.1.1 fixes a heap-corruption crash when closing the NES app.",
   "controls": [
     "D-pad: D-pad",
     "A / B: A / B",

@@ -363,7 +363,12 @@ def custom_units(manifest: dict, src_root: Path, build_dir: Path) -> tuple[list[
     per directory, one include list, C and C++ flags, and newlib with its heap
     wrapped through the loader.
     """
-    includes = [f"-I{source_file(src_root, inc)}" for inc in manifest.get("includes", [])]
+    # Custom ports are compiled through this separate flag path, so keep the
+    # current loader ABI header ahead of the pinned upstream SDK header here as
+    # well.  Otherwise callbacks appended by the ESPHome loader (such as ZIP
+    # extraction) are read at the wrong offsets by the PAPP.
+    loader_sdk = ROOT / "esphome" / "components" / "papp_loader"
+    includes = [f"-I{loader_sdk}"] + [f"-I{source_file(src_root, inc)}" for inc in manifest.get("includes", [])]
     base = ARCH_FLAGS + ["-mcmodel=medany"]
     cflags = base + manifest.get("cflags", []) + includes
     cxxflags = base + manifest.get("cxxflags", []) + includes
@@ -639,7 +644,12 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
     linker_script = (source_file(src_root, manifest["linker_script"]) if manifest.get("linker_script")
                      else sdk / "tools/psram_app.ld")
 
-    cflags = CFLAGS + [f"-I{sdk / SDK_INCLUDE}", f"-I{app_dir}"]
+    # Build against the header shipped with this loader.  The upstream SDK
+    # checkout can lag behind the ESPHome loader's append-only service table;
+    # putting the local header first keeps callback offsets (including the ZIP
+    # ROM helper) ABI-compatible with the firmware that runs the PAPP.
+    loader_sdk = ROOT / "esphome" / "components" / "papp_loader"
+    cflags = CFLAGS + [f"-I{loader_sdk}", f"-I{sdk / SDK_INCLUDE}", f"-I{app_dir}"]
     build_dir = cache / "build" / name
     if build_dir.exists():
         shutil.rmtree(build_dir)

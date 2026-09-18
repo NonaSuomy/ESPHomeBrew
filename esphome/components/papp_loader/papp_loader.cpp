@@ -1943,6 +1943,12 @@ void PappLoader::update_rom_selector_ui_() {
   if (this->rom_selector_container_ == nullptr)
     return;
 
+  if (this->rom_selector_favorites_button_ != nullptr) {
+    lv_obj_t *label = lv_obj_get_child(this->rom_selector_favorites_button_, 0);
+    if (label != nullptr)
+      lv_label_set_text(label, this->rom_selector_favorites_only_ ? "ALL GAMES" : "FAVORITES");
+  }
+
   this->rom_selector_buttons_.clear();
   this->rom_selector_paths_.clear();
   lv_obj_clean(this->rom_selector_container_);
@@ -1989,9 +1995,17 @@ void PappLoader::update_rom_selector_ui_() {
     return a < b;
   });
 
+  if (this->rom_selector_favorites_only_) {
+    entries.erase(std::remove_if(entries.begin(), entries.end(), [this](const auto &entry) {
+                    return !this->is_rom_favorite_(entry.second);
+                  }),
+                  entries.end());
+  }
+
   for (const auto &entry : entries) {
     auto *context = new PappRomSelectorButtonContext{this, entry.second};  // NOLINT
-    lv_obj_t *button = lv_list_add_btn(this->rom_selector_container_, nullptr, entry.first.c_str());
+    const std::string label = (this->is_rom_favorite_(entry.second) ? "* " : "  ") + entry.first;
+    lv_obj_t *button = lv_list_add_btn(this->rom_selector_container_, nullptr, label.c_str());
     if (button == nullptr) {
       delete context;
       continue;
@@ -2008,7 +2022,7 @@ void PappLoader::update_rom_selector_ui_() {
   }
 
   if (this->rom_selector_buttons_.empty()) {
-    std::string message = "No compatible games found in /" + relative +
+    std::string message = (this->rom_selector_favorites_only_ ? "No favorite games yet in /" : "No compatible games found in /") + relative +
                           "\nSupported files: " + this->rom_selector_extensions_ +
                           "\n\nChecked /sd and /usb0.";
     lv_list_add_text(this->rom_selector_container_, message.c_str());
@@ -2083,6 +2097,7 @@ bool PappLoader::open_rom_selector_for_app(const std::string &source) {
   this->rom_selector_extensions_ = definition->extensions;
   this->rom_selector_source_ = source;
   this->rom_selector_sidecar_ = std::string("/sd/roms/papp/") + definition->app + ".rom";
+  this->rom_selector_favorites_only_ = false;
 
   if (this->rom_selector_container_ == nullptr) {
     ESP_LOGW(TAG, "ROM selector for %s is not configured in the YAML", definition->app);

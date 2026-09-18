@@ -567,6 +567,101 @@ void PappLoader::toggle_app_favorite_(int index) {
   this->close_detail_();
   this->catalog_ui_pending_ = true;
 }
+
+// ROM favorites share settings.json with app favorites, but live under a
+// reserved object so an app name can never collide with a game path.
+bool PappLoader::is_rom_favorite_(const std::string &path) const {
+  if (path.empty())
+    return false;
+  std::string text;
+  if (read_small_file(this->settings_path_(), &text, SETTINGS_MAX_BYTES) != ESP_OK)
+    return false;
+  bool favorite = false;
+  const std::string app = this->rom_selector_app_;
+  json::parse_json(text, [&app, &path, &favorite](JsonObject root) -> bool {
+    JsonArray list = root["__rom_favorites"][app].as<JsonArray>();
+    for (JsonVariant item : list) {
+      if ((item | "") == path) {
+        favorite = true;
+        break;
+      }
+    }
+    return true;
+  });
+  return favorite;
+}
+
+bool PappLoader::set_rom_favorite_(const std::string &path, bool favorite) {
+  if (path.empty() || path.size() > 240 || this->rom_selector_app_.empty())
+    return false;
+  std::string text;
+  JsonDocument doc;
+  if (read_small_file(this->settings_path_(), &text, SETTINGS_MAX_BYTES) != ESP_OK || deserializeJson(doc, text) ||
+      !doc.is<JsonObject>())
+    doc.to<JsonObject>();
+  JsonObject root = doc.as<JsonObject>();
+  JsonObject all = root["__rom_favorites"].as<JsonObject>();
+  if (all.isNull())
+    all = root["__rom_favorites"].to<JsonObject>();
+  JsonArray list = all[this->rom_selector_app_].as<JsonArray>();
+  if (favorite) {
+    bool present = false;
+    for (JsonVariant item : list) {
+      if ((item | "") == path) {
+        present = true;
+        break;
+      }
+    }
+    if (!present) {
+      if (list.isNull())
+        list = all[this->rom_selector_app_].to<JsonArray>();
+      list.add(path);
+    }
+  } else if (!list.isNull()) {
+    for (size_t i = list.size(); i > 0; i--) {
+      if ((list[i - 1] | "") == path)
+        list.remove(i - 1);
+    }
+    if (list.size() == 0)
+      all.remove(this->rom_selector_app_);
+  }
+  if (all.size() == 0)
+    root.remove("__rom_favorites");
+
+  std::string out;
+  serializeJsonPretty(doc, out);
+  out.push_back('\n');
+  const std::string &dir = this->install_dir_;
+  const size_t cut = dir.find('/', 1);
+  const std::string storage = runtime_path((cut == std::string::npos ? dir : dir.substr(0, cut)).c_str());
+  const std::string target = (cut == std::string::npos ? std::string() : dir.substr(cut + 1) + "/") + "settings.json";
+  bool ok = make_parent_dirs(storage, target);
+  FILE *file = ok ? std::fopen((storage + "/" + target).c_str(), "wb") : nullptr;
+  ok = file != nullptr && std::fwrite(out.data(), 1, out.size(), file) == out.size();
+  if (file != nullptr)
+    ok = std::fclose(file) == 0 && ok;
+  if (!ok)
+    ESP_LOGW(TAG, "Could not write ROM favorites to %s", this->settings_path_().c_str());
+  return ok;
+}
+
+void PappLoader::toggle_rom_favorites() {
+  this->rom_selector_favorites_only_ = !this->rom_selector_favorites_only_;
+  this->update_rom_selector_ui_();
+}
+
+void PappLoader::toggle_selected_rom_favorite() {
+  if (this->rom_selector_selection_ >= this->rom_selector_paths_.size())
+    return;
+  const std::string path = this->rom_selector_paths_[this->rom_selector_selection_];
+  const bool favorite = !this->is_rom_favorite_(path);
+  if (!this->set_rom_favorite_(path, favorite)) {
+    this->set_progress_(false, 0, 0, "%s", "Could not save game favorite - is the card in?");
+    return;
+  }
+  ESP_LOGI(TAG, "%s ROM favorite: %s", favorite ? "Added" : "Removed", path.c_str());
+  this->update_rom_selector_ui_();
+}
 #endif
 
 // The size an app's listing recommends, for display_get_size when it has no

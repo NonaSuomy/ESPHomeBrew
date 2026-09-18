@@ -843,6 +843,7 @@ lvgl:
       on_load:
         - lambda: |-
             id(papp_runtime)->set_rom_selector_container(id(rom_game_list));
+            id(papp_runtime)->set_rom_selector_favorites_button(id(rom_favorites));
             id(papp_runtime)->refresh_rom_selector();
       widgets:
         - label:
@@ -862,6 +863,30 @@ lvgl:
             on_click:
               - lambda: id(papp_runtime)->refresh_rom_selector();
         - button:
+            id: rom_favorites
+            width: 170
+            height: 40
+            x: 255
+            y: 0
+            widgets:
+              - label:
+                  text: "FAVORITES"
+                  align: CENTER
+            on_click:
+              - lambda: id(papp_runtime)->toggle_rom_favorites();
+        - button:
+            id: rom_mark_favorite
+            width: 170
+            height: 40
+            x: 465
+            y: 0
+            widgets:
+              - label:
+                  text: "* GAME"
+                  align: CENTER
+            on_click:
+              - lambda: id(papp_runtime)->toggle_selected_rom_favorite();
+        - button:
             id: back_from_rom_games
             width: 170
             height: 40
@@ -873,7 +898,7 @@ lvgl:
             on_click:
               - lvgl.page.show: papp_page
         - label:
-            text: "Only compatible files from the selected emulator are shown"
+            text: "A launches  * adds/removes a game favorite"
             x: 0
             y: 42
             text_color: 0xA0B8CC

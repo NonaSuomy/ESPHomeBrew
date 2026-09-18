@@ -238,6 +238,9 @@ class PappLoader : public Component {
   bool open_rom_selector_for_app(const std::string &source);
   bool supports_rom_selector(const std::string &source) const;
   void refresh_rom_selector();
+  void set_rom_selector_favorites_button(lv_obj_t *button) { this->rom_selector_favorites_button_ = button; }
+  void toggle_rom_favorites();
+  void toggle_selected_rom_favorite();
   void select_rom(const std::string &path);
   void handle_launcher_controls_();
   void set_catalog_selection_(uint16_t index);
@@ -821,6 +824,7 @@ class PappLoader : public Component {
   std::vector<size_t> visible_catalog_indices_;
   bool favorites_page_active_{false};
   lv_obj_t *rom_selector_container_{nullptr};
+  lv_obj_t *rom_selector_favorites_button_{nullptr};
   std::vector<lv_obj_t *> rom_selector_buttons_;
   std::vector<std::string> rom_selector_paths_;
   std::string rom_selector_app_{"nes"};
@@ -830,6 +834,7 @@ class PappLoader : public Component {
   // needed when the picker was opened from a streamed store entry.
   std::string rom_selector_source_;
   std::string rom_selector_sidecar_{"/sd/roms/papp/nes.rom"};
+  bool rom_selector_favorites_only_{false};
   uint16_t rom_selector_selection_{0};
   uint16_t grid_columns_{1};
   lv_obj_t *detail_panel_{nullptr};
@@ -859,6 +864,8 @@ class PappLoader : public Component {
   bool is_app_favorite_(const std::string &app) const;
   bool set_app_favorite_(const std::string &app, bool favorite);
   void toggle_app_favorite_(int index);
+  bool is_rom_favorite_(const std::string &path) const;
+  bool set_rom_favorite_(const std::string &path, bool favorite);
   void open_detail_(int index);
   void close_detail_();
   void focus_detail_button_(uint8_t index);

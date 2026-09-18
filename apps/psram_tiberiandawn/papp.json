@@ -1,13 +1,13 @@
 {
   "name": "psram_tiberiandawn",
   "title": "Tiberian Dawn",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Command & Conquer: Tiberian Dawn (Vanilla Conquer) as a PAPP, with movies, music, touch, keyboard and mouse, and network multiplayer against PCs running Vanilla Conquer. Needs CONQUER.MIX and CCLOCAL.MIX in /sd/roms/tiberiandawn/, plus GENERAL.MIX in both the gdi/ and nod/ folders. Optional Covert Ops and CD media files are checked in their original folders.",
   "author": "Westwood / Electronic Arts; Vanilla Conquer port",
   "category": "Game",
   "license": "GPL-3.0 (Vanilla Conquer)",
   "about": "Command & Conquer: Tiberian Dawn on Vanilla Conquer, with movies, music, touch, USB keyboard and mouse. Use the original CD layout: CONQUER.MIX, CCLOCAL.MIX, theater files, and optional media at the root, with gdi/, nod/, and covertops/ subfolders. The game draws a native 640x400 picture; the store's Screen setting can switch the surrounding loader canvas to 800x480.",
-  "changelog": "0.1.2: SD-card checker now matches the original gdi, nod, and covertops folder layout",
+  "changelog": "0.1.3: rebuilt after the reproducible source-pin and file-manifest updates\n0.1.2: SD-card checker now matches the original gdi, nod, and covertops folder layout",
   "controls": [
     "Touch: move the cursor; tap = click, drag = select",
     "USB mouse and keyboard: as on a PC",

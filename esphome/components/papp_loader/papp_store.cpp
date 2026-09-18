@@ -55,7 +55,9 @@ enum DetailAction : uint8_t {
   ACTION_STREAM,
   ACTION_INSTALL,
   ACTION_LAUNCH,
+  ACTION_ROM,
   ACTION_SCREEN,
+  ACTION_FAVORITE,
   ACTION_BACK,
   ACTION_UNINSTALL,
 };
@@ -128,7 +130,8 @@ static bool parse_app_info(const std::string &text, PappLoader::AppInfo *info, b
     info->size = root["size"] | 0u;
     info->data_size = root["data_size"] | 0u;
     info->sha256 = root["sha256"] | "";
-    for (JsonVariant line : root["controls"].as<JsonArray>()) {
+    JsonArray controls = root["controls"].as<JsonArray>();
+    for (JsonVariant line : controls) {
       const char *value = line | "";
       if (*value != '\0')
         info->controls.emplace_back(value);
@@ -482,6 +485,90 @@ bool PappLoader::set_app_canvas(const std::string &app, const std::string &size)
   return ok;
 }
 
+bool PappLoader::has_favorites() {
+  std::string text;
+  if (read_small_file(this->settings_path_(), &text, SETTINGS_MAX_BYTES) != ESP_OK)
+    return false;
+  bool found = false;
+  json::parse_json(text, [&found](JsonObject root) -> bool {
+    for (JsonPair pair : root) {
+      if (pair.value()["favorite"] | false) {
+        found = true;
+        break;
+      }
+    }
+    return true;
+  });
+  return found;
+}
+
+#ifdef PAPP_LOADER_USE_LVGL
+bool PappLoader::is_app_favorite_(const std::string &app) const {
+  if (app.empty())
+    return false;
+  std::string text;
+  if (read_small_file(this->settings_path_(), &text, SETTINGS_MAX_BYTES) != ESP_OK)
+    return false;
+  bool favorite = false;
+  json::parse_json(text, [&app, &favorite](JsonObject root) -> bool {
+    favorite = root[app]["favorite"] | false;
+    return true;
+  });
+  return favorite;
+}
+
+bool PappLoader::set_app_favorite_(const std::string &app, bool favorite) {
+  if (app.empty() || app.size() > 96)
+    return false;
+  std::string text;
+  JsonDocument doc;
+  if (read_small_file(this->settings_path_(), &text, SETTINGS_MAX_BYTES) != ESP_OK || deserializeJson(doc, text) ||
+      !doc.is<JsonObject>())
+    doc.to<JsonObject>();
+  JsonObject root = doc.as<JsonObject>();
+  JsonObject entry = root[app].as<JsonObject>();
+  if (favorite) {
+    if (entry.isNull())
+      entry = root[app].to<JsonObject>();
+    entry["favorite"] = true;
+  } else if (!entry.isNull()) {
+    entry.remove("favorite");
+    if (entry.size() == 0)
+      root.remove(app);
+  }
+  std::string out;
+  serializeJsonPretty(doc, out);
+  out.push_back('\n');
+
+  const std::string &dir = this->install_dir_;
+  const size_t cut = dir.find('/', 1);
+  const std::string storage = runtime_path((cut == std::string::npos ? dir : dir.substr(0, cut)).c_str());
+  const std::string target = (cut == std::string::npos ? std::string() : dir.substr(cut + 1) + "/") + "settings.json";
+  bool ok = make_parent_dirs(storage, target);
+  FILE *file = ok ? std::fopen((storage + "/" + target).c_str(), "wb") : nullptr;
+  ok = file != nullptr && std::fwrite(out.data(), 1, out.size(), file) == out.size();
+  if (file != nullptr)
+    ok = std::fclose(file) == 0 && ok;
+  if (!ok)
+    ESP_LOGW(TAG, "Could not write favorites to %s", this->settings_path_().c_str());
+  return ok;
+}
+
+void PappLoader::toggle_app_favorite_(int index) {
+  const std::string app = this->detail_app_key_(index);
+  if (app.empty())
+    return;
+  const bool favorite = !this->is_app_favorite_(app);
+  if (!this->set_app_favorite_(app, favorite)) {
+    this->set_progress_(false, 0, 0, "%s", "Could not save Favorites - is the card in?");
+    return;
+  }
+  ESP_LOGI(TAG, "%s favorite: %s", favorite ? "Added" : "Removed", app.c_str());
+  this->close_detail_();
+  this->catalog_ui_pending_ = true;
+}
+#endif
+
 // The size an app's listing recommends, for display_get_size when it has no
 // Screen setting. Runs on the main loop as the app starts.
 std::string PappLoader::listing_recommended_canvas_(const std::string &source) const {
@@ -726,6 +813,9 @@ void PappLoader::start_install_(int index) {
     return;
   }
   this->install_index_ = index;
+  this->direct_install_ = false;
+  this->direct_file_upload_ = false;
+  this->upload_path_.clear();
   this->install_info_ = info;
   this->install_url_ = this->catalog_entries_[index].second;
   this->install_done_ = false;
@@ -736,20 +826,150 @@ void PappLoader::start_install_(int index) {
   }
 }
 
+void PappLoader::request_install_url(const std::string &url, const std::string &name, uint32_t size,
+                                     const std::string &sha256) {
+  if (!is_network_url(url.c_str())) {
+    ESP_LOGW(TAG, "Ignoring PAPP install with a non-network URL: %s", url.c_str());
+    return;
+  }
+  if (!data::safe_target(name) || name.find('/') != std::string::npos || name == "." || name == ".." || size == 0 ||
+      size > 16 * 1024 * 1024 || sha256.size() != 64) {
+    this->set_progress_(false, 0, 0, "%s", "Invalid PAPP upload details");
+    ESP_LOGW(TAG, "Ignoring invalid PAPP install: name=%s size=%lu sha256=%u", name.c_str(),
+             static_cast<unsigned long>(size), static_cast<unsigned>(sha256.size()));
+    return;
+  }
+  for (const char c : sha256) {
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+      this->set_progress_(false, 0, 0, "%s", "Invalid PAPP SHA-256");
+      return;
+    }
+  }
+  if (this->install_task_handle_ != nullptr || this->launched_ || this->papp_loading_) {
+    this->set_progress_(false, 0, 0, "%s", "Close the running app before saving a PAPP");
+    ESP_LOGW(TAG, "Ignoring PAPP install while the loader is busy: %s", name.c_str());
+    return;
+  }
+
+  AppInfo info;
+  info.name = name;
+  info.title = name;
+  info.size = size;
+  info.sha256 = sha256;
+  // Give a command-line upload the same installed badge and basic detail
+  // metadata as a catalog install. The name is restricted to safe filename
+  // characters above, so it needs no additional JSON escaping here.
+  info.sidecar = "{\"name\":\"" + name + "\",\"title\":\"" + name +
+                 "\",\"version\":\"local\",\"size\":" + std::to_string(size) +
+                 ",\"sha256\":\"" + sha256 + "\"}\n";
+  info.has_info = true;
+  this->install_index_ = -1;
+  this->direct_install_ = true;
+  this->direct_file_upload_ = false;
+  this->upload_path_.clear();
+  this->install_info_ = std::move(info);
+  this->install_url_ = url;
+  this->install_done_ = false;
+  if (xTaskCreatePinnedToCore(&PappLoader::papp_install_task_entry_, "papp_upload", 12288, this, 4,
+                              &this->install_task_handle_, 0) != pdPASS) {
+    this->install_task_handle_ = nullptr;
+    this->direct_install_ = false;
+    this->set_progress_(false, 0, 0, "%s", "Could not start the PAPP upload");
+    return;
+  }
+  ESP_LOGI(TAG, "PAPP save requested: %s -> %s/%s.papp", url.c_str(), this->install_dir_.c_str(), name.c_str());
+}
+
+void PappLoader::request_upload_url(const std::string &url, const std::string &path, uint32_t size,
+                                    const std::string &sha256) {
+  const bool safe_path = path.rfind("/sd/", 0) == 0 && data::safe_target(path.substr(4));
+  if (!is_network_url(url.c_str()) || !safe_path || size == 0 ||
+      size > 1024U * 1024U * 1024U || !data::is_sha256_hex(sha256)) {
+    this->set_progress_(false, 0, 0, "%s", "Invalid SD upload details");
+    ESP_LOGW(TAG, "Ignoring invalid SD upload: path=%s size=%lu sha256=%u", path.c_str(),
+             static_cast<unsigned long>(size), static_cast<unsigned>(sha256.size()));
+    return;
+  }
+  if (path.size() >= sizeof(this->file_request_path_)) {
+    this->set_progress_(false, 0, 0, "%s", "SD upload path is too long");
+    ESP_LOGW(TAG, "Ignoring SD upload with a path that is too long: %s", path.c_str());
+    return;
+  }
+  if (this->install_task_handle_ != nullptr || this->launched_ || this->papp_loading_) {
+    this->set_progress_(false, 0, 0, "%s", "Close the running app before uploading");
+    ESP_LOGW(TAG, "Ignoring SD upload while the loader is busy: %s", path.c_str());
+    return;
+  }
+
+  this->install_index_ = -1;
+  this->direct_install_ = true;
+  this->direct_file_upload_ = true;
+  this->upload_path_ = path;
+  this->install_info_ = AppInfo{};
+  this->install_info_.name = path.substr(path.find_last_of('/') + 1);
+  this->install_info_.title = this->install_info_.name;
+  this->install_info_.size = size;
+  this->install_info_.sha256 = sha256;
+  this->install_url_ = url;
+  this->install_done_ = false;
+  if (xTaskCreatePinnedToCore(&PappLoader::papp_install_task_entry_, "papp_file_upload", 12288, this, 4,
+                              &this->install_task_handle_, 0) != pdPASS) {
+    this->install_task_handle_ = nullptr;
+    this->direct_install_ = false;
+    this->direct_file_upload_ = false;
+    this->upload_path_.clear();
+    this->set_progress_(false, 0, 0, "%s", "Could not start the SD upload");
+    return;
+  }
+  ESP_LOGI(TAG, "SD upload requested: %s -> %s", url.c_str(), path.c_str());
+}
+
 void PappLoader::papp_install_task_entry_(void *arg) {
   auto *self = static_cast<PappLoader *>(arg);
   const AppInfo &info = self->install_info_;
   const std::string &url = self->install_url_;
   esp_err_t err = ESP_OK;
-  // install_dir is a storage root and a folder on it: /sd/roms/papp -> /sd + roms/papp.
-  const std::string &dir = self->install_dir_;
-  const size_t cut = dir.find('/', 1);
-  const std::string root = runtime_path((cut == std::string::npos ? dir : dir.substr(0, cut)).c_str());
-  const std::string folder = cut == std::string::npos ? std::string() : dir.substr(cut + 1) + "/";
-  const std::string target = folder + info.name + ".papp";
+  std::string root;
+  std::string target;
+  if (self->direct_file_upload_) {
+    // The request was validated as /sd/<safe relative path>; split it into
+    // the mounted storage root and a relative target for the shared downloader.
+    const size_t cut = self->upload_path_.find('/', 1);
+    root = runtime_path(self->upload_path_.substr(0, cut).c_str());
+    target = self->upload_path_.substr(cut + 1);
+  } else {
+    // install_dir is a storage root and a folder on it: /sd/roms/papp -> /sd + roms/papp.
+    const std::string &dir = self->install_dir_;
+    const size_t cut = dir.find('/', 1);
+    root = runtime_path((cut == std::string::npos ? dir : dir.substr(0, cut)).c_str());
+    const std::string folder = cut == std::string::npos ? std::string() : dir.substr(cut + 1) + "/";
+    target = folder + info.name + ".papp";
+  }
+  const std::string path = root + "/" + target;
+  const std::string backup = path + ".upload.bak";
+  bool backed_up = false;
   if (!make_parent_dirs(root, target)) {
-    self->set_progress_(false, 0, 0, "Cannot write to %.40s - is the card in?", self->install_dir_.c_str());
+    self->set_progress_(false, 0, 0, "Cannot write to %.40s - is the card in?",
+                        self->direct_file_upload_ ? self->upload_path_.c_str() : self->install_dir_.c_str());
     err = ESP_ERR_NOT_FOUND;
+  }
+  if (err == ESP_OK) {
+    struct stat existing{};
+    if (stat(path.c_str(), &existing) == 0) {
+      if (!S_ISREG(existing.st_mode)) {
+        self->set_progress_(false, 0, 0, "%s", "Install target is not a regular file");
+        err = ESP_ERR_INVALID_ARG;
+      } else {
+        std::remove(backup.c_str());
+        if (std::rename(path.c_str(), backup.c_str()) != 0) {
+          ESP_LOGE(TAG, "Cannot stage existing install target %s (errno %d)", path.c_str(), errno);
+          self->set_progress_(false, 0, 0, "%s", "Could not replace the existing file");
+          err = ESP_FAIL;
+        } else {
+          backed_up = true;
+        }
+      }
+    }
   }
   if (err == ESP_OK) {
     data::DataFile file;
@@ -759,19 +979,40 @@ void PappLoader::papp_install_task_entry_(void *arg) {
     file.url = url;
     err = self->download_data_file_(file, root + "/" + target, 0, info.size, 1, 1);
     if (err != ESP_OK)
-      self->set_progress_(false, 0, 0, "Install failed: %s", esp_err_to_name(err));
+      self->set_progress_(false, 0, 0, "%s failed: %s", self->direct_file_upload_ ? "Upload" : "Install",
+                          esp_err_to_name(err));
   }
-  if (err == ESP_OK && is_network_url(url.c_str()))
-    err = self->sync_app_data_(url, info.name);  // reports its own progress and errors
-  if (err == ESP_OK) {
-    // The listing next to the installed copy marks it installed (and at which version).
-    const std::string listing = root + "/" + folder + info.name + ".json";
-    FILE *out = std::fopen(listing.c_str(), "wb");
-    if (out != nullptr) {
-      std::fwrite(info.sidecar.data(), 1, info.sidecar.size(), out);
-      std::fclose(out);
+  if (self->direct_file_upload_) {
+    if (err == ESP_OK) {
+      if (backed_up)
+        std::remove(backup.c_str());
+      self->set_progress_(false, 0, 0, "Uploaded %.60s", self->upload_path_.c_str());
+    } else if (backed_up) {
+      std::remove(path.c_str());
+      if (std::rename(backup.c_str(), path.c_str()) != 0)
+        ESP_LOGE(TAG, "Could not restore previous upload target %s (errno %d)", path.c_str(), errno);
     }
-    self->set_progress_(false, 0, 0, "Installed %.60s", info.title.empty() ? info.name.c_str() : info.title.c_str());
+  } else if (err != ESP_OK && backed_up) {
+    std::remove(path.c_str());
+    if (std::rename(backup.c_str(), path.c_str()) != 0)
+      ESP_LOGE(TAG, "Could not restore previous install target %s (errno %d)", path.c_str(), errno);
+  } else if (err == ESP_OK && backed_up) {
+    std::remove(backup.c_str());
+  }
+  if (err == ESP_OK && is_network_url(url.c_str()) && !self->direct_install_)
+    err = self->sync_app_data_(url, info.name);  // reports its own progress and errors
+  if (err == ESP_OK && !self->direct_file_upload_) {
+    // The listing next to the installed copy marks it installed (and at which version).
+    const std::string listing = path.substr(0, path.size() - 5) + ".json";
+    if (!info.sidecar.empty()) {
+      FILE *out = std::fopen(listing.c_str(), "wb");
+      if (out != nullptr) {
+        std::fwrite(info.sidecar.data(), 1, info.sidecar.size(), out);
+        std::fclose(out);
+      }
+    }
+    self->set_progress_(false, 0, 0, "%s %.60s", self->direct_install_ ? "Saved" : "Installed",
+                        info.title.empty() ? info.name.c_str() : info.title.c_str());
   }
   self->install_installed_ = scan_installed_(self->install_dir_);
   self->install_result_ = err;
@@ -785,6 +1026,8 @@ void PappLoader::poll_install_() {
     return;
   vTaskDelete(this->install_task_handle_);
   this->install_task_handle_ = nullptr;
+  this->direct_file_upload_ = false;
+  this->upload_path_.clear();
   ESP_LOGI(TAG, "Install finished: %s", esp_err_to_name(this->install_result_));
   this->installed_ = std::move(this->install_installed_);
 #ifdef PAPP_LOADER_USE_LVGL
@@ -821,6 +1064,15 @@ void PappLoader::free_icons_() {
   for (auto &icon : this->tile_icons_)
     release_icon_(&icon);
   this->tile_icons_.clear();
+}
+
+size_t PappLoader::store_source_index_(int visible_index) const {
+  if (visible_index < 0)
+    return static_cast<size_t>(-1);
+  const size_t visible = static_cast<size_t>(visible_index);
+  if (visible >= this->visible_catalog_indices_.size())
+    return static_cast<size_t>(-1);
+  return this->visible_catalog_indices_[visible];
 }
 
 // ── Grid ────────────────────────────────────────────────────────────────────
@@ -886,6 +1138,15 @@ static void one_line(lv_obj_t *label, int32_t width) {
   lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
 }
 
+// Store app names are often longer than a tile or detail heading. Keep the
+// heading on one line and let LVGL continuously scroll it instead of cutting
+// off the identifying part of the title.
+static void scrolling_line(lv_obj_t *label, int32_t width) {
+  lv_obj_set_width(label, width);
+  lv_obj_set_height(label, lv_font_get_line_height(lv_obj_get_style_text_font(label, LV_PART_MAIN)));
+  lv_label_set_long_mode(label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+}
+
 // A coloured square with the app's initials, for apps without an icon.
 static void letter_tile(lv_obj_t *box, const std::string &title) {
   uint32_t hash = 2166136261u;
@@ -932,7 +1193,7 @@ void PappLoader::store_tile_event_cb_(lv_event_t *event) {
 void PappLoader::build_store_grid_() {
   this->free_icons_();
   this->catalog_tiles_.clear();
-  if (this->catalog_entries_.empty())
+  if (this->visible_catalog_indices_.empty())
     return;
 
   lv_obj_update_layout(this->catalog_container_);
@@ -941,7 +1202,7 @@ void PappLoader::build_store_grid_() {
     width = 960;
   this->grid_columns_ = static_cast<uint16_t>(std::max<int32_t>(1, (width + TILE_GAP) / (TILE_W + TILE_GAP)));
   const uint16_t cols = this->grid_columns_;
-  const size_t count = this->catalog_entries_.size();
+  const size_t count = this->visible_catalog_indices_.size();
   const int32_t rows = static_cast<int32_t>((count + cols - 1) / cols);
   const int32_t left = std::max<int32_t>(0, (width - (cols * TILE_W + (cols - 1) * TILE_GAP)) / 2);
 
@@ -954,8 +1215,11 @@ void PappLoader::build_store_grid_() {
 
   this->tile_icons_.resize(count);
   for (size_t i = 0; i < count; i++) {
-    const AppInfo *info = i < this->app_info_.size() && this->app_info_[i].has_info ? &this->app_info_[i] : nullptr;
-    const std::string title = display_title(info, this->catalog_entries_[i].first);
+    const size_t source_index = this->visible_catalog_indices_[i];
+    const AppInfo *info = source_index < this->app_info_.size() && this->app_info_[source_index].has_info
+                              ? &this->app_info_[source_index]
+                              : nullptr;
+    const std::string title = display_title(info, this->catalog_entries_[source_index].first);
     lv_obj_t *tile = plain_box(grid);
     lv_obj_set_pos(tile, left + static_cast<int32_t>(i % cols) * (TILE_W + TILE_GAP),
                    static_cast<int32_t>(i / cols) * (TILE_H + TILE_GAP) + TILE_GAP / 2);
@@ -987,7 +1251,7 @@ void PappLoader::build_store_grid_() {
     }
 
     lv_obj_t *name = text_label(tile, title, COLOR_TEXT);
-    one_line(name, TILE_W - 16);
+    scrolling_line(name, TILE_W - 16);
     lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(name, LV_ALIGN_TOP_MID, 0, TILE_ICON + 18);
 
@@ -1044,16 +1308,17 @@ void PappLoader::store_button_event_cb_(lv_event_t *event) {
 }
 
 void PappLoader::open_detail_(int index) {
-  if (index < 0 || static_cast<size_t>(index) >= this->catalog_entries_.size())
+  const size_t source_index = this->store_ui_ ? this->store_source_index_(index) : static_cast<size_t>(index);
+  if (source_index == static_cast<size_t>(-1) || source_index >= this->catalog_entries_.size())
     return;
   this->close_detail_();
-  this->detail_index_ = index;
-  this->detail_url_ = this->catalog_entries_[index].second;
+  this->detail_index_ = static_cast<int>(source_index);
+  this->detail_url_ = this->catalog_entries_[source_index].second;
   const AppInfo *info =
-      static_cast<size_t>(index) < this->app_info_.size() && this->app_info_[index].has_info ? &this->app_info_[index]
-                                                                                             : nullptr;
-  const std::string title = display_title(info, this->catalog_entries_[index].first);
-  const std::string url = this->catalog_entries_[index].second;
+      source_index < this->app_info_.size() && this->app_info_[source_index].has_info ? &this->app_info_[source_index]
+                                                                                        : nullptr;
+  const std::string title = display_title(info, this->catalog_entries_[source_index].first);
+  const std::string url = this->catalog_entries_[source_index].second;
   const bool remote = is_network_url(url.c_str());
   const std::string have = info != nullptr ? this->installed_version_(info->name) : std::string();
 
@@ -1065,6 +1330,10 @@ void PappLoader::open_detail_(int index) {
   lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
   lv_obj_add_flag(panel, LV_OBJ_FLAG_CLICKABLE);  // keeps touches off the page below
   this->detail_panel_ = panel;
+  // The global toolbar volume control must remain usable over the detail
+  // panel, just as it is over the library and Favorites pages.
+  this->ensure_catalog_volume_control_();
+  this->raise_catalog_volume_control_();
 
   const int32_t margin = 40;
   lv_obj_t *icon = plain_box(panel);
@@ -1095,9 +1364,16 @@ void PappLoader::open_detail_(int index) {
   } else {
     buttons.emplace_back(ACTION_LAUNCH, LV_SYMBOL_PLAY "  Launch");
   }
-  // Only apps whose listing says they choose their canvas size.
+  // Cartridge-style emulators get a selector on their information page;
+  // data-driven ports such as Doom and Red Alert still launch directly.
+  if (this->supports_rom_selector(url))
+    buttons.emplace_back(ACTION_ROM, LV_SYMBOL_LIST "  Select game");
   if (info != nullptr && info->supports_canvas())
-    buttons.emplace_back(ACTION_SCREEN, this->screen_label_(index));
+    buttons.emplace_back(ACTION_SCREEN, this->screen_label_(static_cast<int>(source_index)));
+  buttons.emplace_back(ACTION_FAVORITE,
+                       this->is_app_favorite_(this->detail_app_key_(static_cast<int>(source_index)))
+                           ? "*  Remove favorite"
+                           : "*  Add to favorites");
   if (!have.empty())
     buttons.emplace_back(ACTION_UNINSTALL, LV_SYMBOL_TRASH "  Uninstall");
   buttons.emplace_back(ACTION_BACK, LV_SYMBOL_CLOSE "  Back");
@@ -1108,7 +1384,10 @@ void PappLoader::open_detail_(int index) {
     lv_obj_t *button = plain_box(panel);
     lv_obj_set_size(button, DETAIL_ICON, 52);
     lv_obj_set_pos(button, margin, y);
-    y += 64;
+    // Keep the added Favorites action and the Back action on the 600px panel
+    // for the common six-button detail page while retaining room for the
+    // two-line update label.
+    y += 54;
     const bool primary = i == 0;
     lv_obj_set_style_radius(button, 14, 0);
     lv_obj_set_style_bg_color(button, lv_color_hex(primary ? 0x0EA5E9 : 0x1E293B), 0);
@@ -1145,7 +1424,7 @@ void PappLoader::open_detail_(int index) {
   lv_obj_t *name = text_label(panel, title, 0xFFFFFF);
   set_font(name, title_font());
   lv_obj_set_pos(name, text_x, margin - 4);
-  one_line(name, text_w);
+  scrolling_line(name, text_w);
 
   // Who made it, the facts, then the sizes, each under the one before.
   lv_obj_t *last = name;
@@ -1288,6 +1567,8 @@ void PappLoader::run_detail_action_(uint8_t action) {
   switch (action) {
     case ACTION_STREAM: {
       const std::string url = this->catalog_entries_[index].second;
+      if (this->open_rom_selector_for_app(url))
+        break;
       this->close_detail_();
       this->request_launch_url(url);
       break;
@@ -1296,8 +1577,17 @@ void PappLoader::run_detail_action_(uint8_t action) {
       std::string path = this->catalog_entries_[index].second;
       if (info != nullptr && !info->name.empty() && !this->installed_version_(info->name).empty())
         path = this->install_dir_ + "/" + info->name + ".papp";
+      if (this->open_rom_selector_for_app(path))
+        break;
       this->close_detail_();
       this->request_launch(path);
+      break;
+    }
+    case ACTION_ROM: {
+      std::string path = this->catalog_entries_[index].second;
+      if (info != nullptr && !info->name.empty() && !this->installed_version_(info->name).empty())
+        path = this->install_dir_ + "/" + info->name + ".papp";
+      this->open_rom_selector_for_app(path);
       break;
     }
     case ACTION_INSTALL:
@@ -1305,6 +1595,9 @@ void PappLoader::run_detail_action_(uint8_t action) {
       break;
     case ACTION_SCREEN:
       this->cycle_screen_setting_(index);
+      break;
+    case ACTION_FAVORITE:
+      this->toggle_app_favorite_(index);
       break;
     case ACTION_UNINSTALL:
       this->open_uninstall_dialog_(index);
@@ -1685,7 +1978,7 @@ void PappLoader::build_drawer_() {
   }
   this->drawer_buttons_.clear();
   this->drawer_actions_.clear();
-  if (!this->store_ui_ || this->catalog_container_ == nullptr)
+  if (!this->store_ui_ || this->catalog_container_ == nullptr || this->favorites_page_active_)
     return;
   lv_obj_t *screen = lv_obj_get_screen(this->catalog_container_);
   lv_obj_t *drawer = plain_box(screen);

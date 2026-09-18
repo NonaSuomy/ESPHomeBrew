@@ -6,18 +6,19 @@ substitutions:
   papp_store_url: "https://nonasuomy.github.io/papp-conversions/"
 
 # Remote launch/close/refresh API actions for the ESP bridge and Home Assistant
-# (papp_launch(url), papp_close, papp_refresh_catalog).
+# (papp_launch(url), papp_launch_rom(emulator, rom), papp_close,
+# papp_refresh_catalog).
 packages:
-  papp_control:
-    url: https://github.com/NonaSuomy/papp-conversions
-    ref: main
-    files: [esphome/device_control.yaml]
-    refresh: 0s
+  # Use the checked-out package while testing the local component. Once the
+  # change is published, this can be switched back to the GitHub package.
+  - !include device_control.yaml
 
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
   platformio_options:
+    extra_scripts:
+      - pre:/home/nonasuomy/code/esphome006/config/idf61_compat.py
     build_flags:
       # ESPHome's ADC component still refers to the pre-IDF-6.1 name.
       # ESP-IDF 6.1 exposes the equivalent 12 dB setting as ADC_ATTEN_DB_12.
@@ -103,7 +104,7 @@ external_components:
   - source:
       type: local
       path: /home/nonasuomy/code/esphome006/config/components
-    components: [lvgl, sd_mmc_card, usb_hidx]
+    components: [lvgl, sd_mmc_card, usb_hidx, ethernet, i2s_audio, ledc, mipi_dsi, sha256]
   - source:
       type: git
       url: https://github.com/NonaSuomy/papp-conversions
@@ -277,6 +278,19 @@ speaker:
     output_speaker: media_mixing_input
     sample_rate: 48000
     bits_per_sample: 16
+
+number:
+  - platform: template
+    name: "PAPP Master Volume"
+    id: papp_master_volume
+    min_value: 0
+    max_value: 100
+    step: 5
+    initial_value: 70
+    restore_value: true
+    optimistic: true
+    on_value:
+      - lambda: id(papp_runtime)->set_master_volume(static_cast<int32_t>(x));
 
 text_sensor:
   - platform: usb_hidx
@@ -656,6 +670,19 @@ text:
     optimistic: true
     on_value:
       - lambda: id(papp_runtime)->request_launch(x);
+  - platform: template
+    name: "Remote Emulator and ROM"
+    id: remote_emulator_rom
+    mode: text
+    optimistic: true
+    on_value:
+      - lambda: |-
+          const size_t separator = x.find('|');
+          if (separator == std::string::npos) {
+            ESP_LOGW("papp_loader", "Remote Emulator and ROM needs emulator|/sd/... or emulator|/usb0/...");
+            return;
+          }
+          id(papp_runtime)->request_launch_rom(x.substr(0, separator), x.substr(separator + 1));
 
 api:
   reboot_timeout: 0s
@@ -713,6 +740,7 @@ lvgl:
         - lambda: |-
             id(papp_runtime)->select_catalog("Storage");
             id(papp_runtime)->set_catalog_container(id(papp_list));
+            id(papp_runtime)->set_rom_selector_container(id(rom_game_list));
         - script.execute: papp_catalog_sync
       widgets:
         - label:
@@ -738,6 +766,127 @@ lvgl:
             scrollbar_mode: AUTO
             scroll_momentum: true
             scroll_elastic: false
+    - id: volume_page
+      width: 1024
+      height: 600
+      pad_all: 18
+      scrollbar_mode: "OFF"
+      bg_color: 0x08111F
+      on_load:
+        - lvgl.slider.update:
+            id: papp_volume_slider
+            value: !lambda return static_cast<int>(id(papp_master_volume).state);
+      widgets:
+        - label:
+            text: "VOLUME"
+            align: TOP_LEFT
+            text_color: 0x55D6FF
+        - label:
+            id: papp_volume_value
+            text: "70%"
+            align: TOP_MID
+            text_color: 0xE2E8F0
+        - slider:
+            id: papp_volume_slider
+            x: 120
+            y: 170
+            width: 780
+            height: 48
+            min_value: 0
+            max_value: 100
+            value: 70
+            on_value:
+              then:
+                - number.set:
+                    id: papp_master_volume
+                    value: !lambda return x;
+                - lvgl.label.update:
+                    id: papp_volume_value
+                    text:
+                      format: "%.0f%%"
+                      args: [x]
+        - button:
+            id: mute_volume
+            width: 220
+            height: 56
+            x: 120
+            y: 270
+            widgets:
+              - label:
+                  text: "MUTE"
+                  align: CENTER
+            on_click:
+              - number.set:
+                  id: papp_master_volume
+                  value: 0
+              - lvgl.slider.update:
+                  id: papp_volume_slider
+                  value: 0
+        - button:
+            id: back_from_volume
+            width: 220
+            height: 56
+            x: 680
+            y: 270
+            widgets:
+              - label:
+                  text: "BACK"
+                  align: CENTER
+            on_click:
+              - lvgl.page.show: papp_page
+    - id: rom_page
+      width: 1024
+      height: 600
+      pad_all: 18
+      scrollbar_mode: "OFF"
+      bg_color: 0x08111F
+      on_load:
+        - lambda: |-
+            id(papp_runtime)->set_rom_selector_container(id(rom_game_list));
+            id(papp_runtime)->refresh_rom_selector();
+      widgets:
+        - label:
+            text: "SELECT GAME"
+            align: TOP_LEFT
+            text_color: 0x55D6FF
+        - button:
+            id: refresh_rom_games
+            width: 150
+            height: 40
+            x: 650
+            y: 0
+            widgets:
+              - label:
+                  text: "REFRESH"
+                  align: CENTER
+            on_click:
+              - lambda: id(papp_runtime)->refresh_rom_selector();
+        - button:
+            id: back_from_rom_games
+            width: 170
+            height: 40
+            align: TOP_RIGHT
+            widgets:
+              - label:
+                  text: "BACK"
+                  align: CENTER
+            on_click:
+              - lvgl.page.show: papp_page
+        - label:
+            text: "Only compatible files from the selected emulator are shown"
+            x: 0
+            y: 42
+            text_color: 0xA0B8CC
+        - list:
+            id: rom_game_list
+            x: 0
+            y: 78
+            width: 950
+            height: 490
+            bg_color: 0x101F31
+            border_width: 1
+            border_color: 0x2D5875
+            scrollbar_mode: AUTO
     - id: papp_store_page
       width: 1024
       height: 600
@@ -766,53 +915,12 @@ lvgl:
         - list:
             id: papp_store_list
             x: 0
-            y: 78
-            width: 650
-            height: 450
+            y: 124
+            # The loader owns the fixed source bar and right-hand slide-out
+            # drawer; do not reserve a second static Store panel here.
+            width: 950
+            height: 404
             bg_color: 0x101F31
             border_width: 1
             border_color: 0x2D5875
             scrollbar_mode: AUTO
-        - obj:
-            x: 680
-            y: 78
-            width: 300
-            height: 450
-            bg_color: 0x101F31
-            border_width: 1
-            border_color: 0x2D5875
-            pad_all: 18
-            widgets:
-              - label:
-                  text: "GITHUB STORE"
-                  text_color: 0x55D6FF
-              - button:
-                  id: refresh_papp_store
-                  width: 260
-                  height: 54
-                  y: 52
-                  widgets:
-                    - label:
-                        text: "REFRESH STORE"
-                        align: CENTER
-                  on_click:
-                    - script.execute: papp_catalog_sync
-              - button:
-                  id: back_to_papp_library
-                  width: 260
-                  height: 54
-                  y: 120
-                  widgets:
-                    - label:
-                        text: "BACK TO LIBRARY"
-                        align: CENTER
-                  on_click:
-                    - lvgl.page.show: papp_page
-              - label:
-                  text: "Tap a PAPP to stream it
-from GitHub Releases.
-New versions show up
-after REFRESH STORE."
-                  x: 0
-                  y: 200
-                  text_color: 0xA0B8CC

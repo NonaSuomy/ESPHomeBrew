@@ -1,0 +1,53 @@
+diff --git a/apps/papp_emulator_common/runtime.h b/apps/papp_emulator_common/runtime.h
+--- a/apps/papp_emulator_common/runtime.h
++++ b/apps/papp_emulator_common/runtime.h
+@@ -33,19 +33,44 @@
+         selected_buf[n] = 0; selected_buf[strcspn(selected_buf,"\r\n")] = 0;
+         if (selected_buf[0]) selected = selected_buf;
+     }
++    if (_papp_svc->log_printf) {
++        _papp_svc->log_printf("EMU ROM: id=%s selected=%s extensions=%s\n",
++            id ? id : "(none)", selected ? selected : "(none)",
++            extensions ? extensions : "(none)");
++    }
+     const char *ext = selected ? strrchr(selected,'.') : NULL;
+     char token[24];
+-    if (!ext || strlen(ext) > 16) return -1;
++    if (!ext || strlen(ext) > 16) {
++        if (_papp_svc->log_printf) {
++            _papp_svc->log_printf("EMU ROM: invalid selection for %s\n", id ? id : "(none)");
++        }
++        return -1;
++    }
+     snprintf(token,sizeof(token),"%s|",ext);
+     for (char *p=token; *p; ++p) if (*p >= 'A' && *p <= 'Z') *p += 'a'-'A';
+     if (!strstr(extensions,token)) {
+         /* A ZIP is a transparent container for normal ROM-based PAPPs.  Do
+          * not intercept native ZIP formats such as Neo Geo, whose emulator
+          * needs the archive and its many ROM members directly. */
+-        if (strcasecmp(ext, ".zip") != 0 || strstr(extensions, ".zip|")) return -1;
+-        if (!_papp_svc->file_zip_extract_first || !id || !id[0]) return -1;
+-        if (_papp_svc->file_zip_extract_first(selected, extensions,
+-                "/sd/roms/papp/.zipcache", id, out, size) != 0) return -1;
++        if (strcasecmp(ext, ".zip") != 0 || strstr(extensions, ".zip|")) {
++            if (_papp_svc->log_printf) {
++                _papp_svc->log_printf("EMU ROM: unsupported selection %s\n", selected);
++            }
++            return -1;
++        }
++        if (!_papp_svc->file_zip_extract_first || !id || !id[0]) {
++            if (_papp_svc->log_printf) {
++                _papp_svc->log_printf("EMU ROM: ZIP extractor unavailable for %s\n", id ? id : "(none)");
++            }
++            return -1;
++        }
++        const int zip_result = _papp_svc->file_zip_extract_first(selected, extensions,
++                "/sd/roms/papp/.zipcache", id, out, size);
++        if (_papp_svc->log_printf) {
++            _papp_svc->log_printf("EMU ROM: ZIP extract result=%d output=%s\n",
++                zip_result, zip_result == 0 ? out : "(none)");
++        }
++        if (zip_result != 0) return -1;
+         return 0;
+     }
+     if (strlen(selected) >= size) return -1;

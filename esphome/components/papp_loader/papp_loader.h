@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 #include "esp_timer.h"
+#include "esphome/core/hal.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/log.h"
@@ -118,6 +119,20 @@ class PappLoader : public Component {
     ESP_LOGI("papp_loader", "Launch requested from menu: %s", path.c_str());
   }
   void request_launch_url(const std::string &url) { this->request_launch(url); }
+  // Select a local emulator PAPP and a ROM/game path from ESPHome's native API
+  // or a template text entity. The ROM path must be under /sd or /usb0; the
+  // loader stores it in the shared PAPP setting before starting the emulator.
+  void request_launch_rom(const std::string &emulator, const std::string &rom_path);
+  // Download a PAPP into install_dir without requiring a store listing. The
+  // caller supplies the expected size and SHA-256 so a local HTTP helper can
+  // safely stage a build onto the SD card before launching it from Storage.
+  void request_install_url(const std::string &url, const std::string &name, uint32_t size,
+                           const std::string &sha256);
+  // Download any regular file into a validated path under /sd. The transfer is
+  // staged as <path>.part and only becomes visible after the size and SHA-256
+  // have been verified. Refused while an app or another storage operation runs.
+  void request_upload_url(const std::string &url, const std::string &path, uint32_t size,
+                          const std::string &sha256);
   void request_close() {
     if (!this->launched_) {
       ESP_LOGW("papp_loader", "Ignoring PAPP close request because no app is running");
@@ -182,14 +197,52 @@ class PappLoader : public Component {
   void set_display(display::Display *display) { this->display_ = display; }
   void set_touchscreen(touchscreen::Touchscreen *touchscreen) { this->touchscreen_ = touchscreen; }
   void set_speaker(speaker::Speaker *speaker) { this->speaker_ = speaker; }
+  // Master output volume shared by every PAPP. The value is a percentage and
+  // is applied immediately when an app is playing and again when its audio
+  // stream is initialized.
+  void set_master_volume(int32_t level);
+  int32_t get_master_volume() const { return this->master_volume_; }
 #ifdef PAPP_LOADER_USE_LVGL
   void set_lvgl(lvgl::LvglComponent *lvgl) { this->lvgl_ = lvgl; }
   void set_catalog_container(lv_obj_t *container) {
     this->catalog_container_ = container;
+    this->favorites_page_active_ = false;
     this->catalog_ui_pending_ = true;
   }
+  // The favorites page uses the same store grid and detail actions, but filters
+  // the current catalog down to entries the user marked with the star action.
+  void set_favorites_container(lv_obj_t *container) {
+    this->catalog_container_ = container;
+    this->favorites_page_active_ = true;
+    this->catalog_ui_pending_ = true;
+  }
+  // Used by the YAML startup choice: favorites first, Store when none exist.
+  bool has_favorites();
+  // Optional ROM picker for emulator pages built in YAML. The picker scans
+  // every configured data root (for example /sd and /usb0), and launching a
+  // row sets the shared ROM-path service before starting the named PAPP.
+  void set_rom_selector_container(lv_obj_t *container) { this->rom_selector_container_ = container; }
+  void configure_rom_selector(const std::string &app, const std::string &folder,
+                              const std::string &extensions) {
+    this->rom_selector_app_ = app;
+    this->rom_selector_folder_ = folder;
+    this->rom_selector_extensions_ = extensions;
+    this->rom_selector_source_.clear();
+    this->rom_selector_sidecar_ = "/sd/roms/papp/" + app + ".rom";
+  }
+  // Open the shared ROM picker for a cartridge-style emulator PAPP.  The
+  // mapping mirrors the standalone RetroESP32-P4 launcher: it derives the
+  // system from the .papp name, scans /sd and /usb0, and filters each list to
+  // that emulator's accepted ROM extensions.  Returns false for data-driven
+  // ports (Doom, Quake, ScummVM, etc.) which should launch directly.
+  bool open_rom_selector_for_app(const std::string &source);
+  bool supports_rom_selector(const std::string &source) const;
+  void refresh_rom_selector();
+  void select_rom(const std::string &path);
   void handle_launcher_controls_();
   void set_catalog_selection_(uint16_t index);
+  void ensure_catalog_volume_control_();
+  void raise_catalog_volume_control_();
   // Optional progress widgets the loader keeps up to date while an app and
   // its data download: `fill` is an object inside a track object; its width is
   // set to the percentage done and the track (its parent) is hidden when idle.
@@ -295,6 +348,9 @@ class PappLoader : public Component {
   static int svc_file_remove(const char *path);
   static int svc_file_rename(const char *from, const char *to);
   static int svc_file_stat(const char *path, papp_file_stat_t *out);
+  static int svc_file_zip_extract_first(const char *archive, const char *extensions,
+                                        const char *cache_dir, const char *cache_stem,
+                                        char *out_path, size_t out_size);
   // The runtime (VFS) path for an app's path, or "" when files::clean_app_path
   // refuses it (outside /sd and the data roots, "..", ...). *root gets the
   // runtime path of the storage root it is on (/sdcard, /usb0).
@@ -364,6 +420,9 @@ class PappLoader : public Component {
   std::string next_arg_;        // the argument for the queued launch
   bool chain_launch_{false};    // the queued launch comes from chain_
   void update_catalog_ui_();
+  void update_rom_selector_ui_();
+  void set_rom_selector_selection_(uint16_t index);
+  bool rom_selector_page_active_() const;
   void update_progress_ui_();
   void flush_framebuffer_();
   // Sends a panel-oriented (turned 180 degrees) canvas-sized frame to the
@@ -412,6 +471,9 @@ class PappLoader : public Component {
   void clear_(uint16_t color);
   void draw_close_overlay_();
   void clear_close_overlay_();
+  void draw_volume_overlay_();
+  void draw_volume_slider_overlay_();
+  void clear_volume_overlay_();
   void restore_lvgl_();
   void begin_report_(const std::string &source);
   void append_report_log_(const char *line);
@@ -426,6 +488,7 @@ class PappLoader : public Component {
   void enqueue_keyboard_tap_(int key);
   void poll_close_button_();
   bool close_touch_(int x, int y);
+  bool volume_touch_(int x, int y);
   int read_touch_(int *x, int *y);
   void audio_init_(int sample_rate);
   void audio_submit_(short *stereo_buf, int frame_count);
@@ -543,6 +606,9 @@ class PappLoader : public Component {
   // When a touch on a close control drawn over the canvas started (us, 0 =
   // none): that one closes only when held (close_touch_).
   int64_t close_hold_since_us_{0};
+  // Prevent one held touch from stepping the master volume every loop.
+  bool volume_touch_active_{false};
+  bool volume_slider_visible_{false};
   // When it was requested (esp_timer us): the buttons a close shows the app
   // follow a short sequence from then on (close_buttons_()).
   volatile int64_t close_requested_us_{0};
@@ -550,6 +616,7 @@ class PappLoader : public Component {
   // The close buttons down right now: bit 0 Menu, bit 1 X, bit 2 L3.
   uint8_t close_buttons_() const;
   int audio_sample_rate_{0};
+  int32_t master_volume_{100};
   // Heap diagnostics (log_heap in papp_loader.cpp): the running app's first
   // short audio write was logged; when loop() logs the heap next (esp_timer us).
   volatile bool audio_trouble_logged_{false};
@@ -680,6 +747,9 @@ class PappLoader : public Component {
   int install_index_{-1};
   AppInfo install_info_;  // copies for the task: app_info_ can be replaced meanwhile
   std::string install_url_;
+  bool direct_install_{false};  // API/tool upload, not a catalog Install/Update
+  bool direct_file_upload_{false};  // API/tool upload of an arbitrary SD file
+  std::string upload_path_;         // virtual path, validated under /sd
   TaskHandle_t install_task_handle_{nullptr};
   volatile bool install_done_{false};
   volatile esp_err_t install_result_{ESP_OK};
@@ -712,6 +782,9 @@ class PappLoader : public Component {
   volatile int catalog_result_{-1};
 #ifdef PAPP_LOADER_USE_LVGL
   lv_obj_t *catalog_container_{nullptr};
+  lv_obj_t *catalog_header_{nullptr};
+  lv_obj_t *catalog_volume_button_{nullptr};
+  lv_obj_t *catalog_volume_slider_{nullptr};
   // Transparent LVGL hit-test shield. Direct-rendered PAPPs do not create a
   // LVGL root object, so this prevents launcher widgets underneath them from
   // seeing a touch release while the PAPP is active.
@@ -743,6 +816,21 @@ class PappLoader : public Component {
   };
   std::vector<AppIcon> tile_icons_;  // per app, 112x112
   std::vector<lv_obj_t *> catalog_tiles_;
+  // Source indices represented by the visible tile order. In the normal grid
+  // this is 0..catalog_entries_.size()-1; on Favorites it is a filtered view.
+  std::vector<size_t> visible_catalog_indices_;
+  bool favorites_page_active_{false};
+  lv_obj_t *rom_selector_container_{nullptr};
+  std::vector<lv_obj_t *> rom_selector_buttons_;
+  std::vector<std::string> rom_selector_paths_;
+  std::string rom_selector_app_{"nes"};
+  std::string rom_selector_folder_{"roms/nes"};
+  std::string rom_selector_extensions_{".nes|.zip|"};
+  // Exact local path or URL of the PAPP that owns the selected ROM.  This is
+  // needed when the picker was opened from a streamed store entry.
+  std::string rom_selector_source_;
+  std::string rom_selector_sidecar_{"/sd/roms/papp/nes.rom"};
+  uint16_t rom_selector_selection_{0};
   uint16_t grid_columns_{1};
   lv_obj_t *detail_panel_{nullptr};
   AppIcon detail_icon_{};
@@ -767,6 +855,10 @@ class PappLoader : public Component {
   static void set_icon_(AppIcon *icon, std::shared_ptr<uint16_t> pixels, uint16_t side);
   void free_icons_();
   void build_store_grid_();
+  size_t store_source_index_(int visible_index) const;
+  bool is_app_favorite_(const std::string &app) const;
+  bool set_app_favorite_(const std::string &app, bool favorite);
+  void toggle_app_favorite_(int index);
   void open_detail_(int index);
   void close_detail_();
   void focus_detail_button_(uint8_t index);
@@ -807,6 +899,21 @@ template<typename... Ts> class LaunchUrlAction : public Action<Ts...> {
   // arguments between supported releases.  Keep this action compatible with
   // both forms; Action::play_complex still dispatches it normally.
   void play(const Ts &...x) { this->parent_->request_launch_url(this->url_.value(x...)); }
+
+ protected:
+  PappLoader *parent_;
+};
+
+template<typename... Ts> class LaunchRomAction : public Action<Ts...> {
+ public:
+  explicit LaunchRomAction(PappLoader *parent) : parent_(parent) {}
+
+  TEMPLATABLE_VALUE(std::string, emulator)
+  TEMPLATABLE_VALUE(std::string, rom)
+
+  void play(const Ts &...x) {
+    this->parent_->request_launch_rom(this->emulator_.value(x...), this->rom_.value(x...));
+  }
 
  protected:
   PappLoader *parent_;

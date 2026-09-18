@@ -221,16 +221,13 @@ int stream_size;
 #else
         strm->zfree = zcfree;
 #endif
-// ==== DEBUG - I use a static buffer (already set) to avoid this memory allocation
-    state =(struct inflate_state FAR *)strm->state;
-// ==== DEBUG
-//    state = (struct inflate_state FAR *)
-//            ZALLOC(strm, 1, sizeof(struct inflate_state));
-//    if (state == Z_NULL) return Z_MEM_ERROR;
-//    Tracev((stderr, "inflate: allocated\n"));
-//    strm->state = (struct internal_state FAR *)state;
+    state = (struct inflate_state FAR *)
+            ZALLOC(strm, 1, sizeof(struct inflate_state));
+    if (state == Z_NULL) return Z_MEM_ERROR;
+    Tracev((stderr, "inflate: allocated\n"));
+    strm->state = (struct internal_state FAR *)state;
     state->strm = strm;
-//    state->window = Z_NULL; <-- I set this too to avoid a later allocation
+    state->window = Z_NULL;
     state->mode = HEAD;     /* to pass state test in inflateReset2() */
     ret = inflateReset2(strm, windowBits);
 //    if (ret != Z_OK) {
@@ -408,13 +405,12 @@ unsigned copy;
     state = (struct inflate_state FAR *)strm->state;
 
     /* if it hasn't been done already, allocate space for the window */
-// DEBUG - I set up this buffer earlier to avoid using malloc
-//    if (state->window == Z_NULL) {
-//        state->window = (unsigned char FAR *)
-//                        ZALLOC(strm, 1U << state->wbits,
-//                               sizeof(unsigned char));
-//        if (state->window == Z_NULL) return 1;
-//    }
+    if (state->window == Z_NULL) {
+        state->window = (unsigned char FAR *)
+                        ZALLOC(strm, 1U << state->wbits,
+                               sizeof(unsigned char));
+        if (state->window == Z_NULL) return 1;
+    }
 
     /* if window not in use yet, initialize */
     if (state->wsize == 0) {

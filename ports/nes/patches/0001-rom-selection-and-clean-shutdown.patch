@@ -1,0 +1,151 @@
+diff --git a/apps/psram_nes/papp_main.c b/apps/psram_nes/papp_main.c
+index 2b45fc72..104fc18e 100644
+--- a/apps/psram_nes/papp_main.c
++++ b/apps/psram_nes/papp_main.c
+@@ -2,13 +2,11 @@
+ #define PAPP_APP_SIDE 1
+ #include "runtime.h"
+ #include "psram_app.h"
+-#include <setjmp.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
+ const app_services_t *_papp_svc;
+-static jmp_buf s_exit;
+ volatile int papp_nes_exit;
+ 
+ extern int nofrendo_main(int argc, char **argv);
+@@ -18,12 +16,31 @@ extern int papp_nes_load_rom(const char *path);
+ extern void papp_nes_cleanup(void);
+ extern volatile int papp_exit_requested;
+ 
++static int nes_selection_requested(const app_services_t *svc)
++{
++    if (svc->settings_rom_path_get) {
++        char *configured = svc->settings_rom_path_get();
++        if (configured && configured[0])
++            return 1;
++    }
++    /* The sidecar is the durable selection used by the launcher.  Treat a
++       non-empty sidecar as an explicit request even if ZIP extraction fails;
++       falling through to River City Ransom hides the real error and makes a
++       picker selection appear to do nothing. */
++    void *f = svc->file_open("/sd/roms/papp/nes.rom", "rb");
++    if (!f)
++        return 0;
++    char selected[2] = {0, 0};
++    const size_t n = svc->file_read(selected, 1, 1, f);
++    svc->file_close(f);
++    return n == 1 && selected[0] != 0 && selected[0] != '\n' && selected[0] != '\r';
++}
++
+ void papp_nes_request_exit(void)
+ {
+     papp_nes_exit = 1;
+     papp_exit_requested = 1;
+     nofrendo_quit_flag = 1;
+-    longjmp(s_exit, 1);
+ }
+ 
+ static void nes_watchdog(void *arg)
+@@ -58,6 +80,8 @@ int app_entry(const app_services_t *svc)
+ {
+     _papp_svc = svc;
+     papp_nes_exit = 0;
++    papp_exit_requested = 0;
++    nofrendo_quit_flag = 0;
+     if (!svc || svc->abi_version != PAPP_ABI_VERSION)
+         return -1;
+ 
+@@ -66,9 +90,14 @@ int app_entry(const app_services_t *svc)
+     /* The launcher stores the selected PAPP path in NVS.  Read the matching
+        /sd/roms/papp/nes.rom sidecar first so the PAPP launch menu can choose
+        any NES image without confusing the .papp path for a ROM. */
++    const int selection_requested = nes_selection_requested(svc);
+     if (emu_rom_path("nes", ".nes|", selected_path_buf,
+                      sizeof(selected_path_buf)) == 0) {
+         selected_path = selected_path_buf;
++        svc->log_printf("NES PAPP: selected ROM resolved to %s\n", selected_path);
++    } else if (selection_requested) {
++        svc->log_printf("NES PAPP: selected ROM could not be resolved; refusing built-in fallback\n");
++        return -1;
+     } else {
+         selected_path = "/sd/roms/nes/River City Ransom (USA).nes";
+         svc->log_printf("NES PAPP: no ROM selected; using default %s\n", selected_path);
+@@ -86,7 +115,7 @@ int app_entry(const app_services_t *svc)
+     svc->task_create(nes_watchdog, "nes_wd", 4096, NULL, 2, &watchdog, 1);
+ 
+     int result = -1;
+-    if (papp_nes_load_rom(rom_path) == 0 && setjmp(s_exit) == 0) {
++    if (papp_nes_load_rom(rom_path) == 0) {
+         char *argv[] = { rom_path, NULL };
+         result = nofrendo_main(1, argv);
+     }
+diff --git a/apps/psram_nes/papp_platform.c b/apps/psram_nes/papp_platform.c
+index a4e77dba..728c412f 100644
+--- a/apps/psram_nes/papp_platform.c
++++ b/apps/psram_nes/papp_platform.c
+@@ -17,14 +17,22 @@ void *osd_getromdata(void) { return papp_nes_rom_data; }
+ int papp_nes_load_rom(const char *path)
+ {
+     void *f = _papp_svc->file_open(path, "rb");
+-    if (!f) return -1;
++    if (!f) {
++        _papp_svc->log_printf("NES PAPP: ROM open failed: %s\n", path ? path : "(null)");
++        return -1;
++    }
+     _papp_svc->file_seek(f, 0, 2);
+     long n = _papp_svc->file_tell(f);
+     _papp_svc->file_seek(f, 0, 0);
+-    if (n <= 0 || n > 8 * 1024 * 1024) { _papp_svc->file_close(f); return -1; }
++    if (n <= 0 || n > 8 * 1024 * 1024) {
++        _papp_svc->log_printf("NES PAPP: ROM size invalid: %ld bytes (%s)\n", n, path);
++        _papp_svc->file_close(f);
++        return -1;
++    }
+     papp_nes_rom_data = _papp_svc->mem_caps_alloc((size_t)n, PAPP_MEM_CAP_SPIRAM);
+     if (!papp_nes_rom_data || _papp_svc->file_read(papp_nes_rom_data, 1, (size_t)n, f) != (size_t)n) {
+         if (papp_nes_rom_data) _papp_svc->mem_free(papp_nes_rom_data);
++        _papp_svc->log_printf("NES PAPP: ROM read failed: %s\n", path);
+         papp_nes_rom_data = NULL; _papp_svc->file_close(f); return -1;
+     }
+     _papp_svc->file_close(f);
+
+diff --git a/apps/psram_nes/papp_osd.c b/apps/psram_nes/papp_osd.c
+index 4564962..b5d9a0e 100644
+--- a/apps/psram_nes/papp_osd.c
++++ b/apps/psram_nes/papp_osd.c
+@@ -14,8 +14,8 @@
+ extern const app_services_t *_papp_svc;
+ extern volatile int papp_nes_exit;
+ extern volatile int papp_exit_requested;
+-extern void papp_nes_request_exit(void);
+-extern void main_quit(void);
++extern volatile int nofrendo_quit_flag;
++extern void nes_poweroff(void);
+ 
+ #define W 256
+ #define H 224
+@@ -103,8 +103,19 @@ void osd_getinput(void)
+     if (p.values[PAPP_INPUT_LEFT])   now |= 1 << 7;
+     if (p.values[PAPP_INPUT_A])      now |= 1 << 13;
+     if (p.values[PAPP_INPUT_B])      now |= 1 << 14;
+-    if (p.values[PAPP_INPUT_MENU] || (p.values[PAPP_INPUT_L] && p.values[PAPP_INPUT_R]) || papp_exit_requested)
+-        main_quit();
++    if (p.values[PAPP_INPUT_MENU] || (p.values[PAPP_INPUT_L] && p.values[PAPP_INPUT_R]) || papp_exit_requested) {
++        /* osd_getinput() runs inside the emulation call stack.  Do not call
++         * main_quit() here: it destroys the NES machine while the current
++         * frame is still unwinding and corrupts the heap.  Request a clean
++         * return, then let main_loop() perform teardown exactly once. */
++        papp_exit_requested = 1;
++        papp_nes_exit = 1;
++        nofrendo_quit_flag = 1;
++        nes_poweroff();
++        /* Stop processing input events in the same frame as shutdown. */
++        old = now;
++        return;
++    }
+     int changed = now ^ old;
+     const int events[16] = { event_joypad1_select,0,0,event_joypad1_start,event_joypad1_up,event_joypad1_right,event_joypad1_down,event_joypad1_left,0,0,0,0,0,event_joypad1_a,event_joypad1_b,0 };
+     for (int i = 0; i < 16; ++i) if ((changed & (1 << i)) && events[i]) {

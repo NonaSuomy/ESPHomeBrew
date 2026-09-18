@@ -52,6 +52,7 @@ MAX_SIDE = 4096
 papp_loader_ns = cg.esphome_ns.namespace("papp_loader")
 PappLoader = papp_loader_ns.class_("PappLoader", cg.Component)
 LaunchUrlAction = papp_loader_ns.class_("LaunchUrlAction", automation.Action)
+LaunchRomAction = papp_loader_ns.class_("LaunchRomAction", automation.Action)
 CatalogActionTrigger = papp_loader_ns.class_("CatalogActionTrigger", automation.Trigger.template())
 USBHIDXComponent = cg.esphome_ns.namespace("usb_hidx").class_("USBHIDXComponent")
 UsbMidi = cg.esphome_ns.namespace("usb_midi").class_("UsbMidi")
@@ -359,4 +360,26 @@ async def papp_loader_launch_url_to_code(config, action_id, template_arg, args):
     action = cg.new_Pvariable(action_id, template_arg, parent)
     url = await cg.templatable(config["url"], args, cg.std_string)
     cg.add(action.set_url(url))
+    return action
+
+
+@automation.register_action(
+    "papp_loader.launch_rom",
+    LaunchRomAction,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(PappLoader),
+            cv.Required("emulator"): cv.templatable(cv.string),
+            cv.Required("rom"): cv.templatable(cv.string),
+        }
+    ),
+    synchronous=True,
+)
+async def papp_loader_launch_rom_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    action = cg.new_Pvariable(action_id, template_arg, parent)
+    emulator = await cg.templatable(config["emulator"], args, cg.std_string)
+    rom = await cg.templatable(config["rom"], args, cg.std_string)
+    cg.add(action.set_emulator(emulator))
+    cg.add(action.set_rom(rom))
     return action

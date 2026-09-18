@@ -36,13 +36,26 @@ static constexpr int MIN_WIDTH = 320;
 static constexpr int MIN_HEIGHT = 240;
 static constexpr int MAX_SIDE = 4096;
 
-// The on-screen close control: a square button, placed GAP pixels right of the
-// canvas and MARGIN below its top when that fits on the panel, else MARGIN
-// from the panel's top-right corner (over the canvas).
+// The on-screen close control: a square button at the panel's top-right. When
+// there is a right margin beside the canvas it still sits there horizontally,
+// but its vertical position is kept at the panel top so it is predictable on
+// every canvas size.
 static constexpr int CLOSE_SIZE = 58;
 static constexpr int CLOSE_GAP = 12;
 static constexpr int CLOSE_MARGIN = 10;
 static constexpr int CLOSE_HIT_PADDING = 10;
+// The volume control uses the same square size and sits immediately to the
+// left of the close control. Keeping both controls on one row makes the
+// volume target easy to find without putting a tap near the close target.
+static constexpr int VOLUME_SIZE = CLOSE_SIZE;
+static constexpr int VOLUME_GAP = CLOSE_GAP;
+static constexpr int VOLUME_HIT_PADDING = CLOSE_HIT_PADDING;
+// When the in-app speaker is tapped, this horizontal control appears just to
+// its left. It uses the same speaker button as the launcher and lets a user
+// drag the level both down and back up without leaving the running app.
+static constexpr int VOLUME_SLIDER_WIDTH = 240;
+static constexpr int VOLUME_SLIDER_HEIGHT = VOLUME_SIZE;
+static constexpr int VOLUME_SLIDER_GAP = 8;
 
 // Framebuffer transfers (cache write-back, PPA output) work in whole cache
 // lines. 128 covers the ESP32-P4's 64- and 128-byte line settings.
@@ -114,14 +127,36 @@ struct Geometry {
   int close_x() const {
     return this->close_beside() ? this->x() + this->canvas_w + CLOSE_GAP : this->panel_w - CLOSE_SIZE - CLOSE_MARGIN;
   }
-  int close_y() const { return this->close_beside() ? this->y() + CLOSE_MARGIN : CLOSE_MARGIN; }
+  int close_y() const { return CLOSE_MARGIN; }
   int close_raw_x() const { return this->panel_w - this->close_x() - CLOSE_SIZE; }
   int close_raw_y() const { return this->panel_h - this->close_y() - CLOSE_SIZE; }
+
+  int volume_x() const { return std::max(0, this->close_x() - VOLUME_SIZE - VOLUME_GAP); }
+  int volume_y() const { return this->close_y(); }
+  int volume_raw_x() const { return this->panel_w - this->volume_x() - VOLUME_SIZE; }
+  int volume_raw_y() const { return this->panel_h - this->volume_y() - VOLUME_SIZE; }
+
+  int volume_slider_x() const {
+    return std::max(0, this->volume_x() - VOLUME_SLIDER_GAP - VOLUME_SLIDER_WIDTH);
+  }
+  int volume_slider_y() const { return this->volume_y(); }
+  int volume_slider_raw_x() const { return this->panel_w - this->volume_slider_x() - VOLUME_SLIDER_WIDTH; }
+  int volume_slider_raw_y() const { return this->panel_h - this->volume_slider_y() - VOLUME_SLIDER_HEIGHT; }
 
   // A touch on the close control, with some padding around it.
   bool in_close(int sx, int sy) const {
     return sx >= this->close_x() - CLOSE_HIT_PADDING && sx < this->close_x() + CLOSE_SIZE + CLOSE_HIT_PADDING &&
            sy >= this->close_y() - CLOSE_HIT_PADDING && sy < this->close_y() + CLOSE_SIZE + CLOSE_HIT_PADDING;
+  }
+
+  bool in_volume(int sx, int sy) const {
+    return sx >= this->volume_x() - VOLUME_HIT_PADDING && sx < this->volume_x() + VOLUME_SIZE + VOLUME_HIT_PADDING &&
+           sy >= this->volume_y() - VOLUME_HIT_PADDING && sy < this->volume_y() + VOLUME_SIZE + VOLUME_HIT_PADDING;
+  }
+
+  bool in_volume_slider(int sx, int sy) const {
+    return sx >= this->volume_slider_x() && sx < this->volume_slider_x() + VOLUME_SLIDER_WIDTH &&
+           sy >= this->volume_slider_y() && sy < this->volume_slider_y() + VOLUME_SLIDER_HEIGHT;
   }
 
   // Screen -> canvas coordinates; false outside the canvas.

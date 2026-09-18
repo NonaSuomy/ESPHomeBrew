@@ -308,9 +308,8 @@ voidpf ZLIB_INTERNAL zcalloc (opaque, items, size)
     unsigned size;
 {
     (void)opaque;
-//    return sizeof(uInt) > 2 ? (voidpf)malloc(items * size) :
-//                              (voidpf)calloc(items, size);
-    return Z_NULL; // DEBUG - no longer used
+    return sizeof(uInt) > 2 ? (voidpf)malloc(items * size) :
+                              (voidpf)calloc(items, size);
 }
 
 void ZLIB_INTERNAL zcfree (opaque, ptr)
@@ -318,7 +317,7 @@ void ZLIB_INTERNAL zcfree (opaque, ptr)
     voidpf ptr;
 {
     (void)opaque;
-//    free(ptr); // DEBUG - no longer used
+    free(ptr);
 }
 
 #endif /* MY_ZCALLOC */

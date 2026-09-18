@@ -74,6 +74,14 @@ typedef struct {
     int down;
 } papp_keyboard_event_t;
 
+/* Named USB keyboard values used by input_keyboard_read(). Printable keys
+ * use ASCII; these values keep the four HID arrows distinct from 'P', 'Q',
+ * 'R', and 'S'. */
+#define PAPP_KEY_UP       153
+#define PAPP_KEY_RIGHT    154
+#define PAPP_KEY_DOWN     155
+#define PAPP_KEY_LEFT     156
+
 /* One finger on the touch panel (touch_read_points), in canvas coordinates
  * like touch_read. id stays the same while that finger stays down. */
 typedef struct {
@@ -234,8 +242,12 @@ typedef struct {
 
     /* ── USB mouse events ────────────────────────────────────────────── */
     /* Returns 1 when a mouse report has been accumulated since the last
-     * call. dx/dy are relative motion and buttons uses HID bits 1/2/4 for
-     * left/right/middle. Appended so existing ABI-v1 binaries remain safe. */
+     * call. dx/dy are relative motion in the PAPP canvas/presentation space:
+     * positive dx moves the visible cursor right and positive dy moves it
+     * down. The loader applies the inverse of the display's 180-degree
+     * presentation rotation exactly once; apps must not rotate these values.
+     * buttons uses HID bits 1/2/4 for left/right/middle. Appended so existing
+     * ABI-v1 binaries remain safe. */
     int (*input_mouse_read)(int *dx, int *dy, int *buttons);
 
     /* ── USB keyboard text/events ────────────────────────────────────── */
@@ -491,7 +503,28 @@ typedef struct {
     int  (*file_rename)(const char *from, const char *to);
     int  (*file_stat)(const char *path, papp_file_stat_t *out);
 
+    /* ── ZIP-backed ROM helper (append-only) ──────────────────────────
+     * Find the first regular ZIP entry whose extension is present in the
+     * pipe-separated list, extract it to cache_dir/cache_stem.<ext>, and
+     * return the portable path in out_path. The archive is not modified. */
+    int  (*file_zip_extract_first)(const char *archive,
+                                   const char *extensions,
+                                   const char *cache_dir,
+                                   const char *cache_stem,
+                                   char *out_path, size_t out_size);
+
 } app_services_t;
+
+/* Hardware mouse reports are expressed in physical panel directions, while
+ * PAPPs draw in the unrotated source canvas. Both supported launchers present
+ * that canvas with a 180-degree rotation, so their service boundary converts
+ * relative motion with this same helper. Keep this in the ABI header so a new
+ * loader cannot silently choose a different sign convention. */
+static inline void papp_mouse_delta_to_canvas(int *dx, int *dy)
+{
+    if (dx != 0) *dx = -*dx;
+    if (dy != 0) *dy = -*dy;
+}
 
 /* Size of the largest app_open / app_set_resume_arg argument, NUL included. */
 #define PAPP_APP_ARG_MAX 2048

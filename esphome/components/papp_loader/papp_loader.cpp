@@ -35,7 +35,6 @@
 #include "esp_http_client.h"
 #include "esp_tls.h"
 #include "esp_mmu_map.h"
-#include "esp_timer.h"
 #include "driver/ppa.h"
 #if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
 #include "esp_crt_bundle.h"
@@ -49,6 +48,7 @@
 #include "freertos/task.h"
 #include "hal/mmu_types.h"
 #include "pngAux.h"
+#include "zlib.h"
 
 // psram_app_handle_t is declared by psram_app.h as a pointer to the global
 // C-compatible struct tag. Keep the concrete implementation type at global
@@ -139,6 +139,11 @@ static bool send_screen_stream_bytes(int socket_fd, const void *data, size_t len
 // counterpart of the desired physical screen position.
 static constexpr int CLOSE_BUTTON_SIZE = canvas::CLOSE_SIZE;
 alignas(64) static uint16_t close_overlay_buffer[CLOSE_BUTTON_SIZE * CLOSE_BUTTON_SIZE] = {};
+static constexpr int VOLUME_BUTTON_SIZE = canvas::VOLUME_SIZE;
+alignas(64) static uint16_t volume_overlay_buffer[VOLUME_BUTTON_SIZE * VOLUME_BUTTON_SIZE] = {};
+static constexpr int VOLUME_SLIDER_WIDTH = canvas::VOLUME_SLIDER_WIDTH;
+static constexpr int VOLUME_SLIDER_HEIGHT = canvas::VOLUME_SLIDER_HEIGHT;
+alignas(64) static uint16_t volume_slider_overlay_buffer[VOLUME_SLIDER_WIDTH * VOLUME_SLIDER_HEIGHT] = {};
 
 // A PAPP may request a large game stack.  Those stacks must live in PSRAM and
 // must be deleted through ESP-IDF's matching WithCaps API.  Keep the handles
@@ -243,8 +248,104 @@ bool is_network_url(const char *value) {
   return std::strncmp(value, "http://", 7) == 0 || std::strncmp(value, "https://", 8) == 0;
 }
 
+struct RemoteEmulatorAlias {
+  const char *alias;
+  const char *app;
+};
+
+// Keep the common names accepted here in step with the ROM selector's PAPP
+// names. Unknown safe names are also accepted, so a newly added emulator can
+// be launched before its UI picker table is updated.
+static const RemoteEmulatorAlias REMOTE_EMULATOR_ALIASES[] = {
+    {"gameboy", "gb"},       {"gbc", "gb"},       {"zx", "spectrum"},
+    {"spectrum", "spectrum"}, {"a26", "stella"},   {"lynx", "handy"},
+    {"pcengine", "pce"},     {"a800", "atari800"}, {"atari800", "atari800"},
+    {"supernes", "snes"},    {"megadrive", "genesis"}, {"gen", "genesis"},
+    {"a78", "prosystem"},    {"neo", "neogeo"},   {"gamegear", "sms"},
+};
+
+static std::string normalized_remote_emulator(const std::string &input) {
+  size_t first = input.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos)
+    return {};
+  size_t last = input.find_last_not_of(" \t\r\n");
+  std::string value = input.substr(first, last - first + 1);
+  if (!value.empty() && value.front() == '/') {
+    const size_t slash = value.rfind('/');
+    value = slash == std::string::npos ? value : value.substr(slash + 1);
+  }
+  for (char &c : value)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (value.size() >= 5 && value.compare(value.size() - 5, 5, ".papp") == 0)
+    value.erase(value.size() - 5);
+  for (const auto &alias : REMOTE_EMULATOR_ALIASES) {
+    if (value == alias.alias)
+      return alias.app;
+  }
+  if (value.empty() || value.size() > 64)
+    return {};
+  for (const char c : value) {
+    if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.'))
+      return {};
+  }
+  return value;
+}
+
+static bool valid_remote_rom_path(const std::string &path) {
+  if (path.size() < 6 || path.size() >= 256 || path.back() == '/' || path.find("..") != std::string::npos ||
+      path.find("//") != std::string::npos || path.find('\\') != std::string::npos)
+    return false;
+  if (!(path.rfind("/sd/", 0) == 0 || path.rfind("/usb0/", 0) == 0))
+    return false;
+  for (const unsigned char c : path) {
+    if (c < 0x20 || c == 0x7f)
+      return false;
+  }
+  return true;
+}
+
 static std::vector<std::pair<std::string, std::string>> parse_papp_catalog(const std::string &html,
                                                                              const std::string &base_url);
+
+void PappLoader::request_launch_rom(const std::string &emulator, const std::string &rom_path) {
+  if (this->launched_ || this->launch_pending_) {
+    ESP_LOGW(TAG, "Ignoring emulator/ROM launch while a PAPP is starting or running");
+    return;
+  }
+  const std::string app_name = normalized_remote_emulator(emulator);
+  if (app_name.empty()) {
+    ESP_LOGW(TAG, "Ignoring emulator/ROM launch with invalid emulator name: %s", emulator.c_str());
+    return;
+  }
+  if (!valid_remote_rom_path(rom_path)) {
+    ESP_LOGW(TAG, "Ignoring emulator/ROM launch with invalid ROM path: %s (use /sd/... or /usb0/...)",
+             rom_path.c_str());
+    return;
+  }
+
+  struct stat rom_stat{};
+  const std::string rom_fs_path = runtime_path(rom_path.c_str());
+  if (stat(rom_fs_path.c_str(), &rom_stat) != 0 || (!S_ISREG(rom_stat.st_mode) && !S_ISDIR(rom_stat.st_mode))) {
+    ESP_LOGW(TAG, "Emulator/ROM launch refused: ROM or game directory is not available: %s", rom_path.c_str());
+    return;
+  }
+
+  // resolve_app_ prefers an installed copy and then scans every configured
+  // storage catalog, including the same folder under /usb0. It can also find a
+  // versioned PAPP such as nes-0.1.0.papp.
+  const std::string app = this->resolve_app_(app_name);
+  if (app.empty()) {
+    ESP_LOGW(TAG, "Emulator/ROM launch refused: no PAPP found for emulator '%s'", app_name.c_str());
+    return;
+  }
+
+  // Match the on-screen picker: the in-memory setting is what the current app
+  // reads, while the sidecar preserves the last choice when the SD is mounted.
+  svc_settings_rom_path_set(rom_path.c_str());
+  this->write_file("/sd/roms/papp/" + app_name + ".rom", rom_path + "\n");
+  ESP_LOGI(TAG, "Remote emulator launch: emulator=%s rom=%s papp=%s", app_name.c_str(), rom_path.c_str(), app.c_str());
+  this->request_launch(app);
+}
 
 #ifdef PAPP_LOADER_USE_LVGL
 struct PappCatalogButtonContext {
@@ -272,25 +373,29 @@ static void papp_catalog_switch_event_cb(lv_event_t *event) {
   if (event != nullptr && lv_event_get_code(event) == LV_EVENT_CLICKED)
     static_cast<PappLoader *>(lv_event_get_user_data(event))->next_catalog(1);
 }
+
+struct PappRomSelectorButtonContext {
+  PappLoader *loader;
+  std::string path;
+};
+
+static void papp_rom_selector_button_event_cb(lv_event_t *event) {
+  if (event == nullptr)
+    return;
+  auto *context = static_cast<PappRomSelectorButtonContext *>(lv_event_get_user_data(event));
+  if (context == nullptr)
+    return;
+  if (lv_event_get_code(event) == LV_EVENT_CLICKED) {
+    context->loader->select_rom(context->path);
+  } else if (lv_event_get_code(event) == LV_EVENT_DELETE) {
+    delete context;
+  }
+}
 #endif
 
 #ifdef PAPP_LOADER_USE_USB_HIDX
-static bool usb_keyboard_key_pressed(usb_hidx::USBHIDXComponent *component, uint8_t keycode) {
-#ifdef USE_BINARY_SENSOR
-  if (component == nullptr || keycode == 0)
-    return false;
-  auto &sensors = component->get_keyboard_key_sensors();
-  auto it = sensors.find(keycode);
-  return it != sensors.end() && it->second != nullptr && it->second->get_state();
-#else
-  (void) component;
-  (void) keycode;
-  return false;
-#endif
-}
-
 static bool usb_mouse_button_pressed(binary_sensor::BinarySensor *sensor) {
-  return sensor != nullptr && sensor->get_state();
+  return sensor != nullptr && sensor->get_state_default(false);
 }
 
 #endif
@@ -742,7 +847,7 @@ void PappLoader::loop() {
   // press. The state callback above latches short presses, while this level
   // check clears the guard even when no new HID report has arrived yet.
   if (!this->launched_ && this->toggle_button_ != nullptr) {
-    const bool pressed = this->toggle_button_->get_state();
+    const bool pressed = this->toggle_button_->get_state_default(false);
     if (!pressed) {
       this->toggle_wait_release_ = false;
       this->toggle_close_requested_ = false;
@@ -751,7 +856,7 @@ void PappLoader::loop() {
   }
 
   if (!this->launched_ && this->launch_button_ != nullptr) {
-    const bool pressed = this->launch_button_->get_state();
+    const bool pressed = this->launch_button_->get_state_default(false);
     if (!pressed)
       this->launch_wait_release_ = false;
     if (pressed && !this->launch_button_state_ && !this->launch_wait_release_) {
@@ -1181,9 +1286,7 @@ void PappLoader::enqueue_keyboard_event_(int key, bool down) {
 
 void PappLoader::enqueue_keyboard_tap_(int key) {
   // The USB text sensor reports characters, not a complete HID key lifecycle.
-  // A tap is correct for console text and prevents printable keys from being
-  // left held in Quake after a map/portal transition. Continuous controls
-  // (WASD, arrows, etc.) are supplied independently by read_input_().
+  // A tap gives keyboard-oriented apps a complete press/release pair.
   this->enqueue_keyboard_event_(key, true);
   this->enqueue_keyboard_event_(key, false);
 }
@@ -1192,21 +1295,18 @@ void PappLoader::enqueue_keyboard_text(const std::string &text) {
   if (text.empty())
     return;
 
-  // Arrow keys normally have a held-state path through the configured USB
-  // binary sensors and read_input_(); queueing the text sensor's named arrow
-  // tap as well made Quake menus advance twice. Some usb_hidx builds only
-  // update key sensors for printable keys, so when the arrow's sensor is not
-  // on, press the matching D-pad direction briefly instead (see read_input_).
+  // When the launcher is visible, arrows remain menu navigation. Once a PAPP
+  // is running, they are keyboard taps like every other keyboard key; they do
+  // not become synthetic gamepad input.
   static const char *const arrows[4] = {"Up", "Right", "Down", "Left"};  // PAPP_INPUT_UP..LEFT order
-  static const uint8_t arrow_codes[4] = {0x52, 0x4F, 0x51, 0x50};
+  static const int keyboard_keys[4] = {PAPP_KEY_UP, PAPP_KEY_RIGHT, PAPP_KEY_DOWN, PAPP_KEY_LEFT};
   for (int i = 0; i < 4; i++) {
     if (text != arrows[i])
       continue;
-#ifdef PAPP_LOADER_USE_USB_HIDX
-    if (this->usb_hidx_ != nullptr && usb_keyboard_key_pressed(this->usb_hidx_, arrow_codes[i]))
-      return;  // the held sensor has it
-#endif
-    this->arrow_tap_until_us_[i] = esp_timer_get_time() + ARROW_TAP_US;
+    if (this->launched_)
+      this->enqueue_keyboard_tap_(keyboard_keys[i]);
+    else
+      this->arrow_tap_until_us_[i] = esp_timer_get_time() + ARROW_TAP_US;
     return;
   }
 
@@ -1314,22 +1414,31 @@ int PappLoader::read_mouse_(int *dx, int *dy, int *buttons) {
   this->mouse_dy_accum_ = 0;
   portEXIT_CRITICAL(&this->mouse_input_lock_);
 
+  // USB HIDX reports movement in physical panel directions. PAPPs draw in
+  // the unrotated source canvas, while this loader presents the framebuffer
+  // rotated 180 degrees. Normalize once at the service boundary so ScummVM
+  // and every other PAPP sees the same visible-screen direction as the native
+  // RetroESP32-P4 launcher.
+  int canvas_x = static_cast<int>(x);
+  int canvas_y = static_cast<int>(y);
+  papp_mouse_delta_to_canvas(&canvas_x, &canvas_y);
+
   if (dx != nullptr)
-    *dx = x;
+    *dx = canvas_x;
   if (dy != nullptr)
-    *dy = y;
+    *dy = canvas_y;
 
   int state = 0;
 #ifdef PAPP_LOADER_USE_USB_HIDX
   if (this->usb_hidx_ != nullptr) {
     if (this->usb_hidx_->get_mouse_left_sensor() != nullptr &&
-        this->usb_hidx_->get_mouse_left_sensor()->get_state())
+        this->usb_hidx_->get_mouse_left_sensor()->get_state_default(false))
       state |= 0x01;
     if (this->usb_hidx_->get_mouse_right_sensor() != nullptr &&
-        this->usb_hidx_->get_mouse_right_sensor()->get_state())
+        this->usb_hidx_->get_mouse_right_sensor()->get_state_default(false))
       state |= 0x02;
     if (this->usb_hidx_->get_mouse_middle_sensor() != nullptr &&
-        this->usb_hidx_->get_mouse_middle_sensor()->get_state())
+        this->usb_hidx_->get_mouse_middle_sensor()->get_state_default(false))
       state |= 0x04;
   }
 #endif
@@ -1490,6 +1599,27 @@ void PappLoader::handle_launcher_controls_() {
   }
 
   const uint8_t newly_pressed = direction & static_cast<uint8_t>(~this->launcher_direction_state_);
+  if (this->rom_selector_page_active_()) {
+    if (!this->rom_selector_buttons_.empty() && (newly_pressed & ((1U << 0) | (1U << 2))) != 0) {
+      const uint16_t count = static_cast<uint16_t>(this->rom_selector_buttons_.size());
+      uint16_t next = this->rom_selector_selection_;
+      if ((newly_pressed & (1U << 0)) != 0)
+        next = next == 0 ? static_cast<uint16_t>(count - 1) : static_cast<uint16_t>(next - 1);
+      else
+        next = next + 1 >= count ? 0 : static_cast<uint16_t>(next + 1);
+      this->set_rom_selector_selection_(next);
+      ESP_LOGI(TAG, "NES ROM selection: %u/%u", static_cast<unsigned>(next + 1), static_cast<unsigned>(count));
+    }
+    const bool rom_select_pressed = (a && !this->launcher_a_state_) || (touch && !this->launcher_touch_state_);
+    if (rom_select_pressed && !this->rom_selector_buttons_.empty() &&
+        this->rom_selector_selection_ < this->rom_selector_buttons_.size()) {
+      ESP_LOGI(TAG, "NES ROM physical select: %u/%u", static_cast<unsigned>(this->rom_selector_selection_ + 1),
+               static_cast<unsigned>(this->rom_selector_buttons_.size()));
+      lv_obj_send_event(this->rom_selector_buttons_[this->rom_selector_selection_], LV_EVENT_CLICKED, nullptr);
+    }
+    remember();
+    return;
+  }
   if (this->store_ui_) {
     // Grid and detail page: d-pad moves, A opens / presses, B goes back, L/R switch
     // sources, Select opens the side menu.
@@ -1533,6 +1663,89 @@ void PappLoader::handle_launcher_controls_() {
   remember();
 }
 
+void PappLoader::ensure_catalog_volume_control_() {
+  if (this->catalog_volume_button_ != nullptr && this->catalog_volume_slider_ != nullptr)
+    return;
+
+  lv_obj_t *layer = lv_layer_top();
+  if (layer == nullptr)
+    return;
+  const int32_t screen_w = lv_display_get_horizontal_resolution(nullptr);
+  constexpr int32_t button_w = 44;
+  constexpr int32_t button_h = 34;
+  constexpr int32_t slider_w = 210;
+  constexpr int32_t gap = 10;
+  const int32_t button_x = std::max<int32_t>(0, screen_w - 174);
+  const int32_t slider_x = std::max<int32_t>(0, button_x - gap - slider_w);
+
+  this->catalog_volume_slider_ = lv_slider_create(layer);
+  lv_obj_set_size(this->catalog_volume_slider_, slider_w, 18);
+  lv_obj_set_pos(this->catalog_volume_slider_, slider_x, 13);
+  lv_slider_set_range(this->catalog_volume_slider_, 0, 100);
+  lv_slider_set_value(this->catalog_volume_slider_, this->master_volume_, LV_ANIM_OFF);
+  lv_obj_add_flag(this->catalog_volume_slider_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_style_bg_color(this->catalog_volume_slider_, lv_color_hex(0x334155), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(this->catalog_volume_slider_, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(this->catalog_volume_slider_, lv_color_hex(0x38BDF8), LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(this->catalog_volume_slider_, LV_OPA_COVER, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(this->catalog_volume_slider_, lv_color_hex(0xFFFFFF), LV_PART_KNOB);
+  lv_obj_set_style_bg_opa(this->catalog_volume_slider_, LV_OPA_COVER, LV_PART_KNOB);
+  lv_obj_add_event_cb(
+      this->catalog_volume_slider_,
+      [](lv_event_t *event) {
+        lv_event_stop_bubbling(event);
+        if (lv_event_get_code(event) != LV_EVENT_VALUE_CHANGED)
+          return;
+        auto *loader = static_cast<PappLoader *>(lv_event_get_user_data(event));
+        if (loader != nullptr)
+          loader->set_master_volume(
+              lv_slider_get_value(static_cast<const lv_obj_t *>(lv_event_get_target(event))));
+      },
+      LV_EVENT_VALUE_CHANGED, this);
+
+  this->catalog_volume_button_ = lv_obj_create(layer);
+  lv_obj_set_style_pad_all(this->catalog_volume_button_, 0, 0);
+  lv_obj_set_style_border_width(this->catalog_volume_button_, 1, 0);
+  lv_obj_set_style_border_color(this->catalog_volume_button_, lv_color_hex(0x38BDF8), 0);
+  lv_obj_set_style_radius(this->catalog_volume_button_, 8, 0);
+  lv_obj_set_style_bg_color(this->catalog_volume_button_, lv_color_hex(0x1E293B), 0);
+  lv_obj_set_style_bg_opa(this->catalog_volume_button_, LV_OPA_COVER, 0);
+  lv_obj_set_size(this->catalog_volume_button_, button_w, button_h);
+  lv_obj_set_pos(this->catalog_volume_button_, button_x, 4);
+  lv_obj_remove_flag(this->catalog_volume_button_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(this->catalog_volume_button_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_remove_flag(this->catalog_volume_button_, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+  // U+F028 is the same speaker glyph used by the running-PAPP overlay and
+  // the YAML volume page.
+  lv_obj_t *volume_label = lv_label_create(this->catalog_volume_button_);
+  lv_label_set_text(volume_label, "\xEF\x80\xA8");
+  lv_obj_set_style_text_color(volume_label, lv_color_hex(0xE2E8F0), 0);
+  lv_obj_center(volume_label);
+  lv_obj_add_event_cb(
+      this->catalog_volume_button_,
+      [](lv_event_t *event) {
+        lv_event_stop_bubbling(event);
+        if (lv_event_get_code(event) != LV_EVENT_CLICKED)
+          return;
+        auto *slider = static_cast<lv_obj_t *>(lv_event_get_user_data(event));
+        if (slider == nullptr)
+          return;
+        if (lv_obj_has_flag(slider, LV_OBJ_FLAG_HIDDEN))
+          lv_obj_remove_flag(slider, LV_OBJ_FLAG_HIDDEN);
+        else
+          lv_obj_add_flag(slider, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(slider);
+      },
+      LV_EVENT_CLICKED, this->catalog_volume_slider_);
+}
+
+void PappLoader::raise_catalog_volume_control_() {
+  if (this->catalog_volume_slider_ != nullptr)
+    lv_obj_move_foreground(this->catalog_volume_slider_);
+  if (this->catalog_volume_button_ != nullptr)
+    lv_obj_move_foreground(this->catalog_volume_button_);
+}
+
 void PappLoader::update_catalog_ui_() {
   if (this->catalog_container_ == nullptr)
     return;
@@ -1543,43 +1756,109 @@ void PappLoader::update_catalog_ui_() {
   const std::string reopen_url = this->detail_url_;
   if (this->store_ui_)
     this->close_detail_();
+  if (this->catalog_header_ != nullptr) {
+    lv_obj_add_flag(this->catalog_header_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_delete_async(this->catalog_header_);
+    this->catalog_header_ = nullptr;
+  }
   lv_obj_clean(this->catalog_container_);
   this->catalog_tiles_.clear();
+  this->visible_catalog_indices_.clear();
   this->free_icons_();
   this->catalog_selection_ = 0;
   this->catalog_header_rows_ = 0;
-  if (this->catalogs_.size() > 1) {
-    const std::string title =
-        std::string(LV_SYMBOL_LEFT "  ") + this->catalogs_[this->catalog_index_].name + "  " LV_SYMBOL_RIGHT;
-    lv_obj_t *header = lv_list_add_btn(this->catalog_container_, nullptr, title.c_str());
-    if (header != nullptr) {
-      lv_obj_add_event_cb(header, papp_catalog_switch_event_cb, LV_EVENT_CLICKED, this);
-      this->catalog_header_rows_ = 1;
-    }
-  }
   if (this->store_ui_) {
-    // The list's light theme does not suit the store: dark, switcher row included.
+    // The list's light theme does not suit the store. The source bar is a
+    // page-level floating object below, so it stays pinned while this list
+    // scrolls.
     lv_obj_set_style_bg_color(this->catalog_container_, lv_color_hex(0x08111F), 0);
     lv_obj_set_style_text_color(this->catalog_container_, lv_color_hex(0xE2E8F0), 0);
-    if (this->catalog_header_rows_ > 0) {
-      lv_obj_t *header = lv_obj_get_child(this->catalog_container_, 0);
-      lv_obj_set_style_bg_color(header, lv_color_hex(0x111C33), 0);
-      lv_obj_set_style_text_color(header, lv_color_hex(0xE2E8F0), 0);
-      lv_obj_set_style_border_color(header, lv_color_hex(0x1E2A44), 0);
-    }
     this->build_drawer_();  // this source's side menu, even when it lists nothing
+    for (size_t i = 0; i < this->catalog_entries_.size(); i++) {
+      if (!this->favorites_page_active_ ||
+          this->is_app_favorite_(this->detail_app_key_(static_cast<int>(i))))
+        this->visible_catalog_indices_.push_back(i);
+    }
+
+    lv_obj_t *screen = lv_obj_get_screen(this->catalog_container_);
+    lv_obj_update_layout(screen);
+    const int32_t header_h = 42;
+    const int32_t gap = 4;
+    const int32_t list_x = lv_obj_get_x(this->catalog_container_);
+    const int32_t list_y = lv_obj_get_y(this->catalog_container_);
+    const int32_t width = lv_obj_get_width(this->catalog_container_);
+    lv_obj_t *header = lv_obj_create(screen);
+    lv_obj_set_pos(header, list_x, std::max<int32_t>(0, list_y - header_h - gap));
+    lv_obj_set_size(header, width, header_h);
+    lv_obj_set_style_pad_all(header, 10, 0);
+    lv_obj_set_style_radius(header, 10, 0);
+    lv_obj_set_style_bg_color(header, lv_color_hex(0x111C33), 0);
+    lv_obj_set_style_bg_opa(header, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(header, 1, 0);
+    lv_obj_set_style_border_color(header, lv_color_hex(0x1E2A44), 0);
+    lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(header, LV_OBJ_FLAG_FLOATING);
+    if (this->catalogs_.size() > 1 && !this->favorites_page_active_) {
+      lv_obj_add_flag(header, LV_OBJ_FLAG_CLICKABLE);
+      lv_obj_remove_flag(header, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+      lv_obj_add_event_cb(header, papp_catalog_switch_event_cb, LV_EVENT_CLICKED, this);
+    }
+    const std::string source_name = this->favorites_page_active_
+                                        ? std::string("*  Favorites")
+                                        : (this->catalogs_.empty() ? std::string("Library")
+                                                                    : this->catalogs_[this->catalog_index_].name);
+    const size_t shown = this->favorites_page_active_ ? this->visible_catalog_indices_.size()
+                                                      : this->catalog_entries_.size();
+    const std::string title = this->favorites_page_active_
+                                  ? source_name
+                                  : std::string(LV_SYMBOL_LEFT "  ") + source_name + "  " LV_SYMBOL_RIGHT;
+    lv_obj_t *title_label = lv_label_create(header);
+    lv_label_set_text(title_label, title.c_str());
+    lv_obj_set_style_text_color(title_label, lv_color_hex(0xE2E8F0), 0);
+    // Leave room for the app count and drawer tab. Volume lives in the fixed
+    // toolbar at the top of the screen, not in this scrolling source bar.
+    lv_obj_set_width(title_label, std::max<int32_t>(100, width - 170));
+    lv_obj_set_height(title_label, 24);
+    lv_label_set_long_mode(title_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(title_label, LV_ALIGN_LEFT_MID, 0, 0);
+    const std::string count = std::to_string(shown) + (shown == 1 ? " app" : " apps");
+    lv_obj_t *count_label = lv_label_create(header);
+    lv_label_set_text(count_label, count.c_str());
+    lv_obj_set_style_text_color(count_label, lv_color_hex(0x94A3B8), 0);
+    lv_obj_set_width(count_label, 116);
+    lv_obj_set_height(count_label, 24);
+    lv_label_set_long_mode(count_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(count_label, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(count_label, LV_ALIGN_RIGHT_MID, 0, 0);
+
+    this->catalog_header_ = header;
+    // The header is created after the drawer, so explicitly restore the
+    // drawer's z-order. Otherwise the source bar can paint over its panel.
+    if (this->drawer_ != nullptr)
+      lv_obj_move_foreground(this->drawer_);
+    this->ensure_catalog_volume_control_();
+    this->raise_catalog_volume_control_();
   }
   if (this->catalog_entries_.empty()) {
     lv_list_add_text(this->catalog_container_, this->catalog_loading_ ? "Loading..." : "No .papp files found");
     return;
   }
   if (this->store_ui_) {
+    if (this->visible_catalog_indices_.empty()) {
+      lv_list_add_text(this->catalog_container_, "No favorites yet\nOpen an app's details and choose Add to favorites.");
+      return;
+    }
     this->build_store_grid_();
     this->set_catalog_selection_(keep_selection);
     for (size_t i = 0; i < this->catalog_entries_.size() && !reopen_url.empty(); i++) {
       if (this->catalog_entries_[i].second == reopen_url) {
-        this->set_catalog_selection_(static_cast<uint16_t>(i));
-        this->open_detail_(static_cast<int>(i));
+        for (size_t visible = 0; visible < this->visible_catalog_indices_.size(); visible++) {
+          if (this->visible_catalog_indices_[visible] == i) {
+            this->set_catalog_selection_(static_cast<uint16_t>(visible));
+            this->open_detail_(static_cast<int>(visible));
+            break;
+          }
+        }
         break;
       }
     }
@@ -1596,6 +1875,232 @@ void PappLoader::update_catalog_ui_() {
     lv_obj_add_event_cb(button, papp_catalog_button_event_cb, LV_EVENT_ALL, context);
   }
   this->set_catalog_selection_(0);
+}
+
+bool PappLoader::rom_selector_page_active_() const {
+  return this->rom_selector_container_ != nullptr &&
+         lv_scr_act() == lv_obj_get_screen(this->rom_selector_container_);
+}
+
+void PappLoader::set_rom_selector_selection_(uint16_t index) {
+  if (this->rom_selector_buttons_.empty()) {
+    this->rom_selector_selection_ = 0;
+    return;
+  }
+  if (index >= this->rom_selector_buttons_.size())
+    index = static_cast<uint16_t>(this->rom_selector_buttons_.size() - 1);
+  this->rom_selector_selection_ = index;
+  for (lv_obj_t *button : this->rom_selector_buttons_)
+    lv_obj_remove_state(button, LV_STATE_FOCUSED);
+  lv_obj_t *selected = this->rom_selector_buttons_[index];
+  lv_obj_add_state(selected, LV_STATE_FOCUSED);
+  lv_obj_scroll_to_view(selected, LV_ANIM_ON);
+}
+
+static bool rom_selector_extension_matches(const std::string &name, const std::string &extensions) {
+  const size_t dot = name.rfind('.');
+  if (dot == std::string::npos)
+    return false;
+  std::string extension = name.substr(dot);
+  for (char &c : extension)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  std::string allowed = extensions;
+  for (char &c : allowed)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return allowed.find(extension + "|") != std::string::npos;
+}
+
+void PappLoader::refresh_rom_selector() {
+  this->update_rom_selector_ui_();
+}
+
+void PappLoader::select_rom(const std::string &path) {
+  if (path.empty())
+    return;
+  if (this->launched_ || this->launch_pending_) {
+    ESP_LOGW(TAG, "Ignoring ROM selection while a PAPP is starting or running: %s", path.c_str());
+    return;
+  }
+
+  // The emulator PAPP reads this shared setting at startup. The sidecar keeps
+  // the choice across a reboot when the SD card is available; USB-only systems
+  // still work for the current launch through the in-memory setting.
+  svc_settings_rom_path_set(path.c_str());
+  this->write_file(this->rom_selector_sidecar_, path + "\n");
+
+  std::string app = this->rom_selector_source_;
+  if (app.empty())
+    app = this->resolve_app_(this->rom_selector_app_);
+  if (app.empty()) {
+    ESP_LOGW(TAG, "ROM selected but no %s PAPP is installed or reachable", this->rom_selector_app_.c_str());
+    return;
+  }
+  ESP_LOGI(TAG, "%s ROM selected: %s; launching %s", this->rom_selector_app_.c_str(), path.c_str(), app.c_str());
+  this->request_launch(app);
+}
+
+void PappLoader::update_rom_selector_ui_() {
+  if (this->rom_selector_container_ == nullptr)
+    return;
+
+  this->rom_selector_buttons_.clear();
+  this->rom_selector_paths_.clear();
+  lv_obj_clean(this->rom_selector_container_);
+  lv_obj_set_style_bg_color(this->rom_selector_container_, lv_color_hex(0x08111F), 0);
+  lv_obj_set_style_text_color(this->rom_selector_container_, lv_color_hex(0xE2E8F0), 0);
+  this->rom_selector_selection_ = 0;
+
+  std::string relative = this->rom_selector_folder_;
+  while (!relative.empty() && relative.front() == '/')
+    relative.erase(relative.begin());
+  while (!relative.empty() && relative.back() == '/')
+    relative.pop_back();
+
+  std::vector<std::pair<std::string, std::string>> entries;
+  if (!relative.empty()) {
+    for (const auto &root : this->data_search_) {
+      const std::string folder = root + "/" + relative;
+      const std::string fs_folder = runtime_path(folder.c_str());
+      DIR *dir = opendir(fs_folder.c_str());
+      if (dir == nullptr)
+        continue;
+      while (dirent *entry = readdir(dir)) {
+        const std::string name = entry->d_name;
+        if (name == "." || name == ".." || !rom_selector_extension_matches(name, this->rom_selector_extensions_))
+          continue;
+        struct stat info{};
+        if (stat((fs_folder + "/" + name).c_str(), &info) != 0 || !S_ISREG(info.st_mode))
+          continue;
+        std::string label = name;
+        if (root != "/sd")
+          label += " (" + root.substr(1) + ")";
+        entries.emplace_back(label, folder + "/" + name);
+      }
+      closedir(dir);
+    }
+  }
+  std::sort(entries.begin(), entries.end(), [](const auto &left, const auto &right) {
+    std::string a = left.first;
+    std::string b = right.first;
+    for (char &c : a)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (char &c : b)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return a < b;
+  });
+
+  for (const auto &entry : entries) {
+    auto *context = new PappRomSelectorButtonContext{this, entry.second};  // NOLINT
+    lv_obj_t *button = lv_list_add_btn(this->rom_selector_container_, nullptr, entry.first.c_str());
+    if (button == nullptr) {
+      delete context;
+      continue;
+    }
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x101F31), 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x172F4A), LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x214B69), LV_STATE_PRESSED);
+    lv_obj_set_style_text_color(button, lv_color_hex(0xE2E8F0), 0);
+    lv_obj_set_style_border_width(button, 1, 0);
+    lv_obj_set_style_border_color(button, lv_color_hex(0x2D5875), 0);
+    lv_obj_add_event_cb(button, papp_rom_selector_button_event_cb, LV_EVENT_ALL, context);
+    this->rom_selector_buttons_.push_back(button);
+    this->rom_selector_paths_.push_back(entry.second);
+  }
+
+  if (this->rom_selector_buttons_.empty()) {
+    std::string message = "No compatible games found in /" + relative +
+                          "\nSupported files: " + this->rom_selector_extensions_ +
+                          "\n\nChecked /sd and /usb0.";
+    lv_list_add_text(this->rom_selector_container_, message.c_str());
+  } else {
+    this->set_rom_selector_selection_(0);
+  }
+  ESP_LOGI(TAG, "%s ROM selector: found %u game(s) under %s across %u storage root(s)",
+           this->rom_selector_app_.c_str(),
+           static_cast<unsigned>(this->rom_selector_buttons_.size()), relative.c_str(),
+           static_cast<unsigned>(this->data_search_.size()));
+}
+#endif
+
+#ifdef PAPP_LOADER_USE_LVGL
+struct RomSelectorDefinition {
+  const char *app;
+  const char *folder;
+  const char *extensions;
+};
+
+// Keep this table aligned with launcher/main/main.c and the extensions passed
+// to each emulator's emu_rom_path()/emu_load_rom() helper. Data-driven ports
+// such as Doom, Quake, Red Alert, and ScummVM intentionally launch directly.
+static const RomSelectorDefinition ROM_SELECTOR_DEFINITIONS[] = {
+    {"nes", "roms/nes", ".nes|.zip|"},
+    {"nesplus", "roms/nes", ".nes|.fds|.nsf|.zip|"},
+    {"gb", "roms/gb", ".gb|.gbc|.zip|"},
+    {"sms", "roms/sms", ".sms|.gg|.col|.zip|"},
+    {"spectrum", "roms/spectrum", ".z80|.sna|.tap|.tzx|.zip|"},
+    {"stella", "roms/a26", ".a26|.bin|.zip|"},
+    {"handy", "roms/lynx", ".lnx|.lyx|.zip|"},
+    {"pce", "roms/pce", ".pce|.zip|"},
+    {"atari800", "roms/a800", ".atr|.xex|.com|.cas|.a52|.car|.rom|.bin|.zip|"},
+    {"snes", "roms/snes", ".smc|.sfc|.zip|"},
+    {"genesis", "roms/gen", ".md|.gen|.bin|.smd|.zip|"},
+    {"prosystem", "roms/a78", ".a78|.bin|.zip|"},
+    {"neogeo", "roms/neogeo", ".zip|"},
+    {"ngp", "roms/ngp", ".ngp|.ngc|.zip|"},
+    {"ws", "roms/ws", ".ws|.wsc|.zip|"},
+    {"msx", "roms/msx", ".rom|.mx1|.mx2|.zip|"},
+    {"gx4000", "roms/gx4000", ".cpr|.bin|.zip|"},
+    {"gw", "roms/gw", ".gw|.lcd|.zip|"},
+};
+
+static std::string rom_selector_app_id(const std::string &source) {
+  // Store URLs are versioned (for example nes-0.1.0.papp), while the
+  // selector definitions are keyed by the app's unversioned name (nes).
+  // Keep this in one place with the rest of the loader's app-key handling so
+  // detail-page actions and the library's Launch action behave identically.
+  std::string value = canvas::app_key(source);
+  for (char &c : value)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return value;
+}
+
+static const RomSelectorDefinition *rom_selector_definition_for(const std::string &source) {
+  const std::string id = rom_selector_app_id(source);
+  for (const auto &definition : ROM_SELECTOR_DEFINITIONS) {
+    if (id == definition.app)
+      return &definition;
+  }
+  return nullptr;
+}
+
+bool PappLoader::open_rom_selector_for_app(const std::string &source) {
+  const RomSelectorDefinition *definition = rom_selector_definition_for(source);
+  if (definition == nullptr)
+    return false;
+
+  this->rom_selector_app_ = definition->app;
+  this->rom_selector_folder_ = definition->folder;
+  this->rom_selector_extensions_ = definition->extensions;
+  this->rom_selector_source_ = source;
+  this->rom_selector_sidecar_ = std::string("/sd/roms/papp/") + definition->app + ".rom";
+
+  if (this->rom_selector_container_ == nullptr) {
+    ESP_LOGW(TAG, "ROM selector for %s is not configured in the YAML", definition->app);
+    return false;
+  }
+
+  // A store detail panel lives over the library page. Remove it before
+  // switching screens so its deferred deletion cannot cover the picker.
+  this->close_detail_();
+  lv_scr_load(lv_obj_get_screen(this->rom_selector_container_));
+  this->update_rom_selector_ui_();
+  ESP_LOGI(TAG, "Opening %s ROM selector: %s (%s)", definition->app, definition->folder,
+           definition->extensions);
+  return true;
+}
+
+bool PappLoader::supports_rom_selector(const std::string &source) const {
+  return rom_selector_definition_for(source) != nullptr;
 }
 #endif
 
@@ -1729,6 +2234,78 @@ void PappLoader::clear_close_overlay_() {
       display::COLOR_BITNESS_565, false);
 }
 
+void PappLoader::draw_volume_overlay_() {
+  if (!this->launched_ || this->display_ == nullptr)
+    return;
+
+  // Keep the hit target square, but do not draw a box outline around the
+  // speaker. The launcher uses the same speaker-only symbol.
+  std::fill_n(volume_overlay_buffer, VOLUME_BUTTON_SIZE * VOLUME_BUTTON_SIZE, 0x1020);
+
+  // Simple speaker glyph. The small waves use the same idea as LV_SYMBOL_VOLUME_MAX.
+  for (int y = 22; y < 36; y++)
+    for (int x = 13; x < 23; x++)
+      volume_overlay_buffer[y * VOLUME_BUTTON_SIZE + x] = 0xFFFF;
+  for (int row = -8; row <= 8; row++) {
+    const int reach = 10 - std::abs(row);
+    const int y = 29 + row;
+    for (int x = 22; x < 22 + reach; x++)
+      volume_overlay_buffer[y * VOLUME_BUTTON_SIZE + x] = 0xFFFF;
+  }
+  const int bars = std::max<int32_t>(0, std::min<int32_t>(5, (this->master_volume_ + 19) / 20));
+  for (int bar = 0; bar < 5; bar++) {
+    const int height = 5 + bar * 3;
+    const uint16_t color = bar < bars ? 0xFFFF : 0x7BEF;
+    for (int y = 29 - height; y <= 29 + height; y++)
+      for (int x = 37 + bar * 4; x < 40 + bar * 4; x++)
+        volume_overlay_buffer[y * VOLUME_BUTTON_SIZE + x] = color;
+  }
+
+  this->display_->draw_pixels_at(
+      this->geometry_.volume_raw_x(), this->geometry_.volume_raw_y(), VOLUME_BUTTON_SIZE, VOLUME_BUTTON_SIZE,
+      reinterpret_cast<const uint8_t *>(volume_overlay_buffer), display::COLOR_ORDER_RGB,
+      display::COLOR_BITNESS_565, false);
+}
+
+void PappLoader::draw_volume_slider_overlay_() {
+  if (!this->launched_ || !this->volume_slider_visible_ || this->display_ == nullptr)
+    return;
+
+  std::fill_n(volume_slider_overlay_buffer, VOLUME_SLIDER_WIDTH * VOLUME_SLIDER_HEIGHT, 0x1020);
+  const int track_left = 16;
+  const int track_right = VOLUME_SLIDER_WIDTH - 16;
+  const int track_top = 24;
+  const int track_bottom = 34;
+  const int level = std::max<int32_t>(0, std::min<int32_t>(100, this->master_volume_));
+  // The panel's raw transfer is rotated 180 degrees by the display path. Use
+  // the mirrored raw coordinate here so the visible knob follows touch: left
+  // means quiet and right means loud.
+  const int knob_x = track_right - (track_right - track_left) * level / 100;
+  for (int y = track_top; y <= track_bottom; y++) {
+    for (int x = track_left; x <= track_right; x++)
+      volume_slider_overlay_buffer[y * VOLUME_SLIDER_WIDTH + x] = x >= knob_x ? 0x07FF : 0x7BEF;
+  }
+  for (int y = 17; y <= 41; y++) {
+    for (int x = std::max(track_left, knob_x - 5); x <= std::min(track_right, knob_x + 5); x++)
+      volume_slider_overlay_buffer[y * VOLUME_SLIDER_WIDTH + x] = 0xFFFF;
+  }
+  this->display_->draw_pixels_at(
+      this->geometry_.volume_slider_raw_x(), this->geometry_.volume_slider_raw_y(),
+      VOLUME_SLIDER_WIDTH, VOLUME_SLIDER_HEIGHT,
+      reinterpret_cast<const uint8_t *>(volume_slider_overlay_buffer), display::COLOR_ORDER_RGB,
+      display::COLOR_BITNESS_565, false);
+}
+
+void PappLoader::clear_volume_overlay_() {
+  if (this->display_ == nullptr)
+    return;
+  std::fill_n(volume_overlay_buffer, VOLUME_BUTTON_SIZE * VOLUME_BUTTON_SIZE, 0x0000);
+  this->display_->draw_pixels_at(
+      this->geometry_.volume_raw_x(), this->geometry_.volume_raw_y(), VOLUME_BUTTON_SIZE, VOLUME_BUTTON_SIZE,
+      reinterpret_cast<const uint8_t *>(volume_overlay_buffer), display::COLOR_ORDER_RGB,
+      display::COLOR_BITNESS_565, false);
+}
+
 void PappLoader::poll_close_button_() {
   if (this->touchscreen_ == nullptr || this->global_close_requested_)
     return;
@@ -1736,8 +2313,11 @@ void PappLoader::poll_close_button_() {
   auto touch = this->touchscreen_->get_touch();
   if (!touch.has_value() || (touch->state & touchscreen::STATE_RELEASING) != 0) {
     this->close_hold_since_us_ = 0;
+    this->volume_touch_active_ = false;
     return;
   }
+  if (this->volume_touch_(touch->x, touch->y))
+    return;
   this->close_touch_(touch->x, touch->y);
 }
 
@@ -1763,6 +2343,30 @@ bool PappLoader::close_touch_(int x, int y) {
   if (!this->global_close_requested_) {
     this->begin_close_();
     ESP_LOGI(TAG, "PAPP on-screen close requested");
+  }
+  return true;
+}
+
+bool PappLoader::volume_touch_(int x, int y) {
+  const bool in_button = this->geometry_.in_volume(x, y);
+  const bool in_slider = this->geometry_.in_volume_slider(x, y);
+  if (!in_button && !in_slider) {
+    this->volume_touch_active_ = false;
+    this->volume_slider_visible_ = false;
+    return false;
+  }
+  if (!this->volume_touch_active_) {
+    this->volume_touch_active_ = true;
+    if (in_button) {
+      this->volume_slider_visible_ = !this->volume_slider_visible_;
+      ESP_LOGI(TAG, "PAPP on-screen volume slider %s", this->volume_slider_visible_ ? "shown" : "hidden");
+    }
+  }
+  if (in_slider) {
+    const int left = this->geometry_.volume_slider_x() + 16;
+    const int right = this->geometry_.volume_slider_x() + canvas::VOLUME_SLIDER_WIDTH - 16;
+    const int level = right > left ? (x - left) * 100 / (right - left) : 0;
+    this->set_master_volume(std::max<int32_t>(0, std::min<int32_t>(100, level)));
   }
   return true;
 }
@@ -1823,7 +2427,11 @@ void PappLoader::flush_framebuffer_() {
         .mode = PPA_TRANS_MODE_BLOCKING,
     };
     if (ppa_do_scale_rotate_mirror(reinterpret_cast<ppa_client_handle_t>(this->ppa_srm_client_), &cfg) == ESP_OK) {
-      esp_cache_msync(this->ppa_framebuffer_, frame_bytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+      // PPA wrote the rotated pixels behind the CPU cache. Invalidate/update
+      // the CPU view before the display driver reads the buffer. DIR_C2M here
+      // pushed stale cache lines back over the fresh PPA output, which showed
+      // up as intermittent full-screen green flashes in every PAPP.
+      esp_cache_msync(this->ppa_framebuffer_, frame_bytes, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
       display_buffer = this->ppa_framebuffer_;
       ppa_ok = true;
     }
@@ -1875,11 +2483,10 @@ void PappLoader::send_display_buffer_(const uint16_t *display_buffer, int64_t fl
       display::COLOR_BITNESS_565, false);
   // Over the canvas (close_touch_) the control is neither drawn nor cleared:
   // either would cover the app's own corner.
-  if (geometry.close_beside()) {
-    if (this->launched_)
-      this->draw_close_overlay_();
-    else
-      this->clear_close_overlay_();
+  if (this->launched_) {
+    this->draw_close_overlay_();
+    this->draw_volume_overlay_();
+    this->draw_volume_slider_overlay_();
   }
 
   const int64_t flush_us = esp_timer_get_time() - flush_start_us;
@@ -2096,7 +2703,7 @@ static constexpr size_t WRITE_FILE_MAX_BYTES = 16 * 1024;
 // Text files only: a written .papp or firmware image would be code. Deleting
 // also takes leftovers (.bak, .log), but never game data or apps.
 static bool writable_extension(const std::string &path, bool deleting = false) {
-  static const char *const allowed[] = {".ini", ".cfg", ".conf", ".txt", ".json", ".yaml", ".yml", ".csv"};
+  static const char *const allowed[] = {".ini", ".cfg", ".conf", ".txt", ".json", ".yaml", ".yml", ".csv", ".rom"};
   const size_t dot = path.rfind('.');
   if (dot == std::string::npos || path.find('/', dot) != std::string::npos)
     return false;
@@ -2503,15 +3110,15 @@ void PappLoader::read_input_(papp_gamepad_state_t *state) {
   std::memset(state, 0, sizeof(*state));
   for (uint8_t i = 0; i < BUTTON_COUNT; i++) {
     if (this->buttons_[i] != nullptr)
-      state->values[i] = this->buttons_[i]->get_state() ? 1 : 0;
+      state->values[i] = this->buttons_[i]->get_state_default(false) ? 1 : 0;
   }
 
   // GPIO2 is the board's TTP223 touch button. The right trigger remains a
   // normal A/fire input, and the touch button is an additional A/fire input.
-  if (this->fire_button_ != nullptr && this->fire_button_->get_state())
+  if (this->fire_button_ != nullptr && this->fire_button_->get_state_default(false))
     state->values[PAPP_INPUT_A] = 1;
   if (this->touch_button_ != nullptr) {
-    if (!this->touch_button_->get_state())
+    if (!this->touch_button_->get_state_default(false))
       this->touch_button_released_();
     else if (!this->touch_button_stuck_())
       state->values[PAPP_INPUT_A] = 1;
@@ -2520,7 +3127,7 @@ void PappLoader::read_input_(papp_gamepad_state_t *state) {
   // Elecrow GPIO16 is a resistor ladder. Preserve the calibrated mapping used
   // by the ESPHome UI, while exposing its diagonal/axis directions to PAPPs.
   if (this->adc_button_sensor_ != nullptr) {
-    const float voltage = this->adc_button_sensor_->get_state();
+    const float voltage = this->adc_button_sensor_->has_state() ? this->adc_button_sensor_->get_state() : 3.3f;
     if (voltage < 1.48f) {
       state->values[PAPP_INPUT_DOWN] = 1;
       state->values[PAPP_INPUT_LEFT] = 1;
@@ -2545,12 +3152,12 @@ void PappLoader::read_input_(papp_gamepad_state_t *state) {
   }
 
   if (this->left_stick_x_sensor_ != nullptr) {
-    const float x = this->left_stick_x_sensor_->get_state();
+    const float x = this->left_stick_x_sensor_->has_state() ? this->left_stick_x_sensor_->get_state() : 0.0f;
     if (x < -stick_deadzone) state->values[PAPP_INPUT_LEFT] = 1;
     if (x > stick_deadzone) state->values[PAPP_INPUT_RIGHT] = 1;
   }
   if (this->left_stick_y_sensor_ != nullptr) {
-    const float y = this->left_stick_y_sensor_->get_state();
+    const float y = this->left_stick_y_sensor_->has_state() ? this->left_stick_y_sensor_->get_state() : 0.0f;
     // The Elecrow ADC axis reports positive when the stick is physically up.
     // Invert only Y; the X polarity is already correct.
     if (y < -stick_deadzone) state->values[PAPP_INPUT_DOWN] = 1;
@@ -2559,12 +3166,12 @@ void PappLoader::read_input_(papp_gamepad_state_t *state) {
   // The PAPP ABI has no separate strafe-axis fields. L/R are used as the
   // horizontal right-stick strafe pair, and Doom maps them to strafe keys.
   if (this->right_stick_x_sensor_ != nullptr) {
-    const float x = this->right_stick_x_sensor_->get_state();
+    const float x = this->right_stick_x_sensor_->has_state() ? this->right_stick_x_sensor_->get_state() : 0.0f;
     if (x < -stick_deadzone) state->values[PAPP_INPUT_L] = 1;
     if (x > stick_deadzone) state->values[PAPP_INPUT_R] = 1;
   }
   if (this->right_stick_y_sensor_ != nullptr) {
-    const float y = this->right_stick_y_sensor_->get_state();
+    const float y = this->right_stick_y_sensor_->has_state() ? this->right_stick_y_sensor_->get_state() : 0.0f;
     if (y < -stick_deadzone) state->values[PAPP_INPUT_DOWN] = 1;
     if (y > stick_deadzone) state->values[PAPP_INPUT_UP] = 1;
   }
@@ -2579,21 +3186,9 @@ void PappLoader::read_input_(papp_gamepad_state_t *state) {
 
 #ifdef PAPP_LOADER_USE_USB_HIDX
   if (this->usb_hidx_ != nullptr) {
-    auto key = [this](uint8_t code) { return usb_keyboard_key_pressed(this->usb_hidx_, code); };
-    state->values[PAPP_INPUT_UP] |= key(0x52) || key(0x1A);       // Up / W
-    state->values[PAPP_INPUT_RIGHT] |= key(0x4F) || key(0x07);    // Right / D
-    state->values[PAPP_INPUT_DOWN] |= key(0x51) || key(0x16);     // Down / S
-    state->values[PAPP_INPUT_LEFT] |= key(0x50) || key(0x04);     // Left / A
-    state->values[PAPP_INPUT_A] |= key(0x2C) || key(0x28) || key(0x1D); // Space/Enter/Z
-    state->values[PAPP_INPUT_B] |= key(0x1B);                    // X
-    state->values[PAPP_INPUT_X] |= key(0x06);                    // C
-    state->values[PAPP_INPUT_Y] |= key(0x19) || key(0x2B);        // V/Tab
-    state->values[PAPP_INPUT_L] |= key(0x14);                     // Q
-    state->values[PAPP_INPUT_R] |= key(0x08);                     // E
-    state->values[PAPP_INPUT_MENU] |= key(0x29);                  // Escape
-    state->values[PAPP_INPUT_START] |= key(0x28);                 // Enter
-    state->values[PAPP_INPUT_SELECT] |= key(0x2A);                // Backspace
-
+    /* USB keyboard keys are text/keyboard input, not a second gamepad. Apps
+     * such as C64/Frodo consume them through input_keyboard_read(). Keep
+     * mouse buttons here because they are a separate HID input device. */
     state->values[PAPP_INPUT_A] |= usb_mouse_button_pressed(this->usb_hidx_->get_mouse_left_sensor());
     state->values[PAPP_INPUT_B] |= usb_mouse_button_pressed(this->usb_hidx_->get_mouse_right_sensor());
     state->values[PAPP_INPUT_X] |= usb_mouse_button_pressed(this->usb_hidx_->get_mouse_middle_sensor());
@@ -2606,7 +3201,7 @@ void PappLoader::read_input_(papp_gamepad_state_t *state) {
   // existing PAPP binary on the SD card; no ABI or SD-card replacement is
   // required.
   if (this->toggle_button_ != nullptr) {
-    const bool pressed = this->toggle_button_->get_state();
+    const bool pressed = this->toggle_button_->get_state_default(false);
     this->toggle_button_state_ = pressed;
     if (pressed)
       this->toggle_close_requested_ = true;
@@ -2626,6 +3221,7 @@ void PappLoader::read_input_(papp_gamepad_state_t *state) {
 void PappLoader::begin_close_() {
   if (this->global_close_requested_)
     return;
+  this->volume_slider_visible_ = false;
   this->close_requested_us_ = esp_timer_get_time();
   this->global_close_requested_ = true;
 }
@@ -2660,12 +3256,17 @@ int PappLoader::read_touch_(int *x, int *y) {
       this->touch_active_ = false;
     }
     this->close_hold_since_us_ = 0;
+    this->volume_touch_active_ = false;
     return 0;
   }
 
   const int physical_x = touch->x;
   const int physical_y = touch->y;
   const canvas::Geometry geometry = this->geometry_;
+  if (this->volume_touch_(physical_x, physical_y)) {
+    this->touch_active_ = true;
+    return 0;
+  }
   if (this->close_touch_(physical_x, physical_y)) {
     this->touch_active_ = true;
     return 0;
@@ -2679,10 +3280,10 @@ int PappLoader::read_touch_(int *x, int *y) {
     return 0;
   }
 
-  // The touchscreen component already reports panel-oriented coordinates.
-  // The PAPP framebuffer is rotated later during display flush, but applying
-  // another 180-degree transform here would send a bottom-right touch to the
-  // top-left of the app canvas.
+  // The touchscreen component reports the physical landscape panel point,
+  // which is already the coordinate space used by the visible UI. The
+  // framebuffer's 180-degree presentation rotation must not be applied to
+  // touch a second time or left/right and up/down are reversed.
   const int logical_x = canvas_x;
   const int logical_y = canvas_y;
 
@@ -2708,7 +3309,7 @@ void PappLoader::audio_init_(int sample_rate) {
     ESP_LOGI(TAG, "PAPP audio initialized: %d Hz stereo 16-bit", sample_rate);
   }
   this->speaker_->set_mute_state(false);
-  this->speaker_->set_volume(1.0f);
+  this->speaker_->set_volume(static_cast<float>(this->master_volume_) / 100.0f);
   // The speaker's I2S channel and DMA buffers are allocated from internal
   // DMA-capable RAM as it starts: what is left for them.
   log_heap("as the app starts audio");
@@ -2744,7 +3345,19 @@ void PappLoader::audio_submit_(short *stereo_buf, int frame_count) {
   // without flooding the serial log. This is intentionally longer than the
   // block duration: it lets the 22.05 -> 48 kHz resampler free enough room for
   // the complete block instead of accepting a partial block and clicking.
-  const size_t written = this->speaker_->play(reinterpret_cast<const uint8_t *>(stereo_buf), bytes, pdMS_TO_TICKS(100));
+  // ``play`` writes into a chain of ring buffers and is allowed to return a
+  // short write when the chain is still starting or briefly full.  Dropping
+  // the tail of a PCM block creates a hole at the exact point where the
+  // speaker starts, which is audible as a click/static burst.  Keep retrying
+  // the unwritten tail until it is accepted or the speaker gives up.
+  size_t written = 0;
+  const uint8_t *pcm = reinterpret_cast<const uint8_t *>(stereo_buf);
+  while (written < bytes) {
+    const size_t chunk = this->speaker_->play(pcm + written, bytes - written, pdMS_TO_TICKS(100));
+    if (chunk == 0)
+      break;
+    written += chunk;
+  }
   static int64_t last_audio_debug_log_us = 0;
   const int64_t audio_now_us = esp_timer_get_time();
   if (audio_now_us - last_audio_debug_log_us >= 30000000) {
@@ -2846,6 +3459,10 @@ int PappLoader::svc_touch_read_points(papp_touch_point_t *points, int max) {
     int x = 0, y = 0;
     if (!geometry.to_canvas(touches[i].x, touches[i].y, &x, &y))
       continue;
+    // Keep multi-touch coordinates on the same canonical PAPP ABI as
+    // touch_read(): the physical panel point is already in the visible
+    // landscape coordinate space. Do not apply the framebuffer rotation a
+    // second time here.
     points[out].x = static_cast<int16_t>(x);
     points[out].y = static_cast<int16_t>(y);
     points[out].id = touches[i].id;
@@ -2981,7 +3598,7 @@ int PappLoader::svc_input_l3_read() {
     return 0;
   if (active_->close_buttons_() & 4)
     return 1;
-  return active_->toggle_button_ != nullptr && active_->toggle_button_->get_state() ? 1 : 0;
+  return active_->toggle_button_ != nullptr && active_->toggle_button_->get_state_default(false) ? 1 : 0;
 }
 int PappLoader::svc_input_mouse_read(int *dx, int *dy, int *buttons) {
 #ifdef PAPP_LOADER_USE_USB_HIDX
@@ -3896,6 +4513,286 @@ int PappLoader::svc_file_stat(const char *path, papp_file_stat_t *out) {
   return 0;
 }
 
+static uint16_t zip_u16_(const unsigned char *p) {
+  return static_cast<uint16_t>(p[0]) | static_cast<uint16_t>(p[1] << 8);
+}
+
+static uint32_t zip_u32_(const unsigned char *p) {
+  return static_cast<uint32_t>(p[0]) |
+         (static_cast<uint32_t>(p[1]) << 8) |
+         (static_cast<uint32_t>(p[2]) << 16) |
+         (static_cast<uint32_t>(p[3]) << 24);
+}
+
+static bool zip_extension_(const std::string &name, const char *extensions, std::string *out) {
+  if (extensions == nullptr || out == nullptr || name.empty() || name.back() == '/')
+    return false;
+  const size_t slash = name.find_last_of("/\\");
+  const size_t dot = name.find_last_of('.');
+  if (dot == std::string::npos || (slash != std::string::npos && dot <= slash))
+    return false;
+  std::string ext = name.substr(dot);
+  for (char &c : ext)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  std::string list = extensions;
+  for (char &c : list)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (list.find(ext + "|") == std::string::npos)
+    return false;
+  *out = std::move(ext);
+  return true;
+}
+
+int PappLoader::svc_file_zip_extract_first(const char *archive, const char *extensions,
+                                           const char *cache_dir, const char *cache_stem,
+                                           char *out_path, size_t out_size) {
+  ESP_LOGI(TAG, "ZIP ROM: extractor entered archive=%s extensions=%s cache=%s stem=%s",
+           archive != nullptr ? archive : "(null)",
+           extensions != nullptr ? extensions : "(null)",
+           cache_dir != nullptr ? cache_dir : "(null)",
+           cache_stem != nullptr ? cache_stem : "(null)");
+  if (archive == nullptr || extensions == nullptr || cache_dir == nullptr ||
+      cache_stem == nullptr || out_path == nullptr || out_size == 0 || cache_stem[0] == '\0' ||
+      std::strchr(cache_stem, '/') != nullptr || std::strchr(cache_stem, '\\') != nullptr ||
+      std::strstr(cache_stem, "..") != nullptr) {
+    ESP_LOGI(TAG, "ZIP ROM: invalid extractor arguments");
+    return -1;
+  }
+
+  const std::string archive_fs = app_file_path_(archive);
+  const std::string cache_fs = app_file_path_(cache_dir);
+  const int mkdir_result = cache_fs.empty() ? -1 : svc_file_mkdir(cache_dir);
+  if (archive_fs.empty() || cache_fs.empty() || mkdir_result != 0) {
+    ESP_LOGI(TAG, "ZIP ROM: path/cache setup failed archive=%s fs=%s cache=%s cache_fs=%s mkdir=%d",
+             archive, archive_fs.c_str(), cache_dir, cache_fs.c_str(), mkdir_result);
+    return -1;
+  }
+
+  FILE *zip = std::fopen(archive_fs.c_str(), "rb");
+  if (zip == nullptr) {
+    ESP_LOGI(TAG, "ZIP ROM: archive open failed %s (errno %d)", archive_fs.c_str(), errno);
+    return -1;
+  }
+
+  int result = -1;
+  const char *failure = "unknown";
+  FILE *output = nullptr;
+  std::string output_portable;
+  std::string output_fs;
+  do {
+    if (std::fseek(zip, 0, SEEK_END) != 0) {
+      failure = "seek end";
+      break;
+    }
+    const long archive_size = std::ftell(zip);
+    if (archive_size < 22) {
+      failure = "archive too small";
+      break;
+    }
+
+    // A classic ZIP end record is at most 65,557 bytes from EOF (22-byte
+    // record plus the maximum 65,535-byte comment). ZIP64 is deliberately
+    // not accepted here: console ROM archives are small and the launcher
+    // does not need a second, much larger parser for them.
+    const long tail_size = std::min<long>(archive_size, 22L + 65535L);
+    std::vector<unsigned char> tail(static_cast<size_t>(tail_size));
+    if (std::fseek(zip, archive_size - tail_size, SEEK_SET) != 0 ||
+        std::fread(tail.data(), 1, tail.size(), zip) != tail.size()) {
+      failure = "read archive tail";
+      break;
+    }
+    long eocd = -1;
+    for (long i = tail_size - 22; i >= 0; --i) {
+      if (zip_u32_(tail.data() + i) == 0x06054b50U) {
+        const uint16_t comment = zip_u16_(tail.data() + i + 20);
+        if (i + 22L + comment <= tail_size) {
+          eocd = i;
+          break;
+        }
+      }
+    }
+    if (eocd < 0) {
+      failure = "missing end record";
+      break;
+    }
+
+    const uint16_t disk = zip_u16_(tail.data() + eocd + 4);
+    const uint16_t central_disk = zip_u16_(tail.data() + eocd + 6);
+    const uint16_t entries_disk = zip_u16_(tail.data() + eocd + 8);
+    const uint16_t entries = zip_u16_(tail.data() + eocd + 10);
+    const uint32_t central_size = zip_u32_(tail.data() + eocd + 12);
+    const uint32_t central_offset = zip_u32_(tail.data() + eocd + 16);
+    if (disk != 0 || central_disk != 0 || entries_disk != entries || entries == 0xffff ||
+        central_size == 0xffffffffU || central_offset == 0xffffffffU ||
+        static_cast<uint64_t>(central_offset) + central_size > static_cast<uint64_t>(archive_size)) {
+      failure = "invalid central directory";
+      break;
+    }
+
+    struct ZipEntry {
+      uint16_t method = 0;
+      uint32_t compressed = 0;
+      uint32_t uncompressed = 0;
+      uint32_t local_offset = 0;
+      std::string extension;
+    } selected;
+    bool found = false;
+    if (std::fseek(zip, static_cast<long>(central_offset), SEEK_SET) != 0) {
+      failure = "seek central directory";
+      break;
+    }
+    for (uint32_t index = 0; index < entries; ++index) {
+      unsigned char central[46];
+      if (std::fread(central, 1, sizeof(central), zip) != sizeof(central) ||
+          zip_u32_(central) != 0x02014b50U)
+        break;
+      const uint16_t name_len = zip_u16_(central + 28);
+      const uint16_t extra_len = zip_u16_(central + 30);
+      const uint16_t comment_len = zip_u16_(central + 32);
+      if (name_len == 0 || name_len > 4096)
+        break;
+      std::string name(name_len, '\0');
+      if (std::fread(name.data(), 1, name.size(), zip) != name.size())
+        break;
+      if (extra_len != 0 && std::fseek(zip, extra_len, SEEK_CUR) != 0)
+        break;
+      if (comment_len != 0 && std::fseek(zip, comment_len, SEEK_CUR) != 0)
+        break;
+      if (found)
+        continue;
+      std::string extension;
+      if (!zip_extension_(name, extensions, &extension))
+        continue;
+      const uint16_t flags = zip_u16_(central + 8);
+      const uint16_t method = zip_u16_(central + 10);
+      // Bit 3 means sizes are in a data descriptor, but the central
+      // directory still contains the values we need. Encryption is not
+      // supported because ROM ZIPs should not require a password.
+      if ((flags & 1U) != 0 || (method != 0 && method != 8))
+        continue;
+      selected.method = method;
+      selected.compressed = zip_u32_(central + 20);
+      selected.uncompressed = zip_u32_(central + 24);
+      selected.local_offset = zip_u32_(central + 42);
+      selected.extension = std::move(extension);
+      found = true;
+    }
+    if (!found) {
+      failure = "no supported ROM entry";
+      break;
+    }
+
+    output_portable = std::string(cache_dir) + "/" + cache_stem + selected.extension;
+    if (output_portable.size() + 1 > out_size) {
+      failure = "output path too long";
+      break;
+    }
+    output_fs = app_file_path_(output_portable.c_str());
+    if (output_fs.empty()) {
+      failure = "output path refused";
+      break;
+    }
+    output = std::fopen(output_fs.c_str(), "wb");
+    if (output == nullptr) {
+      failure = "output open";
+      break;
+    }
+
+    unsigned char local[30];
+    if (std::fseek(zip, static_cast<long>(selected.local_offset), SEEK_SET) != 0 ||
+        std::fread(local, 1, sizeof(local), zip) != sizeof(local) ||
+        zip_u32_(local) != 0x04034b50U) {
+      failure = "invalid local header";
+      break;
+    }
+    const uint16_t local_name_len = zip_u16_(local + 26);
+    const uint16_t local_extra_len = zip_u16_(local + 28);
+    if (std::fseek(zip, static_cast<long>(local_name_len) + local_extra_len, SEEK_CUR) != 0) {
+      failure = "seek ROM data";
+      break;
+    }
+
+    uint64_t written = 0;
+    std::vector<unsigned char> input(4096);
+    std::vector<unsigned char> buffer(8192);
+    if (selected.method == 0) {
+      uint32_t remaining = selected.compressed;
+      while (remaining != 0) {
+        const size_t want = std::min<size_t>(input.size(), remaining);
+        const size_t got = std::fread(input.data(), 1, want, zip);
+        if (got == 0 || std::fwrite(input.data(), 1, got, output) != got)
+          break;
+        remaining -= static_cast<uint32_t>(got);
+        written += got;
+      }
+      if (remaining != 0) {
+        failure = "short stored ROM";
+        break;
+      }
+    } else {
+      z_stream stream{};
+      if (inflateInit2(&stream, -MAX_WBITS) != Z_OK) {
+        failure = "inflate init";
+        break;
+      }
+      uint32_t remaining = selected.compressed;
+      int inflate_result = Z_OK;
+      bool ok = true;
+      while (ok && inflate_result != Z_STREAM_END) {
+        if (stream.avail_in == 0 && remaining != 0) {
+          const size_t want = std::min<size_t>(input.size(), remaining);
+          const size_t got = std::fread(input.data(), 1, want, zip);
+          if (got == 0) {
+            ok = false;
+            break;
+          }
+          remaining -= static_cast<uint32_t>(got);
+          stream.next_in = input.data();
+          stream.avail_in = static_cast<uInt>(got);
+        }
+        stream.next_out = buffer.data();
+        stream.avail_out = static_cast<uInt>(buffer.size());
+        // This component carries a small zlib variant whose inflate() also
+        // takes the optional CRC-check flag. ZIP's raw deflate stream has no
+        // zlib wrapper, so there is no wrapper checksum to verify here.
+        inflate_result = inflate(&stream, Z_NO_FLUSH, 0);
+        const size_t produced = buffer.size() - stream.avail_out;
+        if (produced != 0 && std::fwrite(buffer.data(), 1, produced, output) != produced)
+          ok = false;
+        written += produced;
+        if (inflate_result != Z_OK && inflate_result != Z_STREAM_END)
+          ok = false;
+        if (stream.avail_in == 0 && remaining == 0 && inflate_result == Z_OK)
+          ok = false;
+      }
+      inflateEnd(&stream);
+      if (!ok || inflate_result != Z_STREAM_END) {
+        failure = "inflate data";
+        break;
+      }
+    }
+    if (written != selected.uncompressed || std::fflush(output) != 0) {
+      failure = "ROM size or flush";
+      break;
+    }
+    std::fclose(output);
+    output = nullptr;
+    std::memcpy(out_path, output_portable.c_str(), output_portable.size() + 1);
+    ESP_LOGI(TAG, "ZIP ROM: %s -> %s", archive, output_portable.c_str());
+    result = 0;
+  } while (false);
+
+  if (output != nullptr)
+    std::fclose(output);
+  if (result != 0) {
+    ESP_LOGI(TAG, "ZIP ROM: extraction failed archive=%s reason=%s", archive, failure);
+  }
+  if (result != 0 && !output_fs.empty())
+    unlink(output_fs.c_str());
+  std::fclose(zip);
+  return result;
+}
+
 void *PappLoader::svc_file_open(const char *path, const char *mode) {
   const std::string mapped = runtime_path(path);
   FILE *file = std::fopen(mapped.c_str(), mode);
@@ -4061,7 +4958,6 @@ void PappLoader::svc_delay_ms(int ms) {
 int64_t PappLoader::svc_get_time_us() { return esp_timer_get_time(); }
 
 static char s_rom_path[256] = {};
-static int32_t s_volume = 100;
 static int32_t s_brightness = 100;
 char *PappLoader::svc_settings_rom_path_get() { return s_rom_path; }
 void PappLoader::svc_settings_rom_path_set(const char *path) {
@@ -4070,8 +4966,19 @@ void PappLoader::svc_settings_rom_path_set(const char *path) {
   std::strncpy(s_rom_path, path, sizeof(s_rom_path) - 1);
   s_rom_path[sizeof(s_rom_path) - 1] = '\0';
 }
-int32_t PappLoader::svc_settings_volume_get() { return s_volume; }
-void PappLoader::svc_settings_volume_set(int32_t level) { s_volume = level; }
+void PappLoader::set_master_volume(int32_t level) {
+  this->master_volume_ = std::max<int32_t>(0, std::min<int32_t>(100, level));
+  if (this->speaker_ != nullptr)
+    this->speaker_->set_volume(static_cast<float>(this->master_volume_) / 100.0f);
+  ESP_LOGI(TAG, "PAPP master volume: %ld%%", static_cast<long>(this->master_volume_));
+}
+int32_t PappLoader::svc_settings_volume_get() {
+  return PappLoader::active_ != nullptr ? PappLoader::active_->master_volume_ : 100;
+}
+void PappLoader::svc_settings_volume_set(int32_t level) {
+  if (PappLoader::active_ != nullptr)
+    PappLoader::active_->set_master_volume(level);
+}
 int32_t PappLoader::svc_settings_brightness_get() { return s_brightness; }
 void PappLoader::svc_settings_brightness_set(int32_t level) { s_brightness = level; }
 
@@ -4204,6 +5111,7 @@ void PappLoader::populate_services(app_services_t *services) {
   services->file_remove = &PappLoader::svc_file_remove;
   services->file_rename = &PappLoader::svc_file_rename;
   services->file_stat = &PappLoader::svc_file_stat;
+  services->file_zip_extract_first = &PappLoader::svc_file_zip_extract_first;
 }
 
 esp_err_t psram_app_load(const char *path, psram_app_handle_t *out_handle) {

@@ -6,6 +6,7 @@
   "author": "nofrendo; P4 PAPP port by NonaSuomy",
   "category": "Emulator",
   "license": "LGPL-2.0",
+  "icon": "icon.png",
   "about": "The classic nofrendo 2.0 NES core running as an ESP32-P4 PAPP. The launcher selects a .nes ROM from the configured storage; no ROMs are bundled.",
   "controls": [
     "D-pad: D-pad",
@@ -14,6 +15,9 @@
     "Menu or L+R: quit to launcher",
     "L3 / on-screen close: quit to launcher",
     "Save states are disabled in this port"
+  ],
+  "requires": [
+    {"path": "/sd/roms/nes/", "note": "Place .nes or .zip ROMs here; Select game scans this folder", "optional": true}
   ],
   "upstream": {
     "project": "nofrendo",
@@ -26,6 +30,9 @@
     "ref": "b72144c85f74017c8c4bcaaa6d82fe65d8c0a6b5",
     "path": "apps/psram_nes"
   },
+  "patches": [
+    "local:ports/nes/patches/*.patch"
+  ],
   "includes": [
     "apps/psram_nes",
     "apps/papp_emulator_common",

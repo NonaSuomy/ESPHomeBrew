@@ -1,8 +1,16 @@
 # Remote control for the PAPP loader over the ESPHome native API.
 #
-# Adds five API actions that the ESP bridge (tools/esp_bridge) or Home
+# Adds API actions that the ESP bridge (tools/esp_bridge), the helper in
+# tools/papp_device.py, or Home
 # Assistant can call:
 #   papp_launch(url)       stream and start a .papp from a URL
+#   papp_launch_rom(emulator, rom)
+#                          select an emulator PAPP and a local game path
+#                          under /sd or /usb0, then start it
+#   papp_install_url(url, name, size, digest)
+#                            verify and save a .papp under /sd/roms/papp
+#   papp_upload_file(url, path, size, digest)
+#                            verify and save any file under a path below /sd
 #   papp_close()           close the running PAPP
 #   papp_refresh_catalog() reload the store catalog
 #   papp_screenshot()      send one 800x480 capture of the running PAPP to the
@@ -39,6 +47,33 @@ api:
         - papp_loader.launch_url:
             id: ${papp_loader_id}
             url: !lambda return url;
+    - action: papp_launch_rom
+      variables:
+        emulator: string
+        rom: string
+      then:
+        - papp_loader.launch_rom:
+            id: ${papp_loader_id}
+            emulator: !lambda return emulator;
+            rom: !lambda return rom;
+    - action: papp_install_url
+      variables:
+        url: string
+        name: string
+        size: int
+        digest: string
+      then:
+        - lambda: |-
+            id(${papp_loader_id})->request_install_url(url, name, static_cast<uint32_t>(size), digest);
+    - action: papp_upload_file
+      variables:
+        url: string
+        path: string
+        size: int
+        digest: string
+      then:
+        - lambda: |-
+            id(${papp_loader_id})->request_upload_url(url, path, static_cast<uint32_t>(size), digest);
     - action: papp_close
       then:
         - lambda: id(${papp_loader_id})->request_close();

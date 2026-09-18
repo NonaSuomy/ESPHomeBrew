@@ -1675,7 +1675,14 @@ void PappLoader::ensure_catalog_volume_control_() {
   constexpr int32_t button_h = 34;
   constexpr int32_t slider_w = 210;
   constexpr int32_t gap = 10;
-  const int32_t button_x = std::max<int32_t>(0, screen_w - 174);
+  // Keep the volume control out of the right-hand drawer. The drawer panel
+  // starts at screen_w - DRAWER_W + DRAWER_TAB - 8 (see papp_store.cpp), so
+  // leave a small gap before that edge even while the drawer is open.
+  constexpr int32_t drawer_w = 300;
+  constexpr int32_t drawer_panel_offset = 34 - 8;
+  constexpr int32_t drawer_gap = 16;
+  const int32_t drawer_panel_left = screen_w - drawer_w + drawer_panel_offset;
+  const int32_t button_x = std::max<int32_t>(0, drawer_panel_left - drawer_gap - button_w);
   const int32_t slider_x = std::max<int32_t>(0, button_x - gap - slider_w);
 
   this->catalog_volume_slider_ = lv_slider_create(layer);

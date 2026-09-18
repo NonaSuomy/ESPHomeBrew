@@ -2078,8 +2078,13 @@ void PappLoader::build_drawer_() {
   lv_obj_t *screen = lv_obj_get_screen(this->catalog_container_);
   lv_obj_t *drawer = plain_box(screen);
   lv_obj_add_flag(drawer, LV_OBJ_FLAG_FLOATING);  // not moved by scrolling or layouts
-  lv_obj_set_size(drawer, DRAWER_W, lv_obj_get_height(screen));
-  lv_obj_set_y(drawer, -lv_obj_get_style_pad_top(screen, LV_PART_MAIN));
+  // Leave the fixed top toolbar/header uncovered. The bottom margin also
+  // keeps the drawer from touching the display edge on shorter panels.
+  constexpr int32_t drawer_top = 48;
+  constexpr int32_t drawer_bottom = 12;
+  const int32_t drawer_height = std::max<int32_t>(0, lv_obj_get_height(screen) - drawer_top - drawer_bottom);
+  lv_obj_set_size(drawer, DRAWER_W, drawer_height);
+  lv_obj_set_y(drawer, drawer_top);
   lv_obj_set_style_bg_opa(drawer, LV_OPA_TRANSP, 0);
   this->drawer_ = drawer;
   lv_obj_set_x(drawer, drawer_x(drawer, this->side_menu_open_));

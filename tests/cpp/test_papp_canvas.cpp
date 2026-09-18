@@ -37,10 +37,11 @@ static void test_legacy_layout() {
   CHECK(g.x() == 112 && g.y() == 60);
   CHECK(g.raw_x() == 112 && g.raw_y() == 60);
   CHECK(g.close_beside());
-  CHECK(g.close_x() == 924 && g.close_y() == 70);        // LCD_X_OFFSET + 800 + 12, LCD_Y_OFFSET + 10
-  CHECK(g.close_raw_x() == 42 && g.close_raw_y() == 472);  // 1024 - 924 - 58, 600 - 70 - 58
-  CHECK(g.in_close(914, 60) && g.in_close(991, 137));
-  CHECK(!g.in_close(913, 60) && !g.in_close(992, 100) && !g.in_close(950, 138));
+  CHECK(g.close_x() == 924 && g.close_y() == 10);        // LCD_X_OFFSET + 800 + 12, panel top margin
+  CHECK(g.close_raw_x() == 42 && g.close_raw_y() == 532);  // 1024 - 924 - 58, 600 - 10 - 58
+  CHECK(g.volume_x() == 854 && g.volume_y() == 10);      // one gap left of close
+  CHECK(g.in_close(914, 0) && g.in_close(991, 77));
+  CHECK(!g.in_close(913, 0) && !g.in_close(992, 40) && !g.in_close(950, 78));
   int x = -1, y = -1;
   CHECK(g.to_canvas(112, 60, &x, &y) && x == 0 && y == 0);
   CHECK(g.to_canvas(911, 539, &x, &y) && x == 799 && y == 479);
@@ -60,7 +61,7 @@ static void test_full_panel_and_small_canvases() {
 
   const Geometry vga = make(1024, 600, 640, 480);
   CHECK(vga.x() == 192 && vga.y() == 60 && vga.raw_x() == 192 && vga.raw_y() == 60);
-  CHECK(vga.close_beside() && vga.close_x() == 192 + 640 + 12 && vga.close_y() == 70);
+  CHECK(vga.close_beside() && vga.close_x() == 192 + 640 + 12 && vga.close_y() == 10);
 
   // Too little room beside the canvas: over its corner instead.
   const Geometry wide = make(1024, 600, 960, 540);
@@ -74,6 +75,9 @@ static void test_full_panel_and_small_canvases() {
     CHECK(g.close_x() >= 0 && g.close_x() + CLOSE_SIZE <= g.panel_w);
     CHECK(g.close_y() >= 0 && g.close_y() + CLOSE_SIZE <= g.panel_h);
     CHECK(g.close_raw_x() >= 0 && g.close_raw_y() >= 0);
+    CHECK(g.volume_x() >= 0 && g.volume_x() + VOLUME_SIZE <= g.panel_w);
+    CHECK(g.volume_y() >= 0 && g.volume_y() + VOLUME_SIZE <= g.panel_h);
+    CHECK(g.volume_x() + VOLUME_SIZE + VOLUME_GAP <= g.close_x());
   }
 }
 

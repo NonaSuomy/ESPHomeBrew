@@ -19,4 +19,4 @@
 - The ESPHome `papp_loader` component (Nona's, not yet on GitHub; source attached in #plan seq 29) already has `launch_url` (HTTPS via cert bundle, 5 redirects, 15 s timeout) and a **catalog**: `catalog_url` HTML (max 64 KB), every href ending `.papp` becomes an LVGL list button.
 - Upstream RetroESP32-P4 has **no license file**, so CI fetches it at a pinned commit instead of copying code here.
 
-**State (2026-09-11):** store is live at https://nonasuomy.github.io/papp-conversions/ with `psram_lvgl-0.1.0.papp` (release `psram_lvgl-v0.1.0`, sha256 d3be57f3…). #2-#4 merged; #5 test reports in PR #4 (compiles for P4); #6 on-device test waiting on Nona; #7 on hold.
+**State (2026-09-11):** store is live at https://nonasuomy.github.io/esphomebrew/ with `psram_lvgl-0.1.0.papp` (release `psram_lvgl-v0.1.0`, sha256 d3be57f3…). #2-#4 merged; #5 test reports in PR #4 (compiles for P4); #6 on-device test waiting on Nona; #7 on hold.

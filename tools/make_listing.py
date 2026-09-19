@@ -43,7 +43,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import make_catalog as mc  # noqa: E402
 
-DEFAULT_STORE = "https://nonasuomy.github.io/papp-conversions/"
+DEFAULT_STORE = "https://nonasuomy.github.io/esphomebrew/"
 # What describes the app rather than one build of it: the store build's source
 # commit, changelog and version are left out, since this .papp may differ.
 COPIED_FIELDS = ("title", "description", "author", "category", "license", "about", "controls", "upstream", "canvas",

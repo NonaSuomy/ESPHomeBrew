@@ -19,7 +19,7 @@ The [device bridge](device-bridge.md) (`tools/device_bridge`) is its sibling. It
    - Don't paste the token into chat. If you lose it, the agent's page can issue a new one.
 2. **Get the tool** on the machine with the device:
    ```sh
-   git clone https://github.com/NonaSuomy/papp-conversions.git ~/code/papp-bridge/tool
+   git clone https://github.com/NonaSuomy/esphomebrew.git ~/code/papp-bridge/tool
    mkdir -p ~/.config/esp-bridge
    cp ~/code/papp-bridge/tool/tools/esp_bridge/config.example.toml ~/.config/esp-bridge/bridge.toml
    ```
@@ -71,7 +71,7 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 | `@esp-bridge upload esphome/device.yaml ref=main device=/dev/ttyUSB0` | Compile and flash |
 | `@esp-bridge run device.yaml source=local device=10.13.37.60 seconds=90` | Flash your local config over OTA, then capture 90 s of logs |
 | `@esp-bridge logs device.yaml source=local device=/dev/ttyUSB0 seconds=60` | Capture 60 s of logs |
-| `@esp-bridge launch url=https://github.com/NonaSuomy/papp-conversions/releases/download/psram_lvgl-v0.1.1/psram_lvgl-0.1.1.papp` | Stream and start that PAPP on the device |
+| `@esp-bridge launch url=https://github.com/NonaSuomy/esphomebrew/releases/download/psram_lvgl-v0.1.1/psram_lvgl-0.1.1.papp` | Stream and start that PAPP on the device |
 | `@esp-bridge launch url=… seconds=30 serial=/dev/ttyUSB0` | Start it and return 30 s of device log plus the serial console (a crash's full panic dump and backtrace only go to serial). The port must be in `[esphome].devices` and not open elsewhere; the bridge opens it without resetting the board. If the device crashes, the reply ends with `=== crash decoded ===`: the app's addresses mapped through the dev build's `.sym` file, and the firmware's run through addr2line on the firmware ELF whose SHA256 matches the dump (see `firmware_elf`/`addr2line` in `config.example.toml`) |
 | `@esp-bridge close` | Close the running PAPP |
 | `@esp-bridge catalog` | Reload the store list on the device |
@@ -88,7 +88,7 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
 - **Replies:** the bridge answers in the request's thread with ⏳ when it starts, then ✅/❌ with the last 40 log lines and the full log attached. It runs one job at a time; others wait their turn.
 - **In the bridge's terminal** every request is printed with who sent it and the result, e.g.
   ```
-  [14:02:11] @claude in #general: launch url=https://nonasuomy.github.io/papp-conversions/psram_touchtest-0.1.0.papp
+  [14:02:11] @claude in #general: launch url=https://nonasuomy.github.io/esphomebrew/psram_touchtest-0.1.0.papp
   [14:02:13]   ok in 1.8s: ✅ `launch` `psram_touchtest-0.1.0.papp` sent to 10.20.30.180.
   ```
   Refusals are printed too. To turn it off, set `[console] show_requests = false` in `bridge.toml`.
@@ -101,7 +101,7 @@ Mention the bridge on one line: an action, a YAML file, then `key=value` options
    ```yaml
    packages:
      papp_control:
-       url: https://github.com/NonaSuomy/papp-conversions
+       url: https://github.com/NonaSuomy/esphomebrew
        ref: main
        files: [esphome/device_control.yaml]
        refresh: 0s

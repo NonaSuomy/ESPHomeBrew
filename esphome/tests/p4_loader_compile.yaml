@@ -103,7 +103,7 @@ papp_loader:
     - name: SD / USB
       url: /sd/roms/papp/
     - name: Store
-      url: https://nonasuomy.github.io/papp-conversions/
+      url: https://nonasuomy.github.io/esphomebrew/
   default_catalog: Store
   report_url: https://example.invalid/papp-report
   report_log_bytes: 4096

@@ -4,13 +4,13 @@
 # launches the one you tap. Include it from your device YAML:
 #
 #   packages:
-#     papp_store: github://NonaSuomy/papp-conversions/esphome/store_page.yaml@main
+#     papp_store: github://NonaSuomy/esphomebrew/esphome/store_page.yaml@main
 #
 # and set the catalog on your papp_loader:
 #
 #   papp_loader:
 #     id: papp_runtime
-#     catalog_url: https://nonasuomy.github.io/papp-conversions/
+#     catalog_url: https://nonasuomy.github.io/esphomebrew/
 #     lvgl_id: lvgl_component
 #     ...
 #

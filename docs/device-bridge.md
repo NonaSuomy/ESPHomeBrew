@@ -43,7 +43,7 @@ You need `git` and Python 3.11 or newer (`pacman -S --needed git python`). The b
    - Don't paste the token into chat. The agent's page can issue a new one.
 2. **Get the tool.** It imports `tools/esp_bridge/esp_bridge.py`, so keep the whole checkout:
    ```sh
-   git clone https://github.com/NonaSuomy/papp-conversions.git ~/code/papp-bridge/tool
+   git clone https://github.com/NonaSuomy/esphomebrew.git ~/code/papp-bridge/tool
    mkdir -p ~/.config/device-bridge
    cp ~/code/papp-bridge/tool/tools/device_bridge/config.example.toml ~/.config/device-bridge/bridge.toml
    chmod 600 ~/.config/device-bridge/bridge.toml

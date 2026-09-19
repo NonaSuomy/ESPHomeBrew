@@ -22,7 +22,7 @@ Request format (reply in any channel, mention the bridge):
     @esp-bridge upload esphome/device.yaml ref=claude/fix device=/dev/ttyUSB0
     @esp-bridge run device.yaml source=local device=10.13.37.60 seconds=90
     @esp-bridge logs device.yaml source=local device=/dev/ttyUSB0 seconds=60
-    @esp-bridge launch url=https://github.com/NonaSuomy/papp-conversions/releases/download/…/app.papp
+    @esp-bridge launch url=https://github.com/NonaSuomy/esphomebrew/releases/download/…/app.papp
     @esp-bridge close
     @esp-bridge catalog
     @esp-bridge status
@@ -262,8 +262,8 @@ class Config:
         env_key = os.environ.get(api["encryption_key_env"], "") if api.get("encryption_key_env") else ""
         cfg.api_key = env_key or load_secret_map(cfg.secrets_files).get(api.get("encryption_key_secret", "")) or None
         cfg.allowed_url_prefixes = list(api.get("allowed_url_prefixes", [
-            "https://github.com/NonaSuomy/papp-conversions/releases/download/",
-            "https://nonasuomy.github.io/papp-conversions/",
+            "https://github.com/NonaSuomy/esphomebrew/releases/download/",
+            "https://nonasuomy.github.io/esphomebrew/",
         ]))
         fallback = raw.get("fallback", {})
         cfg.fallback_serial = fallback.get("serial") or None

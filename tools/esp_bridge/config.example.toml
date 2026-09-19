@@ -10,8 +10,8 @@ allowed_requesters = ["claude", "nona", "franklin"]   # who may send jobs
 
 [repo]
 # Builds from a clean checkout of this repository at the requested ref.
-url = "https://github.com/NonaSuomy/papp-conversions.git"
-path = "~/code/papp-bridge/papp-conversions"
+url = "https://github.com/NonaSuomy/esphomebrew.git"
+path = "~/code/papp-bridge/esphomebrew"
 allowed_yaml = ["esphome/*.yaml"]
 # Building a config runs code on this machine (external components and
 # PlatformIO scripts from that ref), so allow only refs pushed by people with
@@ -46,8 +46,8 @@ screen_port = 3233                           # papp_loader diagnostic stream (sc
 encryption_key_secret = "encryption_key016"  # name of the api key in secrets.yaml
 # encryption_key_env = "ESP_API_KEY"         # or read it from an env var
 allowed_url_prefixes = [
-  "https://github.com/NonaSuomy/papp-conversions/releases/download/",
-  "https://nonasuomy.github.io/papp-conversions/",
+  "https://github.com/NonaSuomy/esphomebrew/releases/download/",
+  "https://nonasuomy.github.io/esphomebrew/",
 ]
 # Crash decoding for `launch/close ... serial=`: the panic dump's firmware
 # addresses are looked up with addr2line in the firmware ELF whose SHA256

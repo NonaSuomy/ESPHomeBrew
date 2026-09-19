@@ -8,7 +8,7 @@ Replace the local `papp_loader` source with this repository:
 
 ```yaml
 external_components:
-  - source: github://NonaSuomy/papp-conversions@main
+  - source: github://NonaSuomy/esphomebrew@main
     components: [papp_loader]
 ```
 
@@ -17,7 +17,7 @@ external_components:
 ```yaml
 papp_loader:
   id: papp_runtime
-  catalog_url: https://nonasuomy.github.io/papp-conversions/
+  catalog_url: https://nonasuomy.github.io/esphomebrew/
   lvgl_id: lvgl_component
   data_root: /sd          # where app data (game files) goes; default /sd
   download_data: true     # default; false never downloads app data
@@ -37,7 +37,7 @@ papp_loader:
     - name: Network
       url: http://192.168.1.10:8000/
     - name: Store
-      url: https://nonasuomy.github.io/papp-conversions/
+      url: https://nonasuomy.github.io/esphomebrew/
   default_catalog: Store           # optional; the first one otherwise
 ```
 
@@ -77,7 +77,7 @@ With `library_style: grid` the library becomes an app store, like the Switch Hom
           then:
             - script.execute: sd_eject
     - name: GitHub
-      url: https://nonasuomy.github.io/papp-conversions/
+      url: https://nonasuomy.github.io/esphomebrew/
   ```
 
   Up to six buttons per source, each running any ESPHome actions. The menu starts parked, so the grid can use the whole page width: give the list (`set_catalog_container`) the full width and leave the right edge free for the tab (34 px).
@@ -130,7 +130,7 @@ Edit it by hand (or with the bridge's `writefile`) if you like; other entries an
 
 ```yaml
 packages:
-  papp_store: github://NonaSuomy/papp-conversions/esphome/store_page.yaml@main
+  papp_store: github://NonaSuomy/esphomebrew/esphome/store_page.yaml@main
 ```
 
 The page appears in the LVGL page order, so the existing ◀ / ▶ buttons in `top_layer` reach it. To add a shortcut on `main_page`:

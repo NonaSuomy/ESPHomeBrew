@@ -19,7 +19,7 @@ papp_loader:
 {
   "device": "esp32-p4-elecrow-aio",
   "app": "psram_lvgl-0.1.0.papp",
-  "source": "https://github.com/NonaSuomy/papp-conversions/releases/download/psram_lvgl-v0.1.0/psram_lvgl-0.1.0.papp",
+  "source": "https://github.com/NonaSuomy/esphomebrew/releases/download/psram_lvgl-v0.1.0/psram_lvgl-0.1.0.papp",
   "outcome": "exited",
   "result": 0,
   "runtime_ms": 48213,
@@ -47,7 +47,7 @@ The GitHub token stays in Home Assistant's `secrets.yaml`. Use a fine-grained to
 # configuration.yaml
 rest_command:
   papp_test_report:
-    url: "https://api.github.com/repos/NonaSuomy/papp-conversions/issues/{{ issue }}/comments"
+    url: "https://api.github.com/repos/NonaSuomy/esphomebrew/issues/{{ issue }}/comments"
     method: POST
     headers:
       Authorization: !secret papp_github_token   # "Bearer github_pat_..."

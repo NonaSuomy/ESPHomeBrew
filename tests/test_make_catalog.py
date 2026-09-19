@@ -70,7 +70,7 @@ class DataTests(unittest.TestCase):
         self.assertEqual(lines[0], "# papp-data 1")
         size, digest, target, url = lines[2].split(" ")
         self.assertEqual((int(size), digest, target), (len(WAD), sha(WAD), "roms/doom/doom1.wad"))
-        self.assertEqual(url, "https://nonasuomy.github.io/papp-conversions/data/psram_doom/roms/doom/doom1.wad")
+        self.assertEqual(url, "https://nonasuomy.github.io/esphomebrew/data/psram_doom/roms/doom/doom1.wad")
         self.assertEqual((self.out / "data/psram_doom/roms/quake/id1/pak0.pak").read_bytes(), PAK)
         self.assertEqual(mc.data_list_name(app()), "psram_doom-0.1.0.files")
 
@@ -112,7 +112,7 @@ class DataTests(unittest.TestCase):
         self.assertTrue((self.out / "psram_doom-0.1.0.files").exists())
         self.assertFalse((self.out / "psram_lvgl-0.1.0.files").exists())
         store = {a["name"]: a for a in json.loads((self.out / "store.json").read_text())["apps"]}
-        self.assertEqual(store["psram_doom"]["data"]["list_url"], "https://nonasuomy.github.io/papp-conversions/psram_doom-0.1.0.files")
+        self.assertEqual(store["psram_doom"]["data"]["list_url"], "https://nonasuomy.github.io/esphomebrew/psram_doom-0.1.0.files")
         self.assertNotIn("data", store["psram_lvgl"])
         page = (self.out / "index.html").read_text()
         self.assertNotIn(".files", page)  # the device only follows .papp links
@@ -142,8 +142,8 @@ class DataTests(unittest.TestCase):
         store = {a["name"]: a for a in json.loads((self.out / "store.json").read_text())["apps"]}
         entry = store["psram_lvgl"]
         self.assertEqual((entry["author"], entry["category"], entry["controls"]), ("giltal", "Demo", ["Touch: everything"]))
-        self.assertEqual(entry["icon"]["url"], "https://nonasuomy.github.io/papp-conversions/psram_lvgl-0.1.0.png")
-        self.assertEqual(entry["info_url"], "https://nonasuomy.github.io/papp-conversions/psram_lvgl-0.1.0.json")
+        self.assertEqual(entry["icon"]["url"], "https://nonasuomy.github.io/esphomebrew/psram_lvgl-0.1.0.png")
+        self.assertEqual(entry["info_url"], "https://nonasuomy.github.io/esphomebrew/psram_lvgl-0.1.0.json")
         self.assertEqual((self.out / "psram_lvgl-0.1.0.png").read_bytes(), icon)
         self.assertEqual((entry["license"], entry["changelog"]), ("MIT", "0.1.0: first release"))
         self.assertEqual(entry["upstream"], {"project": "LVGL", "version": "9.2"})
@@ -156,7 +156,7 @@ class DataTests(unittest.TestCase):
         self.assertEqual(store["psram_doom"]["requires"], [{"path": "/sd/roms/doom/doom1.wad", "download": True},
                                                           {"path": "/sd/roms/quake/id1/pak0.pak", "download": True}])
         self.assertEqual(entry["screenshots"], [{"width": 800, "height": 480,
-                                                 "url": "https://nonasuomy.github.io/papp-conversions/psram_lvgl-0.1.0-screen1.png"}])
+                                                 "url": "https://nonasuomy.github.io/esphomebrew/psram_lvgl-0.1.0-screen1.png"}])
         self.assertEqual((self.out / "psram_lvgl-0.1.0-screen1.png").read_bytes(), mc_png(800, 480))
         self.assertEqual(json.loads((self.out / "psram_lvgl-0.1.0.json").read_text()), entry)
         # Sizes for "PAPP X KB + data Y MB", also for apps without listing extras.

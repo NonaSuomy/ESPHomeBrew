@@ -52,7 +52,7 @@ jobs:
           python3 - <<'EOF'
           import json, sys, urllib.request
           try:
-              with urllib.request.urlopen("https://nonasuomy.github.io/papp-conversions/store.json", timeout=30) as r:
+              with urllib.request.urlopen("https://nonasuomy.github.io/esphomebrew/store.json", timeout=30) as r:
                   published = {(a["name"], a["version"]): a["sha256"] for a in json.load(r)["apps"]}
           except Exception as error:  # first publish, or Pages unreachable: nothing to compare
               print(f"store.json not available ({error}); skipping")

@@ -13,13 +13,13 @@ substitutions:
   # Replace with the host serving a LAN PAPP folder, or leave the Network
   # catalog disabled in papp_loader if this unit should use Store/Storage only.
   papp_lan_url: "http://papp-server.local:8000/"
-  papp_store_url: "https://nonasuomy.github.io/papp-conversions/"
+  papp_store_url: "https://nonasuomy.github.io/esphomebrew/"
 
 # Remote launch/close/refresh API actions for the ESP bridge and Home Assistant
 # (papp_launch(url), papp_close, papp_refresh_catalog).
 packages:
   papp_control:
-    url: https://github.com/NonaSuomy/papp-conversions
+    url: https://github.com/NonaSuomy/esphomebrew
     ref: main
     files: [esphome/device_control.yaml]
     refresh: 0s
@@ -137,7 +137,7 @@ external_components:
     components: [lvgl, sd_mmc_card, usb_hidx, i2s_audio, ledc, mipi_dsi, sha256]
   - source:
       type: git
-      url: https://github.com/NonaSuomy/papp-conversions
+      url: https://github.com/NonaSuomy/esphomebrew
       ref: main
     components: [define_fixup, usb_msc, usb_midi]
     refresh: 0s
@@ -709,7 +709,7 @@ lvgl:
             align: TOP_MID
             text_color: 0x55D6FF
         - label:
-            text: "Store: nonasuomy.github.io/papp-conversions"
+            text: "Store: nonasuomy.github.io/esphomebrew"
             x: 0
             y: 42
             text_color: 0xA0B8CC

@@ -12,7 +12,7 @@ component runs after that and removes a zero-valued ESPHOME_ENTITY_*_COUNT
 define when a non-zero one with the same name exists. Nothing else changes.
 
     external_components:
-      - source: github://NonaSuomy/papp-conversions@main
+      - source: github://NonaSuomy/esphomebrew@main
         components: [define_fixup]
     define_fixup:
 """

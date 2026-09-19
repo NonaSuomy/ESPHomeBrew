@@ -118,7 +118,7 @@ static void test_bytes() {
 }
 
 static void test_app_keys() {
-  CHECK(app_key("https://nonasuomy.github.io/papp-conversions/psram_tulip-0.1.0.papp") == "psram_tulip");
+  CHECK(app_key("https://nonasuomy.github.io/esphomebrew/psram_tulip-0.1.0.papp") == "psram_tulip");
   CHECK(app_key("/sdcard/roms/papp/psram_tulip.papp") == "psram_tulip");
   CHECK(app_key("/sd/roms/papp/psram_tulip.PAPP") == "psram_tulip");
   CHECK(app_key("http://lan:8000/doom.papp?x=1#y") == "doom");

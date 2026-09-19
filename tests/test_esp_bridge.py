@@ -193,8 +193,8 @@ class CommandTests(unittest.TestCase):
         self.assertEqual((code, len(out), truncated), (0, 100, True))
 
 
-STORE = "https://nonasuomy.github.io/papp-conversions/psram_lvgl-0.1.1.papp"
-RELEASE = "https://github.com/NonaSuomy/papp-conversions/releases/download/dev-builds/psram_redalert.papp"
+STORE = "https://nonasuomy.github.io/esphomebrew/psram_lvgl-0.1.1.papp"
+RELEASE = "https://github.com/NonaSuomy/esphomebrew/releases/download/dev-builds/psram_redalert.papp"
 
 
 def make_api_config(tmp: Path) -> eb.Config:
@@ -202,8 +202,8 @@ def make_api_config(tmp: Path) -> eb.Config:
     (tmp / "local" / "secrets.yaml").write_text("api_key_016: 'c2VjcmV0LWtleS1ieXRlcy0xMjM0NTY3ODkwMTI='\n")
     cfg.secrets_files = [tmp / "local" / "secrets.yaml"]
     cfg.api_host, cfg.api_key = "10.0.0.5", eb.load_secret_map(cfg.secrets_files)["api_key_016"]
-    cfg.allowed_url_prefixes = ["https://github.com/NonaSuomy/papp-conversions/releases/download/",
-                                "https://nonasuomy.github.io/papp-conversions/"]
+    cfg.allowed_url_prefixes = ["https://github.com/NonaSuomy/esphomebrew/releases/download/",
+                                "https://nonasuomy.github.io/esphomebrew/"]
     cfg.enabled = [*cfg.enabled, "launch", "close", "catalog"]
     return cfg
 
@@ -224,8 +224,8 @@ class DeviceApiTests(unittest.TestCase):
         eb.validate(self.req(f"launch url={STORE}"), self.cfg)
         for url in ["http://github.com/NonaSuomy/papp-conversions/releases/download/a/b.papp",
                     "https://evil.example/x.papp",
-                    "https://github.com/NonaSuomy/papp-conversions/releases/download/a/readme.txt",
-                    "https://github.com/NonaSuomy/papp-conversions/releases/download/../../other/x.papp",
+                    "https://github.com/NonaSuomy/esphomebrew/releases/download/a/readme.txt",
+                    "https://github.com/NonaSuomy/esphomebrew/releases/download/../../other/x.papp",
                     ""]:
             with self.subTest(url=url), self.assertRaises(eb.BridgeError):
                 eb.validate(self.req(f"launch url={url}"), self.cfg)
@@ -521,7 +521,7 @@ class CrashDecodeTests(unittest.TestCase):
             return eb.subprocess.CompletedProcess(argv, 0, out, "")
 
         self.cfg.addr2line = "riscv32-esp-elf-addr2line"
-        url = "https://github.com/NonaSuomy/papp-conversions/releases/download/dev-builds/psram_redalert.papp"
+        url = "https://github.com/NonaSuomy/esphomebrew/releases/download/dev-builds/psram_redalert.papp"
         with mock.patch.object(eb.subprocess, "run", fake_run):
             text = eb.decode_crash(self.cfg, PANIC.format(sha=self.sha), url, opener=opener)
         self.assertIn("0x4a0bbede  _fclose_r + 0x76", text)

@@ -3,7 +3,7 @@ substitutions:
   friendly_name: "ESP32-P4 Elecrow PAPP Library"
   # PAPP catalogs: your LAN library and the GitHub store.
   papp_lan_url: "http://10.20.30.158:8000/"
-  papp_store_url: "https://nonasuomy.github.io/esphomebrew-store/"
+  papp_store_url: "https://nonasuomy.github.io/esphomebrew/"
 
 # Remote launch/close/refresh API actions for the ESP bridge and Home Assistant
 # (papp_launch(url), papp_launch_rom(emulator, rom), papp_close,
@@ -107,7 +107,7 @@ external_components:
     components: [lvgl, sd_mmc_card, usb_hidx, ethernet, i2s_audio, ledc, mipi_dsi, sha256]
   - source:
       type: git
-      url: https://github.com/NonaSuomy/esphomebrew-store
+      url: https://github.com/NonaSuomy/esphomebrew
       ref: main
     components: [define_fixup, usb_msc, usb_midi]
     refresh: 0s
@@ -933,7 +933,7 @@ lvgl:
             align: TOP_MID
             text_color: 0x55D6FF
         - label:
-            text: "Store: nonasuomy.github.io/esphomebrew-store"
+            text: "Store: nonasuomy.github.io/esphomebrew"
             x: 0
             y: 42
             text_color: 0xA0B8CC

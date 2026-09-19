@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 import make_listing as ml  # noqa: E402
 
 WAD = b"IWAD" + b"\x00" * 60
-PAGES = "https://nonasuomy.github.io/papp-conversions/"
+PAGES = "https://nonasuomy.github.io/esphomebrew/"
 
 
 def sha(data: bytes) -> str:

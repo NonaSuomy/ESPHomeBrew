@@ -30,7 +30,7 @@
 #
 #   packages:
 #     papp_control:
-#       url: https://github.com/NonaSuomy/papp-conversions
+#       url: https://github.com/NonaSuomy/esphomebrew
 #       ref: main
 #       files: [esphome/device_control.yaml]
 #       refresh: 0s

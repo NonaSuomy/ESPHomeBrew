@@ -21,7 +21,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-DEV_BUILDS = "https://github.com/NonaSuomy/papp-conversions/releases/download/dev-builds/{app}.sym"
+DEV_BUILDS = "https://github.com/NonaSuomy/esphomebrew/releases/download/dev-builds/{app}.sym"
 LINE = re.compile(r"^([0-9a-fA-F]+)\s+([A-Za-z])\s+(.+)$")
 
 

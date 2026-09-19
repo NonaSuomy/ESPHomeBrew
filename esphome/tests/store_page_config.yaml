@@ -56,7 +56,7 @@ papp_loader:
   display_id: main_display
   touchscreen_id: touch_panel
   lvgl_id: lvgl_component
-  catalog_url: https://nonasuomy.github.io/papp-conversions/
+  catalog_url: https://nonasuomy.github.io/esphomebrew/
   data_root: /sd
   download_data: true
   data_search: [/sd, /usb0]

@@ -38,6 +38,26 @@ APPS = ROOT / "apps"
 SDK_INCLUDE = "components/psram_app_loader/include"
 SDK_PATHS = [SDK_INCLUDE, "tools/psram_app.ld", "tools/pack_papp.py"]
 
+LOADER_SDK_DIR = ROOT / ".cache" / "loader_sdk"
+
+
+def get_loader_sdk() -> Path:
+    """Provide an isolated include directory containing only the loader's psram_app.h.
+
+    The ESPHome loader directory (esphome/components/papp_loader) also contains
+    other headers (zlib.h, inflate.h, crc32.h). Passing that directory directly
+    with -I shadows libraries built by apps (such as NetSurf's zlib) with
+    ESPHome's internal variants. Staging psram_app.h into its own directory avoids
+    header collisions while ensuring apps compile against the current loader ABI.
+    """
+    LOADER_SDK_DIR.mkdir(parents=True, exist_ok=True)
+    target = LOADER_SDK_DIR / "psram_app.h"
+    source = ROOT / "esphome" / "components" / "papp_loader" / "psram_app.h"
+    if not target.exists() or target.stat().st_mtime < source.stat().st_mtime:
+        shutil.copy2(source, target)
+    return LOADER_SDK_DIR
+
+
 PAPP_MAGIC = 0x50415050
 PAPP_ABI_VERSION = 1
 PAPP_HEADER = struct.Struct("<IIIIIIII")
@@ -367,7 +387,7 @@ def custom_units(manifest: dict, src_root: Path, build_dir: Path) -> tuple[list[
     # current loader ABI header ahead of the pinned upstream SDK header here as
     # well.  Otherwise callbacks appended by the ESPHome loader (such as ZIP
     # extraction) are read at the wrong offsets by the PAPP.
-    loader_sdk = ROOT / "esphome" / "components" / "papp_loader"
+    loader_sdk = get_loader_sdk()
     includes = [f"-I{loader_sdk}"] + [f"-I{source_file(src_root, inc)}" for inc in manifest.get("includes", [])]
     base = ARCH_FLAGS + ["-mcmodel=medany"]
     cflags = base + manifest.get("cflags", []) + includes
@@ -648,7 +668,7 @@ def build_app(manifest_path: Path, cache: Path, out: Path, jobs: int) -> dict:
     # checkout can lag behind the ESPHome loader's append-only service table;
     # putting the local header first keeps callback offsets (including the ZIP
     # ROM helper) ABI-compatible with the firmware that runs the PAPP.
-    loader_sdk = ROOT / "esphome" / "components" / "papp_loader"
+    loader_sdk = get_loader_sdk()
     cflags = CFLAGS + [f"-I{loader_sdk}", f"-I{sdk / SDK_INCLUDE}", f"-I{app_dir}"]
     build_dir = cache / "build" / name
     if build_dir.exists():

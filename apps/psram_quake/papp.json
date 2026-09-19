@@ -1,7 +1,7 @@
 {
   "name": "psram_quake",
   "title": "Quake",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "WinQuake as a PSRAM app, with MP3 music. The store downloads the shareware id1/pak0.pak to /sd/roms/quake/.",
   "author": "id Software (WinQuake); P4 port by RetroESP32-P4",
   "category": "Game",
@@ -24,7 +24,7 @@
     "version": "1.09",
     "url": "https://github.com/id-Software/Quake"
   },
-  "icon": "icon.png",
+  "icon": "icon_msdos.png",
   "build": "custom",
   "source": {
     "repo": "https://github.com/NonaSuomy/RetroESP32-P4",

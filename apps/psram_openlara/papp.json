@@ -1,7 +1,7 @@
 {
   "name": "psram_openlara",
   "title": "OpenLara",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "OpenLara, the open Tomb Raider 1 engine, as a PAPP: software renderer at 320x240 (shown 2x or 2.5x) or 320x200 on the 640x400 canvas, sound, gamepad and USB keyboard. Work in progress. Needs your own Tomb Raider 1 PC data (the DATA folder with the .PHD levels) in /sd/roms/openlara/.",
   "author": "XProger (OpenLara); ESP32-P4 port by alexkid77",
   "category": "Game",
@@ -30,7 +30,7 @@
     {"path": "/sd/roms/openlara/DATA/*.PHD", "note": "Tomb Raider 1 PC levels: copy the game's DATA folder"},
     {"path": "/sd/roms/openlara/FMV/", "note": "The game's movies", "optional": true}
   ],
-  "icon": "icon.png",
+  "icon": "icon_playstation.png",
   "canvas": {
     "sizes": ["800x600", "640x480", "640x400"],
     "recommended": "640x480"

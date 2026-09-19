@@ -1,7 +1,7 @@
 {
   "name": "psram_duke3d",
   "title": "Duke Nukem 3D",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Duke Nukem 3D (BUILD engine) as a PSRAM app. The store downloads the shareware duke3d.grp to /sd/roms/duke3d/.",
   "author": "3D Realms / Ken Silverman; P4 port by giltal",
   "category": "Game",
@@ -24,7 +24,7 @@
     "version": "1.0",
     "url": "https://github.com/fabiensanglard/chocolate_duke3D"
   },
-  "icon": "icon.png",
+  "icon": "icon_msdos.png",
   "build": "custom",
   "source": {
     "repo": "https://github.com/giltal/RetroESP32-P4",

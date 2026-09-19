@@ -103,6 +103,12 @@ jobs:
       - name: Write catalog and app data
         run: python3 tools/make_catalog.py --repo "$REPO" --dist dist --out site --data-cache .data-cache
 
+      # Provision/read the repository's Pages site before deploying the artifact.
+      # This makes a newly created release repository work without a manual
+      # first deployment from the Pages settings screen.
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
       # One artifact name per attempt: a re-run keeps the earlier attempt's
       # artifact, and deploy-pages refuses when two share a name.
       - uses: actions/upload-pages-artifact@v3

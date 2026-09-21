@@ -1,0 +1,144 @@
+{
+  "name": "genesis",
+  "title": "Sega Genesis",
+  "version": "0.1.0",
+  "description": "Sega Genesis and Mega Drive emulator. Put an MD, GEN, BIN or SMD image in /sd/roms/genesis/.",
+  "author": "RetroESP32-P4 port",
+  "category": "Emulator",
+  "license": "See the upstream project license.",
+  "about": "Sega Genesis and Mega Drive emulator. Put an MD, GEN, BIN or SMD image in /sd/roms/genesis/.",
+  "controls": [
+    "D-pad: directional input",
+    "A / B: primary emulator buttons",
+    "Start / Select: emulator controls",
+    "Menu: quit to launcher"
+  ],
+  "upstream": {
+    "project": "Gwenesis",
+    "version": "0.2",
+    "url": "https://github.com/ekeeke/Genesis-Plus-GX"
+  },
+  "icon": "icon.png",
+  "requires": [
+    {
+      "path": "/sd/roms/genesis/",
+      "note": "Place a compatible ROM or disk image here"
+    }
+  ],
+  "build": "custom",
+  "source": {
+    "repo": "https://github.com/NonaSuomy/RetroESP32-P4",
+    "ref": "ae04c88d166c55fa60722276ccc1cc50b7d100f2",
+    "path": "components/psram_app_loader"
+  },
+  "includes": [
+    "local:ports/retroesp32/apps/psram_genesis",
+    "local:ports/retroesp32/components/gwenesis",
+    "local:ports/retroesp32/components/gwenesis/src",
+    "local:ports/retroesp32/components/gwenesis/src/bus",
+    "local:ports/retroesp32/components/gwenesis/src/cpus/M68K",
+    "local:ports/retroesp32/components/gwenesis/src/cpus/Z80",
+    "local:ports/retroesp32/components/gwenesis/src/io",
+    "local:ports/retroesp32/components/gwenesis/src/sound",
+    "local:ports/retroesp32/components/gwenesis/src/vdp",
+    "local:ports/retroesp32/components/gwenesis/src/savestate",
+    "local:ports/retroesp32/apps/papp_emulator_common",
+    "local:ports/retroesp32/apps/papp_emulator_common/compat_cxx",
+    "local:ports/retroesp32/apps/psram_c64",
+    "local:ports/retroesp32/components"
+  ],
+  "cflags": [
+    "-DPAPP_APP_SIDE=1",
+    "-DIRAM_ATTR=",
+    "-std=gnu99",
+    "-O2",
+    "-fno-common",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-Wall",
+    "-Wno-format",
+    "-Wno-unused-variable",
+    "-Wno-unused-function",
+    "-Wno-maybe-uninitialized",
+    "-Wno-implicit-function-declaration",
+    "-Wno-pointer-sign",
+    "-Wno-int-conversion",
+    "-Wno-incompatible-pointer-types",
+    "-Wno-sign-compare",
+    "-Wno-missing-braces",
+    "-O3",
+    "-include",
+    "stdint.h",
+    "-include",
+    "stdlib.h",
+    "-DGWENESIS_AUDIO_ACCURATE=1"
+  ],
+  "cxxflags": [
+    "-std=gnu++17",
+    "-D_Static_assert=static_assert",
+    "-fno-exceptions",
+    "-fno-rtti",
+    "-fno-threadsafe-statics",
+    "-fno-use-cxa-atexit",
+    "-fno-unwind-tables",
+    "-fno-asynchronous-unwind-tables",
+    "-Wno-write-strings",
+    "-Wno-narrowing",
+    "-Wno-overloaded-virtual"
+  ],
+  "groups": [
+    {
+      "dir": "local:ports/retroesp32/components/gwenesis",
+      "files": [
+        "src/bus/gwenesis_bus.c",
+        "src/cpus/M68K/m68kcpu.c",
+        "src/cpus/Z80/Z80.c",
+        "src/cpus/Z80/Debug.c",
+        "src/cpus/Z80/ConDebug.c",
+        "src/io/gwenesis_io.c",
+        "src/savestate/gwenesis_savestate.c",
+        "src/sound/z80inst.c",
+        "src/sound/ym2612.c",
+        "src/sound/gwenesis_sn76489.c",
+        "src/vdp/gwenesis_vdp_mem.c",
+        "src/vdp/gwenesis_vdp_gfx.c"
+      ],
+      "prefix": "core_"
+    },
+    {
+      "dir": "local:ports/retroesp32/apps/psram_genesis",
+      "files": [
+        "papp_main.c"
+      ],
+      "prefix": "app_"
+    },
+    {
+      "dir": "local:ports/retroesp32/apps/papp_emulator_common",
+      "files": [
+        "papp_libc.c"
+      ],
+      "prefix": "common_"
+    },
+    {
+      "dir": "local:ports/retroesp32/apps/psram_c64",
+      "files": [
+        "papp_syscalls.c"
+      ],
+      "prefix": "sys_"
+    }
+  ],
+  "ldflags": [
+    "-Wl,--allow-multiple-definition",
+    "-Wl,--wrap=fopen",
+    "-Wl,--wrap=fclose",
+    "-Wl,--wrap=fread",
+    "-Wl,--wrap=fwrite",
+    "-Wl,--wrap=fseek",
+    "-Wl,--wrap=ftell",
+    "-Wl,--wrap=rewind",
+    "-Wl,--wrap=getc",
+    "-Wl,--wrap=fgetc",
+    "-Wl,--wrap=exit"
+  ],
+  "newlib": true
+}

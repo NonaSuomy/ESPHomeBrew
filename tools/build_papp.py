@@ -117,8 +117,18 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
 
 def fetch(repo: str, ref: str, dest: Path, sparse: list[str] | None = None) -> Path:
     """Check out `repo` at the exact commit `ref` into `dest` (cached by ref and paths)."""
+    # With Git's non-cone sparse-checkout, a bare directory pattern matches
+    # the directory entry but not necessarily the files below it.  Include a
+    # recursive companion pattern so recipes that name a source directory get
+    # the actual sources as well as the directory itself.  File patterns are
+    # harmless with the companion pattern and still match normally.
+    patterns = []
+    for path in sparse or []:
+        patterns.append(path)
+        if not path.endswith("/"):
+            patterns.append(path + "/**")
     stamp = dest / ".papp-ref"
-    key = "\n".join([ref, *sorted(sparse or [])])
+    key = "\n".join([ref, *sorted(patterns)])
     if stamp.exists() and stamp.read_text().strip() == key:
         return dest
     if dest.exists():
@@ -126,8 +136,8 @@ def fetch(repo: str, ref: str, dest: Path, sparse: list[str] | None = None) -> P
     dest.mkdir(parents=True)
     run(["git", "init", "-q"], cwd=dest)
     run(["git", "remote", "add", "origin", repo], cwd=dest)
-    if sparse:
-        run(["git", "sparse-checkout", "set", "--no-cone", *sparse], cwd=dest)
+    if patterns:
+        run(["git", "sparse-checkout", "set", "--no-cone", *patterns], cwd=dest)
     run(["git", "fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", ref], cwd=dest)
     run(["git", "checkout", "-q", "FETCH_HEAD"], cwd=dest)
     stamp.write_text(key)
@@ -391,7 +401,10 @@ def custom_units(manifest: dict, src_root: Path, build_dir: Path) -> tuple[list[
     includes = [f"-I{loader_sdk}"] + [f"-I{source_file(src_root, inc)}" for inc in manifest.get("includes", [])]
     base = ARCH_FLAGS + ["-mcmodel=medany"]
     cflags = base + manifest.get("cflags", []) + includes
-    cxxflags = base + manifest.get("cxxflags", []) + includes
+    # C++ units need the shared defines/includes (ESP32, FRODO_PC, etc.), but
+    # must not inherit a C-only language standard such as -std=gnu99.
+    shared = [flag for flag in manifest.get("cflags", []) if not flag.startswith("-std=")]
+    cxxflags = base + shared + manifest.get("cxxflags", []) + includes
     units: list[Unit] = []
     for group in manifest["groups"]:
         extra = [f"-I{source_file(src_root, inc)}" for inc in group.get("includes", [])]

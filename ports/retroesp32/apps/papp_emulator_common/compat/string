@@ -1,0 +1,156 @@
+#pragma once
+
+/* A small freestanding replacement for libstdc++'s string. Stella's PAPP
+ * uses strings for cartridge metadata and settings, but linking the hosted
+ * libstdc++ would also pull in pthread and exception/unwind support. */
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+namespace std {
+
+class string {
+public:
+    typedef size_t size_type;
+    typedef char *iterator;
+    typedef const char *const_iterator;
+    static const size_type npos = (size_type)-1;
+
+    string() : data_(NULL), size_(0), capacity_(0) { init_empty(); }
+    string(const char *s) : data_(NULL), size_(0), capacity_(0)
+    { assign(s ? s : "", s ? strlen(s) : 0); }
+    string(const char *s, size_type n) : data_(NULL), size_(0), capacity_(0)
+    { assign(s ? s : "", s ? n : 0); }
+    string(const string& other) : data_(NULL), size_(0), capacity_(0)
+    { assign(other.data_, other.size_); }
+    string(string&& other) noexcept
+      : data_(other.data_), size_(other.size_), capacity_(other.capacity_)
+    { other.data_ = NULL; other.size_ = other.capacity_ = 0; }
+    ~string() { if (data_) free(data_); }
+
+    string& operator=(const string& other)
+    { if (this != &other) assign(other.data_, other.size_); return *this; }
+    string& operator=(string&& other) noexcept
+    {
+        if (this != &other) {
+            if (data_) free(data_);
+            data_ = other.data_; size_ = other.size_; capacity_ = other.capacity_;
+            other.data_ = NULL; other.size_ = other.capacity_ = 0;
+        }
+        return *this;
+    }
+    string& operator=(const char *s)
+    { assign(s ? s : "", s ? strlen(s) : 0); return *this; }
+
+    const char *c_str() const { return data_ ? data_ : ""; }
+    const char *data() const { return c_str(); }
+    char *data() { return data_ ? data_ : const_cast<char *>(""); }
+    size_type size() const { return size_; }
+    size_type length() const { return size_; }
+    bool empty() const { return size_ == 0; }
+    void clear() { size_ = 0; if (data_) data_[0] = 0; }
+
+    char& operator[](size_type pos) { return data_[pos]; }
+    const char& operator[](size_type pos) const { return c_str()[pos]; }
+    iterator begin() { return data_; }
+    iterator end() { return data_ + size_; }
+    const_iterator begin() const { return c_str(); }
+    const_iterator end() const { return c_str() + size_; }
+
+    void reserve(size_type n) { ensure(n); }
+    void resize(size_type n, char c = '\0')
+    {
+        ensure(n);
+        if (n > size_) memset(data_ + size_, (unsigned char)c, n - size_);
+        size_ = n;
+        data_[size_] = 0;
+    }
+
+    string substr(size_type pos = 0, size_type count = npos) const
+    {
+        if (pos > size_) pos = size_;
+        if (count > size_ - pos) count = size_ - pos;
+        return string(c_str() + pos, count);
+    }
+
+    size_type find_first_not_of(char c, size_type pos = 0) const
+    {
+        for (size_type i = pos; i < size_; ++i) if (data_[i] != c) return i;
+        return npos;
+    }
+    size_type find_last_not_of(char c, size_type pos = npos) const
+    {
+        size_type i = (pos == npos || pos >= size_) ? size_ : pos;
+        while (i) { --i; if (data_[i] != c) return i; }
+        return npos;
+    }
+
+    int compare(const char *s) const
+    {
+        const char *rhs = s ? s : "";
+        size_type n = strlen(rhs);
+        size_type common = size_ < n ? size_ : n;
+        int cmp = common ? memcmp(c_str(), rhs, common) : 0;
+        if (cmp) return cmp < 0 ? -1 : 1;
+        return size_ == n ? 0 : (size_ < n ? -1 : 1);
+    }
+    int compare(size_type pos, size_type count, const char *s) const
+    {
+        return substr(pos, count).compare(s);
+    }
+
+    string& append(const char *s, size_type n)
+    {
+        if (!s || !n) return *this;
+        size_type old = size_;
+        ensure(size_ + n);
+        memmove(data_ + old, s, n);
+        size_ += n; data_[size_] = 0;
+        return *this;
+    }
+    string& append(const char *s) { return append(s, s ? strlen(s) : 0); }
+    string& append(const string& s) { return append(s.data_, s.size_); }
+    string& operator+=(const string& s) { return append(s); }
+    string& operator+=(const char *s) { return append(s); }
+    string& operator+=(char c) { return append(&c, 1); }
+
+private:
+    char *data_;
+    size_type size_;
+    size_type capacity_;
+
+    void init_empty()
+    {
+        data_ = (char *)malloc(1);
+        if (data_) { data_[0] = 0; capacity_ = 0; }
+    }
+    void ensure(size_type n)
+    {
+        if (n <= capacity_) return;
+        size_type cap = capacity_ ? capacity_ : 15;
+        while (cap < n) cap = cap < 1024 ? cap * 2 : cap + cap / 2;
+        char *p = (char *)realloc(data_, cap + 1);
+        if (!p) return;
+        data_ = p; capacity_ = cap;
+    }
+    void assign(const char *s, size_type n)
+    {
+        ensure(n);
+        if (!data_) return;
+        if (n) memmove(data_, s, n);
+        size_ = n; data_[size_] = 0;
+    }
+};
+
+inline bool operator==(const string& a, const string& b) { return a.compare(b.c_str()) == 0; }
+inline bool operator==(const string& a, const char *b) { return a.compare(b) == 0; }
+inline bool operator==(const char *a, const string& b) { return b.compare(a) == 0; }
+inline bool operator!=(const string& a, const string& b) { return !(a == b); }
+inline bool operator!=(const string& a, const char *b) { return !(a == b); }
+inline bool operator<(const string& a, const string& b) { return a.compare(b.c_str()) < 0; }
+inline string operator+(const string& a, const string& b) { string r(a); r += b; return r; }
+inline string operator+(const string& a, const char *b) { string r(a); r += b; return r; }
+inline string operator+(const char *a, const string& b) { string r(a); r += b; return r; }
+
+} /* namespace std */

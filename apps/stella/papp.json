@@ -1,0 +1,173 @@
+{
+  "name": "stella",
+  "title": "Atari 2600",
+  "version": "0.1.0",
+  "description": "Atari 2600 emulator. Put a cartridge ROM in /sd/roms/stella/.",
+  "author": "RetroESP32-P4 port",
+  "category": "Emulator",
+  "license": "See the upstream project license.",
+  "about": "Atari 2600 emulator. Put a cartridge ROM in /sd/roms/stella/.",
+  "controls": [
+    "D-pad: directional input",
+    "A / B: primary emulator buttons",
+    "Start / Select: emulator controls",
+    "Menu: quit to launcher"
+  ],
+  "upstream": {
+    "project": "Stella",
+    "version": "6.7",
+    "url": "https://stella-emu.github.io/"
+  },
+  "icon": "icon.png",
+  "requires": [
+    {
+      "path": "/sd/roms/stella/",
+      "note": "Place a compatible ROM or disk image here"
+    }
+  ],
+  "build": "custom",
+  "source": {
+    "repo": "https://github.com/NonaSuomy/RetroESP32-P4",
+    "ref": "ae04c88d166c55fa60722276ccc1cc50b7d100f2",
+    "path": "components/psram_app_loader"
+  },
+  "includes": [
+    "local:ports/retroesp32/apps/psram_stella",
+    "local:ports/retroesp32/components/stella",
+    "local:ports/retroesp32/components/stella/common",
+    "local:ports/retroesp32/components/stella/emucore",
+    "local:ports/retroesp32/components/stella/gui",
+    "local:ports/retroesp32/apps/papp_emulator_common",
+    "local:ports/retroesp32/apps/papp_emulator_common/compat",
+    "local:ports/retroesp32/apps/psram_c64",
+    "local:ports/retroesp32/components"
+  ],
+  "cflags": [
+    "-DPAPP_APP_SIDE=1",
+    "-DIRAM_ATTR=",
+    "-std=gnu99",
+    "-O2",
+    "-fno-common",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-Wall",
+    "-Wno-format",
+    "-Wno-unused-variable",
+    "-Wno-unused-function",
+    "-Wno-maybe-uninitialized",
+    "-Wno-implicit-function-declaration",
+    "-Wno-pointer-sign",
+    "-Wno-int-conversion",
+    "-Wno-incompatible-pointer-types",
+    "-Wno-sign-compare",
+    "-Wno-missing-braces",
+    "-DPAPP_STELLA=1",
+    "-DSOUND_SUPPORT=1",
+    "-DJUMP_TABLES_IN_TEXT_SECTION=1"
+  ],
+  "cxxflags": [
+    "-std=gnu++17",
+    "-D_Static_assert=static_assert",
+    "-fno-exceptions",
+    "-fno-rtti",
+    "-fno-threadsafe-statics",
+    "-fno-use-cxa-atexit",
+    "-fno-unwind-tables",
+    "-fno-asynchronous-unwind-tables",
+    "-Wno-write-strings",
+    "-Wno-narrowing",
+    "-Wno-overloaded-virtual"
+  ],
+  "groups": [
+    {
+      "dir": "local:ports/retroesp32/components/stella",
+      "files": [
+        "stella_run.cpp",
+        "common/Base.cpp",
+        "common/MouseControl.cpp",
+        "common/SoundSDL.cpp",
+        "emucore/Booster.cpp",
+        "emucore/Cart.cpp",
+        "emucore/Cart2K.cpp",
+        "emucore/Cart3E.cpp",
+        "emucore/Cart3F.cpp",
+        "emucore/Cart4K.cpp",
+        "emucore/CartAR.cpp",
+        "emucore/CartCV.cpp",
+        "emucore/CartDPC.cpp",
+        "emucore/CartE0.cpp",
+        "emucore/CartE7.cpp",
+        "emucore/CartF4.cpp",
+        "emucore/CartF4SC.cpp",
+        "emucore/CartF6.cpp",
+        "emucore/CartF6SC.cpp",
+        "emucore/CartF8.cpp",
+        "emucore/CartF8SC.cpp",
+        "emucore/CartFA.cpp",
+        "emucore/CartFE.cpp",
+        "emucore/CartUA.cpp",
+        "emucore/Console.cpp",
+        "emucore/Control.cpp",
+        "emucore/Driving.cpp",
+        "emucore/Genesis.cpp",
+        "emucore/Joystick.cpp",
+        "emucore/Keyboard.cpp",
+        "emucore/M6502.cpp",
+        "emucore/M6532.cpp",
+        "emucore/MD5.cpp",
+        "emucore/NullDev.cpp",
+        "emucore/Paddles.cpp",
+        "emucore/Props.cpp",
+        "emucore/PropsSet.cpp",
+        "emucore/Random.cpp",
+        "emucore/Serializer.cpp",
+        "emucore/Settings.cpp",
+        "emucore/StateManager.cpp",
+        "emucore/Stubs.cpp",
+        "emucore/Switches.cpp",
+        "emucore/System.cpp",
+        "emucore/TIA.cpp",
+        "emucore/TIASnd.cpp",
+        "emucore/TIATables.cpp",
+        "emucore/TrackBall.cpp"
+      ],
+      "prefix": "core_"
+    },
+    {
+      "dir": "local:ports/retroesp32/apps/psram_stella",
+      "files": [
+        "papp_main.cpp",
+        "papp_platform.c"
+      ],
+      "prefix": "app_"
+    },
+    {
+      "dir": "local:ports/retroesp32/apps/papp_emulator_common",
+      "files": [
+        "papp_libc.c"
+      ],
+      "prefix": "common_"
+    },
+    {
+      "dir": "local:ports/retroesp32/apps/psram_c64",
+      "files": [
+        "papp_syscalls.c"
+      ],
+      "prefix": "sys_"
+    }
+  ],
+  "ldflags": [
+    "-Wl,--allow-multiple-definition",
+    "-Wl,--wrap=fopen",
+    "-Wl,--wrap=fclose",
+    "-Wl,--wrap=fread",
+    "-Wl,--wrap=fwrite",
+    "-Wl,--wrap=fseek",
+    "-Wl,--wrap=ftell",
+    "-Wl,--wrap=rewind",
+    "-Wl,--wrap=getc",
+    "-Wl,--wrap=fgetc",
+    "-Wl,--wrap=exit"
+  ],
+  "newlib": true
+}

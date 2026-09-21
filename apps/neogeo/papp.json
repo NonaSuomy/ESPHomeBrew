@@ -1,0 +1,174 @@
+{
+  "name": "neogeo",
+  "title": "Neo Geo",
+  "version": "0.1.0",
+  "description": "Neo Geo emulator. Put the required ROM set in /sd/roms/neogeo/.",
+  "author": "RetroESP32-P4 port",
+  "category": "Emulator",
+  "license": "See the upstream project license.",
+  "about": "Neo Geo emulator. Put the required ROM set in /sd/roms/neogeo/.",
+  "controls": [
+    "D-pad: directional input",
+    "A / B: primary emulator buttons",
+    "Start / Select: emulator controls",
+    "Menu: quit to launcher"
+  ],
+  "upstream": {
+    "project": "GnGeo",
+    "version": "0.8",
+    "url": "https://github.com/0xe1f/gngeo"
+  },
+  "icon": "icon.png",
+  "requires": [
+    {
+      "path": "/sd/roms/neogeo/",
+      "note": "Place a compatible ROM or disk image here"
+    }
+  ],
+  "build": "custom",
+  "source": {
+    "repo": "https://github.com/NonaSuomy/RetroESP32-P4",
+    "ref": "ae04c88d166c55fa60722276ccc1cc50b7d100f2",
+    "path": "components/psram_app_loader"
+  },
+  "includes": [
+    "local:ports/retroesp32/apps/psram_neogeo",
+    "local:ports/retroesp32/components/gngeo",
+    "local:ports/retroesp32/components/gngeo/include",
+    "local:ports/retroesp32/components/gngeo/generator68k",
+    "local:ports/retroesp32/components/gngeo/mamez80",
+    "local:ports/retroesp32/components/gngeo/ym2610",
+    "local:ports/retroesp32/apps/papp_emulator_common",
+    "local:ports/retroesp32/apps/papp_emulator_common/compat",
+    "local:ports/retroesp32/apps/psram_c64",
+    "local:ports/retroesp32/components"
+  ],
+  "cflags": [
+    "-DPAPP_APP_SIDE=1",
+    "-DIRAM_ATTR=",
+    "-std=gnu99",
+    "-O2",
+    "-fno-common",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-Wall",
+    "-Wno-format",
+    "-Wno-unused-variable",
+    "-Wno-unused-function",
+    "-Wno-maybe-uninitialized",
+    "-Wno-implicit-function-declaration",
+    "-Wno-pointer-sign",
+    "-Wno-int-conversion",
+    "-Wno-incompatible-pointer-types",
+    "-Wno-sign-compare",
+    "-Wno-missing-braces",
+    "-DNEOGEO_PAPP=1",
+    "-DEMBEDDED_FS=1",
+    "-DHAVE_BASENAME=1",
+    "-DHAVE_LIBZ=1",
+    "-DUSE_MAMEZ80=1",
+    "-DUSE_GENERATOR68K=1",
+    "-DROOTPATH=\"/sd/roms/neogeo/\"",
+    "-include",
+    "stdio.h"
+  ],
+  "cxxflags": [
+    "-std=gnu++17",
+    "-D_Static_assert=static_assert",
+    "-fno-exceptions",
+    "-fno-rtti",
+    "-fno-threadsafe-statics",
+    "-fno-use-cxa-atexit",
+    "-fno-unwind-tables",
+    "-fno-asynchronous-unwind-tables",
+    "-Wno-write-strings",
+    "-Wno-narrowing",
+    "-Wno-overloaded-virtual"
+  ],
+  "groups": [
+    {
+      "dir": "local:ports/retroesp32/components/gngeo",
+      "files": [
+        "emu.c",
+        "memory.c",
+        "video.c",
+        "timer.c",
+        "pd4990a.c",
+        "frame_skip.c",
+        "neoboot.c",
+        "roms.c",
+        "neocrypt.c",
+        "unzip.c",
+        "stb_zlib.c",
+        "stb_image.c",
+        "resfile.c",
+        "mame_layer.c",
+        "state.c",
+        "list.c",
+        "gnutil.c",
+        "transpack.c",
+        "adpcm_cache.c",
+        "generator68k/cpu68k.c",
+        "generator68k/cpu68k-0.c",
+        "generator68k/cpu68k-1.c",
+        "generator68k/cpu68k-2.c",
+        "generator68k/cpu68k-3.c",
+        "generator68k/cpu68k-4.c",
+        "generator68k/cpu68k-5.c",
+        "generator68k/cpu68k-6.c",
+        "generator68k/cpu68k-7.c",
+        "generator68k/cpu68k-8.c",
+        "generator68k/cpu68k-9.c",
+        "generator68k/cpu68k-a.c",
+        "generator68k/cpu68k-b.c",
+        "generator68k/cpu68k-c.c",
+        "generator68k/cpu68k-d.c",
+        "generator68k/cpu68k-e.c",
+        "generator68k/cpu68k-f.c",
+        "generator68k/reg68k.c",
+        "generator68k_interf.c",
+        "mamez80/z80.c",
+        "mamez80_interf.c",
+        "ym2610/ym2610.c",
+        "ym2610/2610intf.c"
+      ],
+      "prefix": "core_"
+    },
+    {
+      "dir": "local:ports/retroesp32/apps/psram_neogeo",
+      "files": [
+        "papp_main.c",
+        "papp_platform.c"
+      ],
+      "prefix": "app_"
+    },
+    {
+      "dir": "local:ports/retroesp32/apps/papp_emulator_common",
+      "files": [
+        "papp_libc.c"
+      ],
+      "prefix": "common_"
+    },
+    {
+      "dir": "local:ports/retroesp32/apps/psram_c64",
+      "files": [
+        "papp_syscalls.c"
+      ],
+      "prefix": "sys_"
+    }
+  ],
+  "ldflags": [
+    "-Wl,--allow-multiple-definition",
+    "-Wl,--wrap=fopen",
+    "-Wl,--wrap=fclose",
+    "-Wl,--wrap=fread",
+    "-Wl,--wrap=fwrite",
+    "-Wl,--wrap=fseek",
+    "-Wl,--wrap=ftell",
+    "-Wl,--wrap=rewind",
+    "-Wl,--wrap=getc",
+    "-Wl,--wrap=fgetc",
+    "-Wl,--wrap=exit"
+  ],
+  "newlib": true
+}

@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
 import make_catalog as mc  # noqa: E402
 
-REPO = "NonaSuomy/papp-conversions"
+REPO = "NonaSuomy/esphomebrew"
 WAD = b"IWAD" + b"\x00" * 60
 PAK = b"PACK" + b"\x01" * 100
 

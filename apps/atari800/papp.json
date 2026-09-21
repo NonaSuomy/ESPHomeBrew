@@ -1,0 +1,166 @@
+{
+  "name": "atari800",
+  "title": "Atari 800",
+  "version": "0.1.0",
+  "description": "Atari 8-bit computer emulator. Put an ATR, XEX or compatible image in /sd/roms/atari800/.",
+  "author": "RetroESP32-P4 port",
+  "category": "Emulator",
+  "license": "See the upstream project license.",
+  "about": "Atari 8-bit computer emulator. Put an ATR, XEX or compatible image in /sd/roms/atari800/.",
+  "controls": [
+    "D-pad: directional input",
+    "A / B: primary emulator buttons",
+    "Start / Select: emulator controls",
+    "Menu: quit to launcher"
+  ],
+  "upstream": {
+    "project": "Atari800",
+    "version": "4.2.0",
+    "url": "https://github.com/atari800/atari800"
+  },
+  "icon": "icon.png",
+  "requires": [
+    {
+      "path": "/sd/roms/atari800/",
+      "note": "Place a compatible ROM or disk image here"
+    }
+  ],
+  "build": "custom",
+  "source": {
+    "repo": "https://github.com/NonaSuomy/RetroESP32-P4",
+    "ref": "ae04c88d166c55fa60722276ccc1cc50b7d100f2",
+    "path": "components/psram_app_loader"
+  },
+  "includes": [
+    "local:ports/retroesp32/apps/psram_atari800",
+    "local:ports/retroesp32/components/atari800",
+    "local:ports/retroesp32/components/atari800/include",
+    "local:ports/retroesp32/apps/papp_emulator_common",
+    "local:ports/retroesp32/apps/papp_emulator_common/compat_cxx",
+    "local:ports/retroesp32/apps/psram_c64",
+    "local:ports/retroesp32/components"
+  ],
+  "cflags": [
+    "-DPAPP_APP_SIDE=1",
+    "-DIRAM_ATTR=",
+    "-std=gnu99",
+    "-O2",
+    "-fno-common",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-Wall",
+    "-Wno-format",
+    "-Wno-unused-variable",
+    "-Wno-unused-function",
+    "-Wno-maybe-uninitialized",
+    "-Wno-implicit-function-declaration",
+    "-Wno-pointer-sign",
+    "-Wno-int-conversion",
+    "-Wno-incompatible-pointer-types",
+    "-Wno-sign-compare",
+    "-Wno-missing-braces",
+    "-DPAPP_ATARI800=1",
+    "-DSOUND=1",
+    "-DLIBATARI800",
+    "-DHAVE_FSTAT=1",
+    "-DHAVE_UNISTD_H=1",
+    "-DHAVE_STRINGS_H=1"
+  ],
+  "cxxflags": [
+    "-std=gnu++17",
+    "-D_Static_assert=static_assert",
+    "-fno-exceptions",
+    "-fno-rtti",
+    "-fno-threadsafe-statics",
+    "-fno-use-cxa-atexit",
+    "-fno-unwind-tables",
+    "-fno-asynchronous-unwind-tables",
+    "-Wno-write-strings",
+    "-Wno-narrowing",
+    "-Wno-overloaded-virtual"
+  ],
+  "groups": [
+    {
+      "dir": "local:ports/retroesp32/components/atari800",
+      "files": [
+        "afile.cpp",
+        "antic.cpp",
+        "artifact.cpp",
+        "atari.cpp",
+        "binload.cpp",
+        "cartridge.cpp",
+        "cassette.cpp",
+        "cfg.cpp",
+        "compfile.cpp",
+        "cpu.cpp",
+        "crc32.cpp",
+        "devices.cpp",
+        "esc.cpp",
+        "gtia.cpp",
+        "img_tape.cpp",
+        "input.cpp",
+        "libatari800_exit.cpp",
+        "libatari800_init.cpp",
+        "libatari800_main.cpp",
+        "libatari800_sound.cpp",
+        "libatari800_statesav.cpp",
+        "libatari800_video.cpp",
+        "log.cpp",
+        "memory.cpp",
+        "pbi.cpp",
+        "pia.cpp",
+        "pokey.cpp",
+        "pokeysnd.cpp",
+        "roms_altirra_5200_os.cpp",
+        "roms_altirra_basic.cpp",
+        "roms_altirraos_800.cpp",
+        "roms_altirraos_xl.cpp",
+        "screen.cpp",
+        "sio.cpp",
+        "sndsave.cpp",
+        "sound.cpp",
+        "statesav.cpp",
+        "sysrom.cpp",
+        "util.cpp",
+        "atari800_run.cpp"
+      ],
+      "prefix": "core_"
+    },
+    {
+      "dir": "local:ports/retroesp32/apps/psram_atari800",
+      "files": [
+        "papp_main.cpp",
+        "papp_platform.c"
+      ],
+      "prefix": "app_"
+    },
+    {
+      "dir": "local:ports/retroesp32/apps/papp_emulator_common",
+      "files": [
+        "papp_libc.c"
+      ],
+      "prefix": "common_"
+    },
+    {
+      "dir": "local:ports/retroesp32/apps/psram_c64",
+      "files": [
+        "papp_syscalls.c"
+      ],
+      "prefix": "sys_"
+    }
+  ],
+  "ldflags": [
+    "-Wl,--allow-multiple-definition",
+    "-Wl,--wrap=fopen",
+    "-Wl,--wrap=fclose",
+    "-Wl,--wrap=fread",
+    "-Wl,--wrap=fwrite",
+    "-Wl,--wrap=fseek",
+    "-Wl,--wrap=ftell",
+    "-Wl,--wrap=rewind",
+    "-Wl,--wrap=getc",
+    "-Wl,--wrap=fgetc",
+    "-Wl,--wrap=exit"
+  ],
+  "newlib": true
+}

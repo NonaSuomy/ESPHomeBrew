@@ -1,5 +1,5 @@
 // Stands in for Vanilla Conquer's generated common/gitinfo.cpp (CMake fills it
-// from git). The PAPP build pins the upstream commit in apps/psram_redalert/papp.json.
+// from git). The PAPP build pins the upstream commit in apps/redalert/papp.json.
 #include "common/gitinfo.h"
 
 const char GitSHA1[] = "papp";

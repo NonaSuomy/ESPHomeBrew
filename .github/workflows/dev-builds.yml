@@ -4,7 +4,7 @@ name: Dev builds
 # listed in the store; store apps still being worked on set "dev_build": true.
 # For testing on a device, pushes to claude/* and nona/* branches upload both
 # to the "dev-builds" prerelease at stable URLs such as
-#   https://github.com/<owner>/<repo>/releases/download/dev-builds/psram_redalert.papp
+#   https://github.com/<owner>/<repo>/releases/download/dev-builds/redalert.papp
 # The ESP bridge serves those to the device over the LAN (the device cannot
 # verify github.com's TLS chain): @esp-bridge launch url=<that URL>
 # A branch builds only the apps it changes (tools/dev_build_apps.py), so it

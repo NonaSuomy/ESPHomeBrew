@@ -1,5 +1,5 @@
 {
-  "name": "psram_quake",
+  "name": "quake",
   "title": "Quake",
   "version": "0.1.2",
   "description": "WinQuake as a PSRAM app, with MP3 music. The store downloads the shareware id1/pak0.pak to /sd/roms/quake/.",

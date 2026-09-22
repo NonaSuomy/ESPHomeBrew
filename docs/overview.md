@@ -3,14 +3,14 @@
 **Goal (Nona, #plan seq 24-25):** a GitHub-hosted **PSRAM app store**. PAPPs are `<name>.papp` files: RISC-V (RV32IMAFC) programs an ESP32-P4 streams into PSRAM and runs. Built from this repo by GitHub Actions and browsed and launched from an **LVGL page in ESPHome**. Devices report back whether an app worked, with a log.
 
 **Order of work** (board tasks):
-1. #2 CI builds `apps/psram_lvgl` into a `.papp`.
+1. #2 CI builds `apps/lvgl` into a `.papp`.
 2. #3 Publish the store (GitHub Pages catalog + release assets).
 3. #4 PAPP Store LVGL page in `esp32-p4-elecrow-aio.yaml`.
 4. #5 Feedback path (device result + log).
 5. #6 Acceptance on device.
 6. #7 OpenRA port: **on hold until Nona says go**.
 
-**First test app:** [giltal/RetroESP32-P4 apps/psram_lvgl](https://github.com/giltal/RetroESP32-P4/tree/main/apps/psram_lvgl): LVGL v9.2 compiled into the app, 400x240 canvas scaled 2x, touch via `svc->touch_read`, exit on physical X.
+**First test app:** [giltal/RetroESP32-P4 apps/psram_lvgl](https://github.com/giltal/RetroESP32-P4/tree/main/apps/psram_lvgl): the upstream source for our `apps/lvgl` manifest, now built with LVGL 9.5, touch via `svc->touch_read`, exit on physical X.
 
 **Target device:** Elecrow ESP32-P4 All-In-One (800x480, GT911 touch), ESPHome on ESP-IDF, Nona's YAML `esp32-p4-elecrow-aio.yaml` (attachment in #plan seq 25).
 
@@ -19,4 +19,4 @@
 - The ESPHome `papp_loader` component (Nona's, not yet on GitHub; source attached in #plan seq 29) already has `launch_url` (HTTPS via cert bundle, 5 redirects, 15 s timeout) and a **catalog**: `catalog_url` HTML (max 64 KB), every href ending `.papp` becomes an LVGL list button.
 - Upstream RetroESP32-P4 has **no license file**, so CI fetches it at a pinned commit instead of copying code here.
 
-**State (2026-09-11):** store is live at https://nonasuomy.github.io/esphomebrew/ with `psram_lvgl-0.1.0.papp` (release `psram_lvgl-v0.1.0`, sha256 d3be57f3…). #2-#4 merged; #5 test reports in PR #4 (compiles for P4); #6 on-device test waiting on Nona; #7 on hold.
+**State (2026-09-22):** store builds now use short app identities such as `lvgl-0.3.0.papp`; the upstream source folders may still retain their `psram_` names. #2-#4 merged; #5 test reports in PR #4 (compiles for P4); #6 on-device test waiting on Nona; #7 on hold.

@@ -8,7 +8,7 @@ When **Build PAPPs** succeeds on `main`, **Publish store** (`.github/workflows/p
 
 ## How the device reads it
 
-The ESPHome `papp_loader` fetches `catalog_url` (HTTPS, up to 5 redirects, at most 64 KB). Every `href` ending in `.papp` becomes a button in the LVGL list, labelled with the file name, for example `psram_lvgl-0.1.0.papp`. The version is in the name, so a new release shows up as a new label after a refresh. Tapping a button streams the copy on GitHub Pages into PSRAM. Nothing is cached on the device.
+The ESPHome `papp_loader` fetches `catalog_url` (HTTPS, up to 5 redirects, at most 64 KB). Every `href` ending in `.papp` becomes a button in the LVGL list, labelled with the file name, for example `lvgl-0.3.0.papp`. The version is in the name, so a new release shows up as a new label after a refresh. Tapping a button streams the copy on GitHub Pages into PSRAM. Nothing is cached on the device.
 
 ```yaml
 papp_loader:
@@ -23,13 +23,13 @@ Some apps need files on the card before they run: Doom needs an IWAD, Quake need
 
 Publish store downloads each file from its source repository at the pinned commit. It checks the size and sha256 (and fails on any mismatch), then publishes the file on Pages under `data/<app>/<target>`. The Python tools CI does the same download and check on every pull request that touches `apps/`.
 
-Each app with data also gets a plain-text list next to its `.papp`: `psram_doom-0.1.0.papp` gets `psram_doom-0.1.0.files`.
+Each app with data also gets a plain-text list next to its `.papp`: `doom-0.2.1.papp` gets `doom-0.2.1.files`.
 
 ```
 # papp-data 1
-# psram_doom 0.1.0: <why these files may be redistributed>
-4196020 1d7d43be…c771 roms/doom/doom1.wad https://nonasuomy.github.io/esphomebrew/data/psram_doom/roms/doom/doom1.wad
-143312 b4dd3642…1d1d roms/doom/prboom.wad https://nonasuomy.github.io/esphomebrew/data/psram_doom/roms/doom/prboom.wad
+# doom 0.2.1: <why these files may be redistributed>
+4196020 1d7d43be…c771 roms/doom/doom1.wad https://nonasuomy.github.io/esphomebrew/data/doom/roms/doom/doom1.wad
+143312 b4dd3642…1d1d roms/doom/prboom.wad https://nonasuomy.github.io/esphomebrew/data/doom/roms/doom/prboom.wad
 ```
 
 Each line has four fields: size, sha256, the target path under the device's data root, and the URL. Lines starting with `#` are comments. The loader reads this list before it launches the app and downloads whatever the card is missing. `store.json` carries the same information under each app's `data`.

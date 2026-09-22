@@ -1,4 +1,4 @@
-// psram_video: declarations shared by the port's own files (ports/video/*.c).
+// video: declarations shared by the port's own files (ports/video/*.c).
 // Nothing here is part of FFmpeg.
 //
 // Tasks (created through the loader's task_create service):

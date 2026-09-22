@@ -21,7 +21,7 @@
 #
 # How it works: papp_loader fetches catalog_url, turns every link ending in
 # .papp into a button in the list container, and streams the app into PSRAM
-# when tapped. The file name (e.g. psram_lvgl-0.1.0.papp) is the label, so a
+# when tapped. The file name (e.g. lvgl-0.3.0.papp) is the label, so a
 # new version shows up after a refresh. The catalog reloads when the page opens,
 # on REFRESH, and every ${papp_store_refresh} while the page is on screen and no
 # app is running. While an app and its data files download, a progress bar and

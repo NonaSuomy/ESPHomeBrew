@@ -5,8 +5,8 @@ A PAPP is linked at 0x4A000000, so PC/backtrace addresses 0x4A...... in an
 ESP-IDF crash report are inside the app. The dev builds publish a symbol list
 (`nm -n -C`) next to each work-in-progress .papp.
 
-    python3 tools/papp_symbolize.py psram_redalert.sym 0x4A01234C 0x4A00ABCD
-    python3 tools/papp_symbolize.py --release psram_redalert 0x4A01234C   # fetch the dev-builds list
+    python3 tools/papp_symbolize.py redalert.sym 0x4A01234C 0x4A00ABCD
+    python3 tools/papp_symbolize.py --release redalert 0x4A01234C   # fetch the dev-builds list
 
 Addresses outside the app (0x40..., 0x4FF...) are loader/ESP-IDF code: look
 those up in the firmware ELF with addr2line.

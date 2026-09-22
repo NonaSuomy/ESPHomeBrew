@@ -19,7 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Largest first; the same sizes as "canvas" in apps/psram_tiberiandawn/papp.json.
+// Largest first; the same sizes as "canvas" in apps/tiberiandawn/papp.json.
 static const struct
 {
     int w, h;

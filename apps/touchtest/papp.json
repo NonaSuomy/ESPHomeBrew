@@ -1,5 +1,5 @@
 {
-  "name": "psram_touchtest",
+  "name": "touchtest",
   "title": "Touch test",
   "version": "0.2.0",
   "description": "Draws a colored marker in each corner and a crosshair where you touch, to check touch_read and the canvas orientation, on the canvas size chosen with the store's Screen setting.",

@@ -1,4 +1,4 @@
-// psram_video: the player (papp_player.c) and the input helper (papp_main.c).
+// video: the player (papp_player.c) and the input helper (papp_main.c).
 #pragma once
 
 #include "papp_port.h"

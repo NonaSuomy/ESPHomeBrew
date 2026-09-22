@@ -11,7 +11,7 @@ matches one built with those scripts.
 Needs the ESP-IDF RISC-V toolchain (riscv32-esp-elf-*) on PATH and git.
 
     python3 tools/build_papp.py                 # all apps -> dist/
-    python3 tools/build_papp.py psram_lvgl      # one app
+    python3 tools/build_papp.py lvgl             # one app
 """
 
 from __future__ import annotations

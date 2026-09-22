@@ -19,7 +19,7 @@ index 701ef0d..fc7d516 100644
      int factor_2 = ff_ctz(len);
      if (factor_2) {
          int idx = factor_2 - 3;
-+        /* psram_video: power-of-two tables only up to 32768 (they are .bss) */
++        /* video: power-of-two tables only up to 32768 (they are .bss) */
 +        if (idx >= (int)FF_ARRAY_ELEMS(sr_tabs_init_funcs))
 +            idx = FF_ARRAY_ELEMS(sr_tabs_init_funcs) - 1;
          for (int i = 0; i <= idx; i++)

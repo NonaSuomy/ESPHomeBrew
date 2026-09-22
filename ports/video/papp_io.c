@@ -1,4 +1,4 @@
-// Input streams for psram_video: files on the card through the loader's file
+// Input streams for video: files on the card through the loader's file
 // services, and http:// / https:// through its net_tcp_* and net_tls_*
 // services (the loader does the TLS handshake and checks the certificate).
 //
@@ -339,7 +339,7 @@ static bool http_request(papp_stream_t *s, int64_t from, char *err, size_t err_l
             return false;
         }
         const int n = snprintf(req, req_len,
-                               "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: psram_video/0.1 (ESP32-P4; Lavf)\r\n"
+                               "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: video/0.1 (ESP32-P4; Lavf)\r\n"
                                "Accept: */*\r\nAccept-Encoding: identity\r\nRange: bytes=%lld-\r\n"
                                "Connection: close\r\n\r\n",
                                s->target, host_hdr, (long long)from);

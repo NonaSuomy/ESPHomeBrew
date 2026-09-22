@@ -1,4 +1,4 @@
-// psram_video: entry point, input and the file list.
+// video: entry point, input and the file list.
 //
 // app_entry runs on the loader's worker task. It takes the canvas the loader
 // offers (the whole panel, 1024x600, when it can), then plays the argument it
@@ -425,7 +425,7 @@ __attribute__((section(".text.entry"), used)) int app_entry(const app_services_t
 {
     papp_svc = svc;
     papp_syscalls_init();
-    svc->log_printf("VIDEO: psram_video starting (ABI %u)\n", (unsigned)svc->abi_version);
+    svc->log_printf("VIDEO: video starting (ABI %u)\n", (unsigned)svc->abi_version);
 
     // The whole panel when the loader offers it, else 800x480.
     int cw = 800, ch = 480;

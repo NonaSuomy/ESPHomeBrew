@@ -3,7 +3,7 @@
 [Tulip CC](https://github.com/shorepine/tulipcc) built from Tulip Desktop's
 code (`tulip/shared` of [NonaSuomy/tulipcc](https://github.com/NonaSuomy/tulipcc))
 as a small MicroPython port for the ESP32-P4 PAPP loader. The upstream sources
-are fetched at pinned commits (`apps/psram_tulip/papp.json`: tulipcc, and its
+are fetched at pinned commits (`apps/tulip/papp.json`: tulipcc, and its
 `micropython` and `amy` submodules); only the glue below lives here.
 
 | File | What it does |

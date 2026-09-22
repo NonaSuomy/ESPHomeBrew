@@ -8,7 +8,7 @@ body:
     attributes:
       label: App file
       description: The name shown on the store button.
-      placeholder: psram_lvgl-0.1.0.papp
+      placeholder: lvgl-0.3.0.papp
     validations:
       required: true
   - type: dropdown

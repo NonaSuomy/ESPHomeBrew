@@ -6,7 +6,7 @@ Every app in this store lives in `apps/<name>/papp.json`. GitHub Actions (`.gith
 
 ```json
 {
-  "name": "psram_lvgl",
+  "name": "lvgl",
   "title": "LVGL touch demo",
   "version": "0.1.0",
   "description": "What it does, in one line.",
@@ -60,7 +60,7 @@ What a store screen shows before an app is downloaded:
   - Up to 24 entries. The loader looks for each one under every data root (`data_root`, then `data_search`, such as `/sd` and `/usb0`), only when the app's page opens.
   - The files under `data` (below), which the store downloads, count as required too: Publish store adds each one to the listing's `requires` as `{"path": "/sd/<target>", "download": true}`.
 - `icon` is a PNG in the app's folder, at most 256×256 and 64 KB; `screenshots` lists up to three PNGs of at most 1024×600 and 300 KB. Use your own or freely licensed art, not official game logos.
-- Publish store puts all of it, with the icon as base64, the `.papp` size and the data size, into `store.json` and into a sidecar next to each app (`psram_doom-0.1.1.json`, found by swapping `.papp` for `.json`). The icon is also published as `psram_doom-0.1.1.png`, which the web page shows, and screenshots as `psram_doom-0.1.1-screen1.png`, … (listed by URL only, to keep the JSON small). A LAN server or SD folder can carry the same sidecar next to its `.papp` files.
+- Publish store puts all of it, with the icon as base64, the `.papp` size and the data size, into `store.json` and into a sidecar next to each app (`doom-0.2.1.json`, found by swapping `.papp` for `.json`). The icon is also published as `doom-0.2.1.png`, which the web page shows, and screenshots as `doom-0.2.1-screen1.png`, … (listed by URL only, to keep the JSON small). A LAN server or SD folder can carry the same sidecar next to its `.papp` files.
 
 Sources come from the `source` repository at a pinned commit, and so does the PAPP SDK (`psram_app.h`, `psram_app.ld`, `pack_papp.py`), so an app always builds against the loader ABI of its own tree. They are fetched at build time rather than copied here, because upstream has no license file. Today the apps come from [NonaSuomy/RetroESP32-P4](https://github.com/NonaSuomy/RetroESP32-P4) (`papp-serial-upload`) and [giltal/RetroESP32-P4](https://github.com/giltal/RetroESP32-P4).
 
@@ -145,7 +145,7 @@ An app can hand the device to another app and get it back afterwards. NetSurf, f
 // The caller: what it wants back, then the app to open and its argument.
 if (svc->app_open) {
     if (svc->app_set_resume_arg) svc->app_set_resume_arg("http://example.com/page.html");
-    if (svc->app_open("psram_video", "http://example.com/clip.mp4", 1) == 0) {
+    if (svc->app_open("video", "http://example.com/clip.mp4", 1) == 0) {
         /* accepted: the loader now asks this app to quit; quit */
     }
 }
@@ -155,7 +155,7 @@ char arg[PAPP_APP_ARG_MAX];
 int len = svc->app_get_arg ? svc->app_get_arg(arg, sizeof arg) : 0;   // 0: none
 ```
 
-- `app_open(target, arg, return_after)`: `target` is an app's name (`"psram_video"`), the `http(s)://` URL of a `.papp`, or a `/sd/...` path of one. A name is looked up the way the store and library do: the installed copy (`<install_dir>/<name>.papp`), then each library source in the order the YAML lists them, a folder (its `.papp` files under every data search root) or an HTTP catalog page (fetched, which can take a few seconds). A source's `name-<version>.papp` counts too; with several versions the highest wins. It returns 0 when the request is accepted and -1 when the app is unknown, the device is offline (for a URL), `arg` is longer than `PAPP_APP_ARG_MAX - 1` (2047) bytes, the app is already closing or has a hand-off waiting, or `return_after` would make more than two apps wait.
+- `app_open(target, arg, return_after)`: `target` is an app's name (`"video"`), the `http(s)://` URL of a `.papp`, or a `/sd/...` path of one. A name is looked up the way the store and library do: the installed copy (`<install_dir>/<name>.papp`), then each library source in the order the YAML lists them, a folder (its `.papp` files under every data search root) or an HTTP catalog page (fetched, which can take a few seconds). A source's `name-<version>.papp` counts too; with several versions the highest wins. It returns 0 when the request is accepted and -1 when the app is unknown, the device is offline (for a URL), `arg` is longer than `PAPP_APP_ARG_MAX - 1` (2047) bytes, the app is already closing or has a hand-off waiting, or `return_after` would make more than two apps wait.
 - After 0, the loader closes the caller exactly as its close control does (the app sees the usual quit buttons), so an app that already quits on those needs nothing more; it may also return from `app_entry` at once. Then the target starts, and `app_get_arg` gives it `arg`.
 - With `return_after`, the loader starts the caller again when the target quits, however it quits (its own exit, Menu held, the loader's close control), and also when the target fails to load. The caller then gets its resume argument from `app_get_arg`: what it last passed to `app_set_resume_arg`, else its own launch argument. Without `return_after` the target replaces the caller; if another app opened the caller with `return_after`, that app still comes back after the target.
 - At most two apps wait to be returned to. Opening an app without coming back always works (it replaces the running one). A launch from the menu, a button or a remote command gets an empty argument and forgets any apps waiting.
@@ -200,7 +200,7 @@ if (svc->file_mkdir && svc->file_stat && svc->file_rename && svc->file_remove) {
 
 ### Custom recipes
 
-`custom` mirrors the upstream `tools/build_<game>_papp.ps1` scripts. Every path is relative to the source checkout, and none may leave it. Example (trimmed from `apps/psram_quake/papp.json`):
+`custom` mirrors the upstream `tools/build_<game>_papp.ps1` scripts. Every path is relative to the source checkout, and none may leave it. Example (trimmed from our `apps/quake/papp.json`; its `source` paths point into the upstream checkout):
 
 ```json
 {
@@ -282,7 +282,7 @@ With ESP-IDF installed (it provides `riscv32-esp-elf-gcc`):
 ```sh
 . $IDF_PATH/export.sh
 python3 tools/build_papp.py              # all apps -> dist/
-python3 tools/build_papp.py psram_lvgl   # one app
+python3 tools/build_papp.py lvgl         # one app
 ```
 
 Or use the same container CI uses:

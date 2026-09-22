@@ -18,8 +18,8 @@ papp_loader:
 ```json
 {
   "device": "esp32-p4-elecrow-aio",
-  "app": "psram_lvgl-0.1.0.papp",
-  "source": "https://github.com/NonaSuomy/esphomebrew/releases/download/psram_lvgl-v0.1.0/psram_lvgl-0.1.0.papp",
+  "app": "lvgl-0.3.0.papp",
+  "source": "https://github.com/NonaSuomy/esphomebrew/releases/download/lvgl-v0.3.0/lvgl-0.3.0.papp",
   "outcome": "exited",
   "result": 0,
   "runtime_ms": 48213,

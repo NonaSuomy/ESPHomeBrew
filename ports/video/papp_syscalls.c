@@ -1,4 +1,4 @@
-// newlib glue for psram_video: heap, locks, clocks, logging and exit all go
+// newlib glue for video: heap, locks, clocks, logging and exit all go
 // through the loader's service table (papp_svc). Same approach as the NetSurf,
 // Tulip and OpenLara ports, plus aligned allocations (FFmpeg's av_malloc uses
 // posix_memalign) and a heap that several tasks on both cores share.

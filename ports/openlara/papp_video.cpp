@@ -18,7 +18,7 @@
 
 #include <string.h>
 
-// Largest first; the same sizes as "canvas" in apps/psram_openlara/papp.json.
+// Largest first; the same sizes as "canvas" in apps/openlara/papp.json.
 static const struct
 {
     int w, h;        // canvas

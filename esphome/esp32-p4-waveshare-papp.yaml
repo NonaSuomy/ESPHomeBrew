@@ -558,10 +558,10 @@ logger:
 
 button:
   - platform: template
-    name: "Remote Launch psram LVGL"
-    id: remote_launch_psram_lvgl
+    name: "Remote Launch LVGL"
+    id: remote_launch_lvgl
     on_press:
-      - lambda: id(papp_runtime)->request_launch("/sd/roms/papp/psram_lvgl.papp");
+      - lambda: id(papp_runtime)->request_launch("/sd/roms/papp/lvgl.papp");
   - platform: template
     name: "Remote Launch NES"
     id: remote_launch_nes

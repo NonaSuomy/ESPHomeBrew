@@ -1,5 +1,5 @@
 {
-  "name": "psram_lvgl",
+  "name": "lvgl",
   "title": "LVGL touch demo",
   "version": "0.3.0",
   "description": "LVGL 9.5 running as a PSRAM app: drawn at half the chosen canvas and scaled 2x (1024x600 or 800x480), GT911 touch, exit with the physical L3 button.",

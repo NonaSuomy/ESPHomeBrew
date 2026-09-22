@@ -1,5 +1,5 @@
 {
-  "name": "psram_tiberiandawn",
+  "name": "tiberiandawn",
   "title": "Tiberian Dawn",
   "version": "0.1.4",
   "description": "Command & Conquer: Tiberian Dawn (Vanilla Conquer) as a PAPP, with movies, music, touch, keyboard and mouse, and network multiplayer against PCs running Vanilla Conquer. Needs CONQUER.MIX and CCLOCAL.MIX in /sd/roms/tiberiandawn/, plus GENERAL.MIX in both the gdi/ and nod/ folders. Optional Covert Ops and CD media files are checked in their original folders.",

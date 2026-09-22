@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prebuild step for the NetSurf PAPP (apps/psram_netsurf/papp.json).
+"""Prebuild step for the NetSurf PAPP (apps/netsurf/papp.json).
 
 NetSurf and its libraries generate some sources with host tools before they
 compile. This does the same with the build machine's tools, inside the source

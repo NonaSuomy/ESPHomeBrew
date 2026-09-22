@@ -1,4 +1,4 @@
-// Drawing for psram_video's file list and overlay: filled and dimmed
+// Drawing for video's file list and overlay: filled and dimmed
 // rectangles and text in the VGA 8x16 ROM font that FFmpeg's libavutil
 // already carries (xga_font_data.c), scaled by whole pixels.
 #include "papp_port.h"

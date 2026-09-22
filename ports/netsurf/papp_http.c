@@ -151,7 +151,7 @@ static void ip_text(uint32_t ip, char *out, size_t len)
 static struct http_ctx *s_list = NULL;
 static bool s_polling = false;
 
-// ── Video and sound: psram_video ─────────────────────────────────────────────
+// ── Video and sound: video ───────────────────────────────────────────────────
 // A link to a video or sound file (by its extension, or a video/* or audio/*
 // answer) is handed to the video player with the loader's app_open, which
 // starts NetSurf again on the page the link was on when the player quits.
@@ -187,11 +187,11 @@ static bool hand_off(struct http_ctx *c)
     if (papp_svc->app_set_resume_arg != NULL) {
         papp_svc->app_set_resume_arg(page);
     }
-    if (papp_svc->app_open("psram_video", url, 1) != 0) {
+    if (papp_svc->app_open("video", url, 1) != 0) {
         papp_svc->log_printf("NETSURF: the video player is not installed or not in the library\n");
         return false;
     }
-    papp_svc->log_printf("NETSURF: playing a video or sound link in psram_video\n");
+    papp_svc->log_printf("NETSURF: playing a video or sound link in video\n");
     s_handed_off = true;
     papp_request_quit(0);
     return true;

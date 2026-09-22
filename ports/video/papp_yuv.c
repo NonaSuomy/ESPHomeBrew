@@ -1,4 +1,4 @@
-// YUV -> RGB565 for psram_video: FFmpeg's planar 8-bit pictures (4:2:0 from
+// YUV -> RGB565 for video: FFmpeg's planar 8-bit pictures (4:2:0 from
 // H.264, MPEG-4 and VP8; 4:2:2 and 4:4:4 from MJPEG; grey) into the RGB565
 // frames the loader's PPA scales onto the panel. Integer only, 8-bit
 // fixed-point coefficients, and the clamp-and-pack done with three small

@@ -1,5 +1,5 @@
 /* FreeType's build options for the NetSurf PAPP (FT_CONFIG_OPTIONS_H in
- * apps/psram_netsurf/papp.json): FreeType's defaults, minus what the port
+ * apps/netsurf/papp.json): FreeType's defaults, minus what the port
  * does not use. NetSurf draws TrueType outlines anti-aliased with the
  * smooth renderer and hints them with the autofitter; the fonts come from
  * memory (the DejaVu subsets compiled in) or from files on the card. */

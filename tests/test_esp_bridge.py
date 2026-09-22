@@ -193,8 +193,8 @@ class CommandTests(unittest.TestCase):
         self.assertEqual((code, len(out), truncated), (0, 100, True))
 
 
-STORE = "https://nonasuomy.github.io/esphomebrew/psram_lvgl-0.1.1.papp"
-RELEASE = "https://github.com/NonaSuomy/esphomebrew/releases/download/dev-builds/psram_redalert.papp"
+STORE = "https://nonasuomy.github.io/esphomebrew/lvgl-0.3.0.papp"
+RELEASE = "https://github.com/NonaSuomy/esphomebrew/releases/download/dev-builds/redalert.papp"
 
 
 def make_api_config(tmp: Path) -> eb.Config:
@@ -510,7 +510,7 @@ class CrashDecodeTests(unittest.TestCase):
         sym = b"4a0bbe68 T _fclose_r\n4a0e762c D _impure_data\n4a196fe8 B _bss_end\n"
 
         def opener(url, timeout=0):
-            self.assertTrue(url.endswith("/psram_redalert.sym"))
+            self.assertTrue(url.endswith("/redalert.sym"))
             return io.BytesIO(sym)
 
         seen = {}
@@ -521,7 +521,7 @@ class CrashDecodeTests(unittest.TestCase):
             return eb.subprocess.CompletedProcess(argv, 0, out, "")
 
         self.cfg.addr2line = "riscv32-esp-elf-addr2line"
-        url = "https://github.com/NonaSuomy/esphomebrew/releases/download/dev-builds/psram_redalert.papp"
+        url = "https://github.com/NonaSuomy/esphomebrew/releases/download/dev-builds/redalert.papp"
         with mock.patch.object(eb.subprocess, "run", fake_run):
             text = eb.decode_crash(self.cfg, PANIC.format(sha=self.sha), url, opener=opener)
         self.assertIn("0x4a0bbede  _fclose_r + 0x76", text)
@@ -563,7 +563,7 @@ class ProxyTests(unittest.TestCase):
             cfg.api_host, cfg.proxy_port = "127.0.0.1", 0  # any free port
             url = eb.proxy_url(cfg, RELEASE, opener=lambda u, timeout=None: io.BytesIO(papp))
             self.assertTrue(url.startswith("http://127.0.0.1:"), url)
-            self.assertTrue(url.endswith("-psram_redalert.papp"), url)
+            self.assertTrue(url.endswith("-redalert.papp"), url)
             with urllib.request.urlopen(url, timeout=5) as response:
                 self.assertEqual(response.read(), papp)
             with self.assertRaises(urllib.error.HTTPError):  # only the exact file, no listing

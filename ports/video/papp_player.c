@@ -1,4 +1,4 @@
-// psram_video's player: FFmpeg demuxing and decoding on the PAPP loader.
+// video's player: FFmpeg demuxing and decoding on the PAPP loader.
 //
 //   vdemux  opens the input (papp_io.c behind a custom AVIOContext), finds
 //           the streams, opens the decoders, then reads packets into two

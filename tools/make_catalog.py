@@ -4,7 +4,7 @@
 The ESPHome papp_loader reads `catalog_url` as HTML: every href ending in
 .papp becomes a button labelled with the link's file name, and relative links
 resolve against the catalog URL. Each app's .papp is copied into the site
-itself (e.g. psram_lvgl-0.1.0.papp) and linked relatively, so devices download
+itself (e.g. lvgl-0.3.0.papp) and linked relatively, so devices download
 from GitHub Pages. Pages uses Let's Encrypt (ISRG Root X1), which the ESP-IDF
 certificate bundle verifies; github.com release downloads chain to Sectigo's
 newer ECC root and fail verification on-device (seen on ESP-IDF 6.1). The
@@ -15,7 +15,7 @@ stays small and holds no other .papp links.
 Apps that need files on the card (a game's data) list them in papp.json under
 "data", pinned by commit, size and sha256. Those files are downloaded, checked
 and published under data/<app>/, and each such app gets a plain-text file list
-next to its .papp (psram_doom-0.1.0.papp -> psram_doom-0.1.0.files). The
+next to its .papp (doom-0.2.1.papp -> doom-0.2.1.files). The
 loader reads that list before launching and fetches whatever the card is
 missing. One line per file:
 

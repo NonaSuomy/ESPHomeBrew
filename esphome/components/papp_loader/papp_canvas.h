@@ -174,7 +174,7 @@ struct Geometry {
 
 // The per-app settings key: the file name without folders, query, ".papp" and
 // a "-<version>" suffix, so a store download (psram_tulip-0.1.0.papp), an
-// installed copy (/sd/roms/papp/psram_tulip.papp) and the listing's name
+// installed copy (/sd/roms/papp/tulip.papp) and the listing's name
 // (psram_tulip) agree.
 inline std::string app_key(const std::string &path) {
   std::string name = path.substr(0, path.find_first_of("?#"));

@@ -1,13 +1,13 @@
 {
   "name": "psram_lvgl",
   "title": "LVGL touch demo",
-  "version": "0.2.0",
-  "description": "LVGL v9 running as a PSRAM app: drawn at half the chosen canvas and scaled 2x (1024x600 or 800x480), GT911 touch, exit with the physical X button.",
+  "version": "0.3.0",
+  "description": "LVGL 9.5 running as a PSRAM app: drawn at half the chosen canvas and scaled 2x (1024x600 or 800x480), GT911 touch, exit with the physical L3 button.",
   "author": "LVGL; P4 port by giltal",
   "category": "Demo",
   "license": "MIT (LVGL)",
-  "about": "A small LVGL v9 app with touch widgets, drawn at half the canvas size and scaled 2x: 512x300 on the whole 1024x600 panel, or 400x240 on the classic 800x480 canvas (Screen setting). A quick way to check that the display, touch and the PAPP loader work.",
-  "changelog": "0.2.0: uses the canvas size from the store's Screen setting (whole panel by default); the layout grows with it\n0.1.1: rebuilt with the IDF 6.1 toolchain",
+  "about": "A small LVGL 9.5 app with touch widgets, drawn at half the canvas size and scaled 2x: 512x300 on the whole 1024x600 panel, or 400x240 on the classic 800x480 canvas (Screen setting). A quick way to check that the display, touch and the PAPP loader work.",
+  "changelog": "0.3.0: rebuilt for LVGL 9.5 with host-safe teardown and dedicated L3 exit\n0.2.0: uses the canvas size from the store's Screen setting (whole panel by default); the layout grows with it\n0.1.1: rebuilt with the IDF 6.1 toolchain",
   "controls": [
     "Touch: tap and drag the widgets",
     "Slider: sets the bar and dial",
@@ -17,10 +17,10 @@
   ],
   "upstream": {
     "project": "LVGL",
-    "version": "9.2.3-dev",
+    "version": "9.5.0",
     "url": "https://github.com/lvgl/lvgl"
   },
-  "icon": "icon.png",
+  "icon": "icon_platform.png",
   "canvas": {
     "sizes": [
       "1024x600",
@@ -31,15 +31,11 @@
   "build": "lvgl",
   "source": {
     "repo": "https://github.com/NonaSuomy/RetroESP32-P4",
-    "ref": "5c475e9df46c43463bd85c43f647d513d3b9bfa2",
+    "ref": "d0a449f9e2252881ab1ac297d05353f5bc58c046",
     "path": "apps/psram_lvgl"
   },
-  "patches": [
-    "local:ports/retroesp32/patches/*.patch",
-    "local:ports/lvgl/patches/*.patch"
-  ],
   "lvgl": {
     "repo": "https://github.com/lvgl/lvgl",
-    "ref": "933b2352bfec08b231e289546286aa0ef63d5ef8"
+    "ref": "85aa60d18b3d5e5588d7b247abf90198f07c8a63"
   }
 }
